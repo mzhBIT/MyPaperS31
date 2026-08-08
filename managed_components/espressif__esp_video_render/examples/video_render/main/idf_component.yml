@@ -1,0 +1,5 @@
+dependencies:
+  espressif/esp_board_manager: {}
+  espressif/esp_video_render: {}
+  espressif/gmf_core: {}
+  espressif/gmf_video: {}
