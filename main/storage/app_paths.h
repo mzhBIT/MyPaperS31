@@ -1,0 +1,17 @@
+#pragma once
+
+namespace app_paths {
+
+const char *data_dir();
+const char *recent_books_file();
+const char *reader_style_file();
+const char *reader_font_file();
+const char *txt_progress_dir();
+const char *epub_progress_dir();
+const char *epub_cache_dir();
+const char *rss_image_cache_dir();
+
+void ensure_data_dir();
+void ensure_dir(const char *path);
+
+} // namespace app_paths

@@ -64,6 +64,11 @@ menu "Audio Radio Configuration"
         int "Codec output sample rate"
         default 48000
 
+    config AUDIO_RADIO_I2C_PORT
+        int "ES8311 I2C port"
+        default 1 if IDF_TARGET_ESP32P4
+        default 0
+
     config AUDIO_RADIO_I2C_SDA_GPIO
         int "ES8311 I2C SDA GPIO"
         default 7

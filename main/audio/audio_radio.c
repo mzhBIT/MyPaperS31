@@ -28,7 +28,15 @@
 #define ES8311_CODEC_DEFAULT_ADDR 0x30
 #endif
 
-#define AUDIO_RADIO_I2C_PORT      I2C_NUM_0
+#ifndef CONFIG_AUDIO_RADIO_I2C_PORT
+#if CONFIG_IDF_TARGET_ESP32P4
+#define CONFIG_AUDIO_RADIO_I2C_PORT 1
+#else
+#define CONFIG_AUDIO_RADIO_I2C_PORT 0
+#endif
+#endif
+
+#define AUDIO_RADIO_I2C_PORT      ((i2c_port_t)CONFIG_AUDIO_RADIO_I2C_PORT)
 #define AUDIO_RADIO_I2S_PORT      I2S_NUM_0
 #define AUDIO_RADIO_BITS          16
 #define AUDIO_RADIO_CHANNELS      2
@@ -53,6 +61,16 @@ static esp_gmf_io_handle_t s_hls_io;
 static bool s_codec_opened;
 static bool s_media_adapter_ready;
 static bool s_recording;
+
+static esp_err_t audio_radio_set_pa(bool enable)
+{
+    gpio_num_t pa_gpio = (gpio_num_t)CONFIG_AUDIO_RADIO_PA_CTRL_GPIO;
+    ESP_RETURN_ON_ERROR(gpio_reset_pin(pa_gpio), TAG, "Failed to reset PA GPIO");
+    ESP_RETURN_ON_ERROR(gpio_set_direction(pa_gpio, GPIO_MODE_OUTPUT), TAG, "Failed to configure PA GPIO");
+    ESP_RETURN_ON_ERROR(gpio_set_level(pa_gpio, enable ? 1 : 0), TAG, "Failed to set PA GPIO");
+    ESP_LOGI(TAG, "PA %s", enable ? "enabled" : "disabled");
+    return ESP_OK;
+}
 
 static esp_err_t audio_radio_codec_ret_to_esp(int ret)
 {
@@ -245,8 +263,11 @@ static esp_err_t audio_radio_init_i2s(void)
 static esp_err_t audio_radio_init_codec(void)
 {
     if (s_codec_dev != NULL) {
+        ESP_RETURN_ON_ERROR(audio_radio_set_pa(true), TAG, "Failed to enable PA");
         return ESP_OK;
     }
+
+    ESP_RETURN_ON_ERROR(audio_radio_set_pa(false), TAG, "Failed to disable PA before codec init");
 
     audio_codec_i2s_cfg_t i2s_cfg = {
         .port = AUDIO_RADIO_I2S_PORT,
@@ -312,6 +333,8 @@ static esp_err_t audio_radio_init_codec(void)
     } else {
         ESP_RETURN_ON_ERROR(audio_radio_codec_ret_to_esp(mute_ret), TAG, "Failed to unmute input");
     }
+
+    ESP_RETURN_ON_ERROR(audio_radio_set_pa(true), TAG, "Failed to enable PA");
     return ESP_OK;
 }
 
@@ -487,11 +510,15 @@ void audio_radio_deinit(void)
 
     if (s_codec_dev != NULL) {
         if (s_codec_opened) {
+            esp_codec_dev_set_out_mute(s_codec_dev, true);
+            audio_radio_set_pa(false);
             esp_codec_dev_close(s_codec_dev);
             s_codec_opened = false;
         }
         esp_codec_dev_delete(s_codec_dev);
         s_codec_dev = NULL;
+    } else {
+        audio_radio_set_pa(false);
     }
 
     if (s_i2s_tx != NULL) {
