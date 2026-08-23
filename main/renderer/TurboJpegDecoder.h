@@ -2,8 +2,10 @@
 
 #include <cstdint>
 
-namespace m5gfx {
-class M5GFX;
+namespace lgfx {
+inline namespace v1 {
+class LGFXBase;
+}
 }
 
 namespace turbo_jpeg {
@@ -21,12 +23,14 @@ struct DrawStats {
     int64_t push_ms = 0;
     int64_t total_ms = 0;
     uint32_t memory_budget = 0;
+    uint32_t legacy_coefficient_bytes = 0;
+    uint32_t compact_coefficient_bytes = 0;
 };
 
 // Software JPEG fallback with progressive support. The decoder uses scaled
 // IDCT and scanline output, and caps libjpeg's memory manager so oversized
 // progressive coefficient buffers fail without exhausting PSRAM.
-bool draw_file(m5gfx::M5GFX &gfx,
+bool draw_file(lgfx::LGFXBase &gfx,
                const char *path,
                int x,
                int y,

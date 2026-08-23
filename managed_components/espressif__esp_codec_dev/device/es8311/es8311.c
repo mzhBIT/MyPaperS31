@@ -3,6 +3,7 @@
  *
  * SPDX-License-Identifier: Apache-2.0
  */
+#include <inttypes.h>
 #include <string.h>
 #include "es8311_codec.h"
 #include "es8311_reg.h"
@@ -340,9 +341,9 @@ static int es8311_set_mute(const audio_codec_if_t *h, bool mute)
     int ret = es8311_read_reg(codec, ES8311_DAC_REG31, &regv);
     regv &= 0x9f;
     if (mute) {
-        es8311_write_reg(codec, ES8311_DAC_REG31, regv | 0x60);
+        ret |= es8311_write_reg(codec, ES8311_DAC_REG31, regv | 0x60);
     } else {
-        es8311_write_reg(codec, ES8311_DAC_REG31, regv);
+        ret |= es8311_write_reg(codec, ES8311_DAC_REG31, regv);
     }
     return ret;
 }
@@ -611,9 +612,14 @@ static int es8311_set_fs(const audio_codec_if_t *h, esp_codec_dev_sample_info_t 
     if (codec == NULL || codec->is_open == false) {
         return ESP_CODEC_DEV_INVALID_ARG;
     }
-    es8311_set_bits_per_sample(codec, fs->bits_per_sample);
-    es8311_config_fmt(codec, ES_I2S_NORMAL);
-    es8311_config_sample(codec, fs->sample_rate);
+    int ret = es8311_set_bits_per_sample(codec, fs->bits_per_sample);
+    ret |= es8311_config_fmt(codec, ES_I2S_NORMAL);
+    ret |= es8311_config_sample(codec, fs->sample_rate);
+    if (ret != ESP_CODEC_DEV_OK) {
+        ESP_LOGE(TAG, "Failed to configure sample format: %" PRIu32 " Hz, %u bit",
+                 fs->sample_rate, fs->bits_per_sample);
+        return ESP_CODEC_DEV_WRITE_FAIL;
+    }
     return ESP_CODEC_DEV_OK;
 }
 
@@ -639,9 +645,19 @@ static int es8311_enable(const audio_codec_if_t *h, bool enable)
             return ESP_CODEC_DEV_WRITE_FAIL;
         }
         ret = es8311_start(codec);
+        if (ret != ESP_CODEC_DEV_OK) {
+            codec_ref_release(&ctrl_info, CODEC_REF_STAGE_ENABLE);
+            return ret;
+        }
         if (codec_mode == ESP_CODEC_DEV_WORK_MODE_DAC || codec_mode == ESP_CODEC_DEV_WORK_MODE_BOTH) {
             es8311_pa_power(codec, ES_PA_ENABLE);
-            es8311_set_mute(h, false);
+            ret = es8311_set_mute(h, false);
+            if (ret != ESP_CODEC_DEV_OK) {
+                es8311_pa_power(codec, ES_PA_DISABLE);
+                es8311_suspend(codec);
+                codec_ref_release(&ctrl_info, CODEC_REF_STAGE_ENABLE);
+                return ret;
+            }
         }
     } else {
         if (codec_mode == ESP_CODEC_DEV_WORK_MODE_DAC || codec_mode == ESP_CODEC_DEV_WORK_MODE_BOTH) {

@@ -3,6 +3,7 @@
 #include <esp_err.h>
 #include <esp_log.h>
 #include <esp_system.h>
+#include <esp_hosted.h>
 #include <driver/gpio.h>
 #include <nvs_flash.h>
 #include <M5Unified.h>
@@ -66,6 +67,18 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "Display init failed");
         esp_restart();
     }
+
+#if CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE
+    // ESP-Hosted is constructed before app_main(). Reserving its two large
+    // streaming buffers there changes the internal-memory placement of the
+    // EPD LUT and DMA buffers. Defer the reservation until the display has
+    // completed those latency-sensitive allocations.
+    esp_err_t hosted_rx_ret = esp_hosted_reserve_sdio_rx_buffers();
+    if (hosted_rx_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Deferred Hosted SDIO RX reservation failed: %s",
+                 esp_err_to_name(hosted_rx_ret));
+    }
+#endif
 
 #if MYPAPER_P4_EPD_DATA_AAAA_HOLD_TEST
     // Static continuity/level test at the panel connector.  No EPD refresh is
@@ -161,6 +174,6 @@ extern "C" void app_main(void)
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(30));
+        vTaskDelay(pdMS_TO_TICKS(20));
     }
 }

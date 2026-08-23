@@ -156,6 +156,12 @@ esp_err_t esp_hosted_slave_reset(void)
 	return esp_hosted_reconfigure();
 }
 
+esp_err_t esp_hosted_prepare_slave_power_down(void)
+{
+	ESP_LOGI(TAG, "ESP-Hosted prepare slave power down");
+	return transport_drv_prepare_slave_power_down();
+}
+
 esp_remote_channel_t esp_hosted_add_channel(esp_remote_channel_config_t config,
 		esp_remote_channel_tx_fn_t *tx, const esp_remote_channel_rx_fn_t rx)
 {

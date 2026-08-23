@@ -378,9 +378,13 @@ int hosted_sdio_card_init(void *ctx)
 	return ESP_OK;
 
 fail:
-	sdmmc_host_deinit();
+	/* The physical SD card uses SDMMC slot 0 while ESP-Hosted uses slot 1.
+	 * Do not tear down the global SDMMC host here: sdmmc_host_deinit()
+	 * deinitializes both slots and would invalidate an active /sdcard mount. */
+	sdmmc_host_deinit_slot(context->config.slot);
 	if (context->card) {
 		HOSTED_FREE(context->card);
+		context->card = NULL;
 	}
 	return ESP_FAIL;
 }

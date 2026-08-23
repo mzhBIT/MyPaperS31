@@ -9,6 +9,7 @@ const char *reader_font_file();
 const char *txt_progress_dir();
 const char *epub_progress_dir();
 const char *epub_cache_dir();
+const char *epub_metadata_dir();
 const char *rss_image_cache_dir();
 
 void ensure_data_dir();

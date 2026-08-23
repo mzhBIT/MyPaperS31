@@ -149,6 +149,8 @@ esp_codec_dev_handle_t esp_codec_dev_new(esp_codec_dev_cfg_t *cfg)
 int esp_codec_dev_open(esp_codec_dev_handle_t handle, esp_codec_dev_sample_info_t *fs)
 {
     codec_dev_t *dev = (codec_dev_t *)handle;
+    int ret = ESP_CODEC_DEV_OK;
+    bool data_enabled = false;
     if (dev == NULL || fs == NULL) {
         return ESP_CODEC_DEV_INVALID_ARG;
     }
@@ -178,22 +180,32 @@ int esp_codec_dev_open(esp_codec_dev_handle_t handle, esp_codec_dev_sample_info_
     const audio_codec_if_t *codec = dev->codec_if;
     const audio_codec_data_if_t *data_if = dev->data_if;
     if (data_if->set_fmt) {
-        data_if->set_fmt(data_if, dev->dev_caps, fs);
+        if (data_if->set_fmt(data_if, dev->dev_caps, fs) != ESP_CODEC_DEV_OK) {
+            ESP_LOGE(TAG, "Fail to configure codec data interface");
+            ret = ESP_CODEC_DEV_DRV_ERR;
+            goto open_failed;
+        }
     }
     if (data_if->enable) {
-        data_if->enable(data_if, dev->dev_caps, true);
+        if (data_if->enable(data_if, dev->dev_caps, true) != ESP_CODEC_DEV_OK) {
+            ESP_LOGE(TAG, "Fail to enable codec data interface");
+            ret = ESP_CODEC_DEV_DRV_ERR;
+            goto open_failed;
+        }
+        data_enabled = true;
     }
     if (codec) {
-        // TODO not set codec fs
         if (codec->set_fs) {
             if (codec->set_fs(codec, fs) != 0) {
-                return ESP_CODEC_DEV_NOT_SUPPORT;
+                ret = ESP_CODEC_DEV_NOT_SUPPORT;
+                goto open_failed;
             }
         }
         if (codec->enable) {
             if (codec->enable(codec, true) != ESP_CODEC_DEV_OK) {
                 ESP_LOGE(TAG, "Fail to enable codec");
-                return ESP_CODEC_DEV_DRV_ERR;
+                ret = ESP_CODEC_DEV_DRV_ERR;
+                goto open_failed;
             }
         }
     }
@@ -212,6 +224,13 @@ int esp_codec_dev_open(esp_codec_dev_handle_t handle, esp_codec_dev_sample_info_
     _update_codec_setting(dev);
     ESP_LOGI(TAG, "Open codec device OK");
     return ESP_CODEC_DEV_OK;
+
+open_failed:
+    if (data_enabled && data_if->enable) {
+        data_if->enable(data_if, dev->dev_caps, false);
+    }
+    dev->output_opened = dev->input_opened = false;
+    return ret;
 }
 
 int esp_codec_dev_read_reg(esp_codec_dev_handle_t handle, int reg, int *val)
@@ -552,6 +571,7 @@ int esp_codec_set_disable_when_closed(esp_codec_dev_handle_t handle, bool disabl
 int esp_codec_dev_close(esp_codec_dev_handle_t handle)
 {
     codec_dev_t *dev = (codec_dev_t *)handle;
+    int ret = ESP_CODEC_DEV_OK;
     if (dev == NULL) {
         return ESP_CODEC_DEV_INVALID_ARG;
     }
@@ -561,23 +581,28 @@ int esp_codec_dev_close(esp_codec_dev_handle_t handle)
     const audio_codec_if_t *codec = dev->codec_if;
     if (dev->disable_when_closed && codec) {
         if (codec->enable) {
-            codec->enable(codec, false);
+            if (codec->enable(codec, false) != ESP_CODEC_DEV_OK) {
+                ESP_LOGE(TAG, "Fail to disable codec");
+                ret = ESP_CODEC_DEV_DRV_ERR;
+            }
         }
     }
     const audio_codec_data_if_t *data_if = dev->data_if;
-    if (data_if->enable) {
+    if (ret == ESP_CODEC_DEV_OK && data_if->enable) {
         data_if->enable(data_if, dev->dev_caps, false);
     }
-    if (dev->sw_vol) {
+    if (ret == ESP_CODEC_DEV_OK && dev->sw_vol) {
         dev->sw_vol->close(dev->sw_vol);
     }
-    dev->output_opened = dev->input_opened = false;
+    if (ret == ESP_CODEC_DEV_OK) {
+        dev->output_opened = dev->input_opened = false;
+    }
 cleanup:
     if (dev->mirror) {
         codec_dev_mirror_deinit(dev->mirror);
         dev->mirror = NULL;
     }
-    return ESP_CODEC_DEV_OK;
+    return ret;
 }
 
 void esp_codec_dev_delete(esp_codec_dev_handle_t handle)

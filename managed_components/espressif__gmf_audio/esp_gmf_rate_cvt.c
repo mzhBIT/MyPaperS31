@@ -23,6 +23,7 @@
 typedef struct {
     esp_gmf_audio_element_t  parent;            /*!< The GMF rate cvt handle */
     esp_ae_rate_cvt_handle_t rate_hd;           /*!< The audio effects rate cvt handle */
+    uint32_t                 max_dest_rate;     /*!< Destination rate ceiling, zero when disabled */
     uint8_t                  bytes_per_sample;  /*!< Bytes number of per sampling point */
     bool                     need_reopen : 1;   /*!< Whether need to reopen.
                                                      True: Execute the close function first, then execute the open function
@@ -176,10 +177,24 @@ static esp_gmf_err_t rate_cvt_received_event_handler(esp_gmf_event_pkt_t *evt, v
     esp_ae_rate_cvt_cfg_t *config = (esp_ae_rate_cvt_cfg_t *)OBJ_GET_CFG(self);
     ESP_GMF_NULL_CHECK(TAG, config, return ESP_GMF_ERR_FAIL);
     esp_gmf_rate_cvt_t *rate_cvt = (esp_gmf_rate_cvt_t *)self;
-    rate_cvt->need_reopen = (config->src_rate != info->sample_rates) || (info->channels != config->channel) || (config->bits_per_sample != info->bits);
+    uint32_t dest_rate = config->dest_rate;
+    if (rate_cvt->max_dest_rate > 0 && info->sample_rates > 0) {
+        dest_rate = info->sample_rates > rate_cvt->max_dest_rate
+                        ? rate_cvt->max_dest_rate
+                        : info->sample_rates;
+    }
+    rate_cvt->need_reopen = (config->src_rate != info->sample_rates) ||
+                            (config->dest_rate != dest_rate) ||
+                            (info->channels != config->channel) ||
+                            (config->bits_per_sample != info->bits);
     config->src_rate = info->sample_rates;
+    config->dest_rate = dest_rate;
     config->channel = info->channels;
     config->bits_per_sample = info->bits;
+    if (rate_cvt->max_dest_rate > 0) {
+        ESP_LOGI(TAG, "Adaptive rate: source=%" PRIu32 " output=%" PRIu32 " cap=%" PRIu32,
+                 config->src_rate, config->dest_rate, rate_cvt->max_dest_rate);
+    }
     ESP_LOGD(TAG, "RECV element info, from: %s-%p, next: %p, self: %s-%p, type: %x, state: %s, rate: %d, ch: %d, bits: %d",
              OBJ_GET_TAG(el), el, esp_gmf_node_for_next((esp_gmf_node_t *)el), OBJ_GET_TAG(self), self, evt->type,
              esp_gmf_event_get_state_str(state), info->sample_rates, info->channels, info->bits);
@@ -247,6 +262,26 @@ esp_gmf_err_t esp_gmf_rate_cvt_set_dest_rate(esp_gmf_element_handle_t handle, ui
 __rate_set_dest_rate_exit:
     esp_gmf_oal_mutex_unlock(((esp_gmf_audio_element_t *)handle)->lock);
     return ret;
+}
+
+esp_gmf_err_t esp_gmf_rate_cvt_set_max_dest_rate(esp_gmf_element_handle_t handle, uint32_t max_rate)
+{
+    ESP_GMF_NULL_CHECK(TAG, handle, { return ESP_GMF_ERR_INVALID_ARG;});
+    if (max_rate == 0) {
+        return ESP_GMF_ERR_INVALID_ARG;
+    }
+    esp_ae_rate_cvt_cfg_t *cfg = (esp_ae_rate_cvt_cfg_t *)OBJ_GET_CFG(handle);
+    ESP_GMF_NULL_CHECK(TAG, cfg, return ESP_GMF_ERR_FAIL);
+    esp_gmf_rate_cvt_t *rate_cvt = (esp_gmf_rate_cvt_t *)handle;
+    esp_gmf_oal_mutex_lock(((esp_gmf_audio_element_t *)handle)->lock);
+    rate_cvt->max_dest_rate = max_rate;
+    uint32_t dest_rate = cfg->src_rate > max_rate ? max_rate : cfg->src_rate;
+    if (dest_rate > 0 && cfg->dest_rate != dest_rate) {
+        cfg->dest_rate = dest_rate;
+        rate_cvt->need_reopen = true;
+    }
+    esp_gmf_oal_mutex_unlock(((esp_gmf_audio_element_t *)handle)->lock);
+    return ESP_GMF_ERR_OK;
 }
 
 static esp_gmf_job_err_t esp_gmf_rate_cvt_reset(esp_gmf_element_handle_t handle, void *para)

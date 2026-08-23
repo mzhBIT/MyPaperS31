@@ -10,6 +10,7 @@
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -67,6 +68,7 @@ static void draw_content(int w, int h) {
     int max_y = h - style.margin_bottom;
     int line_h = renderer.lineHeight();
     if (line_h <= 0) line_h = 48;
+    const int justify_width = std::max(100, w - style.margin_left - style.margin_right);
 
     int64_t t0 = esp_timer_get_time();
     bool prepared = renderer.preparePage(text);
@@ -74,22 +76,31 @@ static void draw_content(int w, int h) {
         ESP_LOGW(TAG, "TTF preparePage reported missing glyphs or render errors");
     }
     int64_t t_prepare = esp_timer_get_time();
-    size_t start = 0;
     int line_count = 0;
     int char_count = 0;
-    while (start < text.size() && y < max_y) {
+    for (const auto &page_line : g_page.lines) {
+        if (y >= max_y) break;
         if ((line_count++ & 7) == 0) vTaskDelay(1);
 
-        size_t end = text.find('\n', start);
-        if (end == std::string::npos) end = text.size();
-        std::string line = text.substr(start, end - start);
-        start = end + 1;
+        const size_t start = page_line.text_offset;
+        const size_t length = page_line.text_length;
+        if (start > text.size() || length > text.size() - start) {
+            ESP_LOGW(TAG, "invalid TXT line range offset=%u length=%u text=%u",
+                     (unsigned)page_line.text_offset,
+                     (unsigned)page_line.text_length,
+                     (unsigned)text.size());
+            break;
+        }
+        std::string line = text.substr(start, length);
 
         if (!line.empty()) {
             char_count += line.size();
-            renderer.drawUtf8Line(M5.Display, line, x, y, TFT_BLACK);
+            renderer.drawUtf8Line(M5.Display, line, x + page_line.x_offset, y, TFT_BLACK,
+                                  page_line.justify
+                                      ? std::max(1, justify_width - (int)page_line.x_offset)
+                                      : 0);
         }
-        y += line_h;
+        y += page_line.height > 0 ? page_line.height : line_h;
     }
     int64_t t1 = esp_timer_get_time();
     auto stats = renderer.stats();

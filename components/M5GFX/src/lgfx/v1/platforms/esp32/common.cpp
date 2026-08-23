@@ -1025,15 +1025,32 @@ namespace lgfx
       cpp::result<state_t, error_t> state;
 
       SemaphoreHandle_t mtx = nullptr;
+      TaskHandle_t mtx_owner = nullptr;
 
-      void lock(uint32_t msec = portMAX_DELAY) {
+      bool lock(uint32_t ticks = portMAX_DELAY) {
         if (mtx == nullptr) {
           mtx = xSemaphoreCreateMutex();
         }
-        xSemaphoreTake(mtx, msec);
+        if (mtx == nullptr || xSemaphoreTake(mtx, ticks) != pdTRUE) {
+          return false;
+        }
+        mtx_owner = xTaskGetCurrentTaskHandle();
+        return true;
+      }
+
+      bool owned_by_current_task(void) const {
+        return mtx != nullptr && mtx_owner == xTaskGetCurrentTaskHandle();
       }
 
       void unlock(void) {
+        // i2c_wait() releases the transaction on an error.  Its caller may
+        // still reach endTransaction(), so never give a mutex which this task
+        // no longer owns; FreeRTOS treats that as a priority-inheritance
+        // invariant violation and asserts in xTaskPriorityDisinherit().
+        if (!owned_by_current_task()) {
+          return;
+        }
+        mtx_owner = nullptr;
         xSemaphoreGive(mtx);
       }
 
@@ -1618,7 +1635,9 @@ namespace lgfx
 //ESP_LOGI("LGFX", "i2c::beginTransaction : port:%d / addr:%02x / freq:%d / rw:%d", i2c_port, i2c_addr, freq, read);
 
       auto dev = getDev(i2c_port);
-      i2c_context[i2c_port].lock();
+      if (!i2c_context[i2c_port].lock()) {
+        return cpp::fail(error_t::unknown_err);
+      }
 
 #if defined ( CONFIG_IDF_TARGET_ESP32C3 ) ||  defined ( CONFIG_IDF_TARGET_ESP32S3 ) || defined ( CONFIG_IDF_TARGET_ESP32C6 ) || defined ( CONFIG_IDF_TARGET_ESP32P4 ) || defined ( CONFIG_IDF_TARGET_ESP32H2 )
       if (dev->sr.bus_busy)
@@ -1686,6 +1705,12 @@ namespace lgfx
     cpp::result<void, error_t> endTransaction(int i2c_port)
     {
       if (i2c_port >= I2C_NUM_MAX) return cpp::fail(error_t::invalid_arg);
+      // An earlier i2c_wait() error may already have stopped the peripheral
+      // and released the mutex.  Do not touch registers belonging to a new
+      // transaction that another task may have started in the meantime.
+      if (!i2c_context[i2c_port].owned_by_current_task()) {
+        return cpp::fail(error_t::connection_lost);
+      }
       return i2c_wait(i2c_port, true);
     }
 //*/

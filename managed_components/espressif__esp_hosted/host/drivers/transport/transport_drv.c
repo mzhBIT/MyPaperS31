@@ -118,6 +118,18 @@ esp_err_t transport_drv_init(void(*esp_hosted_up_cb)(void))
 	return ESP_OK;
 }
 
+esp_err_t transport_drv_prepare_slave_power_down(void)
+{
+	/* Reject all new RPC/data traffic before the C6 reset line is lowered. */
+	transport_state = TRANSPORT_INACTIVE;
+	wifi_tx_throttling = 1;
+#if CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE
+	return transport_prepare_slave_power_down_internal();
+#else
+	return ESP_OK;
+#endif
+}
+
 esp_err_t transport_drv_reconfigure(void)
 {
 	static int retry_slave_connection = 0;
@@ -126,6 +138,10 @@ esp_err_t transport_drv_reconfigure(void)
 	if (!is_transport_tx_ready()) {
 		reset_slave();
 		transport_state = TRANSPORT_RX_ACTIVE;
+#if CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE
+		ESP_RETURN_ON_ERROR(transport_resume_slave_internal(), TAG,
+			"Failed to resume SDIO after slave power cycle");
+#endif
 
 		while (!is_transport_tx_ready()) {
 			if (retry_slave_connection < MAX_RETRY_TRANSPORT_ACTIVE) {
@@ -144,6 +160,7 @@ esp_err_t transport_drv_reconfigure(void)
 		ESP_LOGI(TAG, "Transport is already up");
 	}
 	retry_slave_connection = 0;
+	wifi_tx_throttling = 0;
 	return ESP_OK;
 }
 

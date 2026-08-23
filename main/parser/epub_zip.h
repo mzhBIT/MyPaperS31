@@ -27,6 +27,9 @@ private:
     std::unordered_map<std::string, Entry> _entries;
 
     bool load_central_directory(FILE *fp);
+    bool load_index_cache(const char *source_path);
+    void save_index_cache(const char *source_path) const;
     bool read_entry_data_offset(FILE *fp, const Entry &entry, uint32_t *offset);
+    static std::string index_cache_path(const char *source_path);
     static std::string normalize_path(const std::string &path);
 };

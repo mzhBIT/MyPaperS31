@@ -6,6 +6,7 @@
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_event.h"
+#include "esp_hosted.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
@@ -17,10 +18,14 @@
 
 #define WIFI_SETTING_C6_EN_GPIO        GPIO_NUM_54
 #define WIFI_SETTING_C6_BOOT_DELAY_MS  1000
+#define WIFI_SETTING_C6_OFF_SETTLE_MS  500
 #define WIFI_SETTING_MAX_AP_COUNT      16
 #define WIFI_SETTING_CONNECTED_BIT     BIT0
 #define WIFI_SETTING_FAIL_BIT          BIT1
+#define WIFI_SETTING_STARTED_BIT       BIT2
+#define WIFI_SETTING_STOPPED_BIT       BIT3
 #define WIFI_SETTING_MAX_RETRY         5
+#define WIFI_SETTING_STATE_TIMEOUT_MS  2000
 
 static const char *TAG = "wifi_setting";
 
@@ -30,9 +35,14 @@ static bool s_wifi_initialized;
 static bool s_wifi_started;
 static bool s_c6_powered_on;
 static bool s_connect_handlers_registered;
+static bool s_stopping;
+static bool s_connected;
 static int s_retry_num;
+static char s_connected_ssid[33];
 static esp_netif_t *s_sta_netif;
 static EventGroupHandle_t s_wifi_event_group;
+static esp_event_handler_instance_t s_wifi_event_handler_instance;
+static esp_event_handler_instance_t s_ip_event_handler_instance;
 
 static void wifi_setting_connect_event_handler(void *arg,
                                                esp_event_base_t event_base,
@@ -42,7 +52,20 @@ static void wifi_setting_connect_event_handler(void *arg,
     (void) arg;
     (void) event_data;
 
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        if (s_wifi_event_group != NULL) {
+            xEventGroupSetBits(s_wifi_event_group, WIFI_SETTING_STARTED_BIT);
+        }
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_STOP) {
+        if (s_wifi_event_group != NULL) {
+            xEventGroupSetBits(s_wifi_event_group, WIFI_SETTING_STOPPED_BIT);
+        }
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        s_connected = false;
+        if (s_stopping) {
+            ESP_LOGI(TAG, "Wi-Fi disconnected during shutdown; reconnect suppressed");
+            return;
+        }
         if (s_retry_num < WIFI_SETTING_MAX_RETRY) {
             esp_wifi_connect();
             s_retry_num++;
@@ -54,6 +77,7 @@ static void wifi_setting_connect_event_handler(void *arg,
         ip_event_got_ip_t *event = (ip_event_got_ip_t *) event_data;
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
+        s_connected = true;
         if (s_wifi_event_group != NULL) {
             xEventGroupSetBits(s_wifi_event_group, WIFI_SETTING_CONNECTED_BIT);
         }
@@ -68,6 +92,38 @@ static esp_err_t wifi_setting_init_nvs(void)
         ret = nvs_flash_init();
     }
     return ret;
+}
+
+static esp_err_t wifi_setting_init_events(void)
+{
+    if (s_wifi_event_group == NULL) {
+        s_wifi_event_group = xEventGroupCreate();
+        ESP_RETURN_ON_FALSE(s_wifi_event_group != NULL, ESP_ERR_NO_MEM,
+                            TAG, "Failed to create Wi-Fi event group");
+    }
+
+    if (!s_connect_handlers_registered) {
+        esp_err_t ret = esp_event_handler_instance_register(WIFI_EVENT,
+                                                            ESP_EVENT_ANY_ID,
+                                                            wifi_setting_connect_event_handler,
+                                                            NULL,
+                                                            &s_wifi_event_handler_instance);
+        ESP_RETURN_ON_ERROR(ret, TAG, "Failed to register Wi-Fi event handler");
+        ret = esp_event_handler_instance_register(IP_EVENT,
+                                                  IP_EVENT_STA_GOT_IP,
+                                                  wifi_setting_connect_event_handler,
+                                                  NULL,
+                                                  &s_ip_event_handler_instance);
+        if (ret != ESP_OK) {
+            esp_event_handler_instance_unregister(WIFI_EVENT,
+                                                  ESP_EVENT_ANY_ID,
+                                                  s_wifi_event_handler_instance);
+            s_wifi_event_handler_instance = NULL;
+            ESP_RETURN_ON_ERROR(ret, TAG, "Failed to register Wi-Fi got-ip handler");
+        }
+        s_connect_handlers_registered = true;
+    }
+    return ESP_OK;
 }
 
 esp_err_t wifi_setting_c6_power_on(void)
@@ -100,6 +156,7 @@ esp_err_t wifi_setting_c6_power_off(void)
 
 esp_err_t wifi_setting_init(void)
 {
+    s_stopping = false;
     if (s_wifi_started) {
         return ESP_OK;
     }
@@ -126,6 +183,10 @@ esp_err_t wifi_setting_init(void)
         ESP_RETURN_ON_FALSE(s_sta_netif != NULL, ESP_FAIL, TAG, "Failed to create default Wi-Fi STA netif");
     }
 
+    // Register after the default netif handlers so STARTED/STOPPED bits mean
+    // lwIP has already completed the corresponding add/remove operation.
+    ESP_RETURN_ON_ERROR(wifi_setting_init_events(), TAG, "Failed to initialize Wi-Fi events");
+
     if (!s_wifi_initialized) {
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
         ESP_RETURN_ON_ERROR(esp_wifi_init(&cfg), TAG, "Failed to initialize Wi-Fi");
@@ -134,8 +195,23 @@ esp_err_t wifi_setting_init(void)
 
     ESP_RETURN_ON_ERROR(esp_wifi_set_storage(WIFI_STORAGE_RAM), TAG, "Failed to set Wi-Fi storage");
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "Failed to set Wi-Fi STA mode");
+    if (s_wifi_event_group != NULL) {
+        xEventGroupClearBits(s_wifi_event_group,
+                             WIFI_SETTING_STARTED_BIT | WIFI_SETTING_STOPPED_BIT);
+    }
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "Failed to start Wi-Fi");
     s_wifi_started = true;
+
+    if (s_wifi_event_group != NULL) {
+        EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+                                               WIFI_SETTING_STARTED_BIT,
+                                               pdFALSE,
+                                               pdTRUE,
+                                               pdMS_TO_TICKS(WIFI_SETTING_STATE_TIMEOUT_MS));
+        if (!(bits & WIFI_SETTING_STARTED_BIT)) {
+            ESP_LOGW(TAG, "Timed out waiting for Wi-Fi STA start event");
+        }
+    }
 
     /*
      * Keep the official station example flow: the hosted remote Wi-Fi layer
@@ -190,27 +266,13 @@ esp_err_t wifi_setting_connect(const char *ssid, const char *password, int timeo
     ESP_RETURN_ON_FALSE(ssid != NULL && ssid[0] != '\0', ESP_ERR_INVALID_ARG, TAG, "Wi-Fi SSID is empty");
     ESP_RETURN_ON_ERROR(wifi_setting_init(), TAG, "Failed to initialize Wi-Fi");
 
-    if (s_wifi_event_group == NULL) {
-        s_wifi_event_group = xEventGroupCreate();
-        ESP_RETURN_ON_FALSE(s_wifi_event_group != NULL, ESP_ERR_NO_MEM, TAG, "Failed to create Wi-Fi event group");
-    }
-
-    if (!s_connect_handlers_registered) {
-        ESP_RETURN_ON_ERROR(esp_event_handler_instance_register(WIFI_EVENT,
-                                                               WIFI_EVENT_STA_DISCONNECTED,
-                                                               wifi_setting_connect_event_handler,
-                                                               NULL,
-                                                               NULL),
-                            TAG,
-                            "Failed to register Wi-Fi disconnect handler");
-        ESP_RETURN_ON_ERROR(esp_event_handler_instance_register(IP_EVENT,
-                                                               IP_EVENT_STA_GOT_IP,
-                                                               wifi_setting_connect_event_handler,
-                                                               NULL,
-                                                               NULL),
-                            TAG,
-                            "Failed to register Wi-Fi got-ip handler");
-        s_connect_handlers_registered = true;
+    esp_netif_ip_info_t ip_info = {0};
+    if (s_connected && strcmp(s_connected_ssid, ssid) == 0 &&
+        s_sta_netif != NULL && esp_netif_is_netif_up(s_sta_netif) &&
+        esp_netif_get_ip_info(s_sta_netif, &ip_info) == ESP_OK && ip_info.ip.addr != 0) {
+        ESP_LOGI(TAG, "Reusing Wi-Fi connection SSID=%s IP=" IPSTR,
+                 ssid, IP2STR(&ip_info.ip));
+        return ESP_OK;
     }
 
     wifi_config_t wifi_config = {0};
@@ -236,6 +298,7 @@ esp_err_t wifi_setting_connect(const char *ssid, const char *password, int timeo
                                            pdMS_TO_TICKS(timeout_ms));
 
     if (bits & WIFI_SETTING_CONNECTED_BIT) {
+        strlcpy(s_connected_ssid, ssid, sizeof(s_connected_ssid));
         ESP_LOGI(TAG, "Connected to Wi-Fi SSID: %s", ssid);
         return ESP_OK;
     }
@@ -252,21 +315,84 @@ esp_err_t wifi_setting_connect(const char *ssid, const char *password, int timeo
 esp_err_t wifi_setting_deinit(bool power_down_c6)
 {
     esp_err_t first_error = ESP_OK;
+    s_stopping = true;
 
     if (s_wifi_started) {
+        if (s_wifi_event_group != NULL) {
+            xEventGroupClearBits(s_wifi_event_group, WIFI_SETTING_STOPPED_BIT);
+        }
         esp_err_t ret = esp_wifi_stop();
-        if (ret != ESP_OK && first_error == ESP_OK) {
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to stop Wi-Fi: %s", esp_err_to_name(ret));
             first_error = ret;
+            if (!power_down_c6) {
+                return ret;
+            }
+            if (s_sta_netif != NULL) {
+                esp_netif_action_stop(s_sta_netif, NULL, 0, NULL);
+            }
+        } else if (s_wifi_event_group != NULL) {
+            EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+                                                   WIFI_SETTING_STOPPED_BIT,
+                                                   pdFALSE,
+                                                   pdTRUE,
+                                                   pdMS_TO_TICKS(WIFI_SETTING_STATE_TIMEOUT_MS));
+            if (!(bits & WIFI_SETTING_STOPPED_BIT)) {
+                ESP_LOGW(TAG, "Timed out waiting for Wi-Fi STA stop event; forcing netif stop");
+                first_error = ESP_ERR_TIMEOUT;
+                if (s_sta_netif != NULL) {
+                    esp_netif_action_stop(s_sta_netif, NULL, 0, NULL);
+                }
+            }
         }
         s_wifi_started = false;
     }
 
     if (s_wifi_initialized) {
         esp_err_t ret = esp_wifi_deinit();
-        if (ret != ESP_OK && first_error == ESP_OK) {
-            first_error = ret;
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to deinitialize Wi-Fi: %s", esp_err_to_name(ret));
+            if (first_error == ESP_OK) {
+                first_error = ret;
+            }
+            if (!power_down_c6) {
+                return ret;
+            }
         }
         s_wifi_initialized = false;
+    }
+
+    s_connected = false;
+    s_connected_ssid[0] = '\0';
+
+    if (power_down_c6) {
+        esp_err_t hosted_ret = esp_hosted_prepare_slave_power_down();
+        if (hosted_ret != ESP_OK && first_error == ESP_OK) {
+            first_error = hosted_ret;
+        }
+        esp_err_t ret = wifi_setting_c6_power_off();
+        if (ret != ESP_OK && first_error == ESP_OK) {
+            first_error = ret;
+        } else if (ret == ESP_OK) {
+            /*
+             * ESP-Hosted delivers Wi-Fi events from the C6 asynchronously.
+             * Keep the slave powered down long enough for queued events to be
+             * discarded before another activity is allowed to boot it again.
+             */
+            vTaskDelay(pdMS_TO_TICKS(WIFI_SETTING_C6_OFF_SETTLE_MS));
+        }
+    }
+
+    if (s_connect_handlers_registered) {
+        esp_event_handler_instance_unregister(WIFI_EVENT,
+                                              ESP_EVENT_ANY_ID,
+                                              s_wifi_event_handler_instance);
+        esp_event_handler_instance_unregister(IP_EVENT,
+                                              IP_EVENT_STA_GOT_IP,
+                                              s_ip_event_handler_instance);
+        s_wifi_event_handler_instance = NULL;
+        s_ip_event_handler_instance = NULL;
+        s_connect_handlers_registered = false;
     }
 
     if (s_sta_netif != NULL) {
@@ -275,10 +401,7 @@ esp_err_t wifi_setting_deinit(bool power_down_c6)
     }
 
     if (power_down_c6) {
-        esp_err_t ret = wifi_setting_c6_power_off();
-        if (ret != ESP_OK && first_error == ESP_OK) {
-            first_error = ret;
-        }
+        ESP_LOGI(TAG, "Wi-Fi fully shut down; C6 power is off");
     }
 
     return first_error;

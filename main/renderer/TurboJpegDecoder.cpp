@@ -59,9 +59,69 @@ static int choose_scale_denom(j_decompress_ptr cinfo, int target_width, int targ
     return 1;
 }
 
+static uint32_t clamp_u32(size_t value)
+{
+    return value > UINT32_MAX ? UINT32_MAX : (uint32_t)value;
+}
+
+static void estimate_progressive_coefficients(j_decompress_ptr cinfo,
+                                              const char *path,
+                                              int scale_denom,
+                                              DrawStats *stats)
+{
+    if (!cinfo || !stats || !cinfo->progressive_mode) return;
+
+    const bool grayscale_y_only = cinfo->out_color_space == JCS_GRAYSCALE &&
+                                 (cinfo->jpeg_color_space == JCS_GRAYSCALE ||
+                                  cinfo->jpeg_color_space == JCS_YCbCr);
+    const int keep_size = std::max(1, DCTSIZE / std::max(1, scale_denom));
+    size_t legacy_bytes = 0;
+    size_t compact_bytes = 0;
+
+    for (int ci = 0; ci < cinfo->num_components; ++ci) {
+        const jpeg_component_info &component = cinfo->comp_info[ci];
+        const size_t blocks_per_row = (component.width_in_blocks +
+                                       component.h_samp_factor - 1) /
+                                      component.h_samp_factor *
+                                      component.h_samp_factor;
+        const size_t block_rows = (component.height_in_blocks +
+                                   component.v_samp_factor - 1) /
+                                  component.v_samp_factor *
+                                  component.v_samp_factor;
+        const size_t block_count = blocks_per_row * block_rows;
+        legacy_bytes += block_count * sizeof(JBLOCK);
+
+        const bool needed = !grayscale_y_only || ci == 0;
+        if (!needed) {
+            compact_bytes += block_count * sizeof(uint64_t);
+        } else if (keep_size < DCTSIZE) {
+            compact_bytes += block_count *
+                             (sizeof(uint64_t) +
+                              (size_t)keep_size * keep_size * sizeof(JCOEF));
+        } else {
+            compact_bytes += block_count * sizeof(JBLOCK);
+        }
+    }
+
+    stats->legacy_coefficient_bytes = clamp_u32(legacy_bytes);
+    stats->compact_coefficient_bytes = clamp_u32(compact_bytes);
+    ESP_LOGI(TAG,
+             "progressive compact path=%s src=%ux%u denom=%d coefficients=%u->%u bytes saved=%u budget=%u",
+             path ? path : "",
+             (unsigned)cinfo->image_width,
+             (unsigned)cinfo->image_height,
+             scale_denom,
+             (unsigned)stats->legacy_coefficient_bytes,
+             (unsigned)stats->compact_coefficient_bytes,
+             (unsigned)(stats->legacy_coefficient_bytes >= stats->compact_coefficient_bytes
+                          ? stats->legacy_coefficient_bytes - stats->compact_coefficient_bytes
+                          : 0),
+             (unsigned)stats->memory_budget);
+}
+
 } // namespace
 
-bool draw_file(m5gfx::M5GFX &gfx,
+bool draw_file(lgfx::LGFXBase &gfx,
                const char *path,
                int x,
                int y,
@@ -128,6 +188,8 @@ bool draw_file(m5gfx::M5GFX &gfx,
     local_stats.scale_denom = choose_scale_denom(&cinfo, box_width, box_height);
     cinfo.scale_num = 1;
     cinfo.scale_denom = (unsigned)local_stats.scale_denom;
+    estimate_progressive_coefficients(&cinfo, path, local_stats.scale_denom,
+                                      &local_stats);
 
     {
         const int64_t decode_start = esp_timer_get_time();

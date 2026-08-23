@@ -53,6 +53,7 @@ private:
     std::string _cover_image_href;
     EpubZip _zip;
     std::unordered_map<std::string, EpubManifestItem> _manifest_by_id;
+    std::unordered_map<std::string, int> _spine_index_by_href;
     std::vector<EpubSpineItem> _spine;
     std::vector<EpubTocItem> _toc;
 
@@ -61,6 +62,10 @@ private:
     void load_toc();
     bool parse_ncx_toc(const std::string &xml, const std::string &toc_path);
     bool parse_nav_toc(const std::string &xhtml, const std::string &toc_path);
+    bool load_metadata_cache(const char *source_path);
+    void save_metadata_cache(const char *source_path) const;
+    static std::string metadata_cache_path(const char *source_path);
     std::string resolve_from_opf(const std::string &href) const;
+    void rebuild_spine_index();
     int spine_index_for_href(const std::string &href) const;
 };

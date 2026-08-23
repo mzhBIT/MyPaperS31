@@ -50,6 +50,22 @@ esp_gmf_err_t esp_gmf_rate_cvt_init(esp_ae_rate_cvt_cfg_t *config, esp_gmf_eleme
  */
 esp_gmf_err_t esp_gmf_rate_cvt_set_dest_rate(esp_gmf_element_handle_t handle, uint32_t dest_rate);
 
+/**
+ * @brief  Use the destination rate as an upper limit
+ *
+ * Audio at or below the limit keeps its source rate. Audio above the limit is
+ * converted down to the limit. Call this before the element starts running.
+ *
+ * @param[in]  handle    Rate conversion element handle
+ * @param[in]  max_rate  Maximum destination sample rate
+ *
+ * @return
+ *       - ESP_GMF_ERR_OK           Operation succeeded
+ *       - ESP_GMF_ERR_INVALID_ARG  Invalid input parameter
+ *       - ESP_GMF_ERR_FAIL         Failed to set configuration
+ */
+esp_gmf_err_t esp_gmf_rate_cvt_set_max_dest_rate(esp_gmf_element_handle_t handle, uint32_t max_rate);
+
 #ifdef __cplusplus
 }
 #endif /* __cplusplus */

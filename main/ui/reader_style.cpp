@@ -9,7 +9,19 @@
 
 static const char *TAG = "READER_STYLE";
 static const char *NVS_NS = "reader_style";
-static const char *NVS_KEY = "style_v1";
+static const char *NVS_KEY = "style_v2";
+static const char *NVS_KEY_V1 = "style_v1";
+
+struct ReaderStyleV1 {
+    int font_size;
+    int line_spacing;
+    int margin_left;
+    int margin_right;
+    int margin_top;
+    int margin_bottom;
+    int refresh_mode;
+    int show_images;
+};
 
 static ReaderStyle s_style;
 
@@ -34,6 +46,8 @@ static bool load_style_from_sd(ReaderStyle *out)
         else if (strcmp(key, "margin_bottom") == 0) style.margin_bottom = val;
         else if (strcmp(key, "refresh_mode") == 0) style.refresh_mode = val;
         else if (strcmp(key, "show_images") == 0) style.show_images = val;
+        else if (strcmp(key, "first_line_indent") == 0) style.first_line_indent = val;
+        else if (strcmp(key, "paragraph_spacing") == 0) style.paragraph_spacing = val;
     }
     fclose(fp);
 
@@ -51,9 +65,28 @@ static bool load_style_from_nvs(ReaderStyle *out)
 
     ReaderStyle style = {};
     size_t len = sizeof(style);
+    bool loaded = false;
     err = nvs_get_blob(h, NVS_KEY, &style, &len);
+    loaded = err == ESP_OK && len == sizeof(style);
+    if (!loaded) {
+        ReaderStyleV1 legacy = {};
+        len = sizeof(legacy);
+        err = nvs_get_blob(h, NVS_KEY_V1, &legacy, &len);
+        if (err == ESP_OK && len == sizeof(legacy)) {
+            style = ReaderStyle();
+            style.font_size = legacy.font_size;
+            style.line_spacing = legacy.line_spacing;
+            style.margin_left = legacy.margin_left;
+            style.margin_right = legacy.margin_right;
+            style.margin_top = legacy.margin_top;
+            style.margin_bottom = legacy.margin_bottom;
+            style.refresh_mode = legacy.refresh_mode;
+            style.show_images = legacy.show_images;
+            loaded = true;
+        }
+    }
     nvs_close(h);
-    if (err != ESP_OK || len != sizeof(style)) return false;
+    if (!loaded) return false;
 
     *out = reader_style_clamp(style);
     return true;
@@ -69,6 +102,8 @@ ReaderStyle reader_style_clamp(ReaderStyle style)
     style.margin_bottom = std::min(80, std::max(0, style.margin_bottom));
     style.refresh_mode = std::min(4, std::max(1, style.refresh_mode));
     style.show_images = style.show_images ? 1 : 0;
+    style.first_line_indent = std::min(4, std::max(0, style.first_line_indent));
+    style.paragraph_spacing = std::min(2, std::max(0, style.paragraph_spacing));
     return style;
 }
 
@@ -93,9 +128,11 @@ void reader_style_init()
     s_style = reader_style_clamp(ReaderStyle());
 
     if (load_style_from_nvs(&s_style)) {
-        ESP_LOGI(TAG, "loaded style from NVS size=%d line=%d margins=%d,%d,%d,%d refresh=%s",
+        ESP_LOGI(TAG, "loaded style from NVS size=%d line=%d indent=%d paragraph=%d margins=%d,%d,%d,%d refresh=%s",
                  s_style.font_size,
                  s_style.line_spacing,
+                 s_style.first_line_indent,
+                 s_style.paragraph_spacing,
                  s_style.margin_left,
                  s_style.margin_right,
                  s_style.margin_top,

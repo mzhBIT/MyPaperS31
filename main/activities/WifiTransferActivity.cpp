@@ -1,6 +1,7 @@
 #include "activities/WifiTransferActivity.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "audio/audio_file_formats.h"
 #include "storage/storage_sdcard.h"
 #include "ui/SystemFont.h"
 #include "wifi/wifi_setting.h"
@@ -43,32 +44,28 @@ static const size_t UPLOAD_LOG_INTERVAL_BYTES = 1024 * 1024;
 static const char INDEX_HTML[] =
     "<!doctype html><html><head><meta charset='utf-8'>"
     "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<title>MyPaperS3 Transfer</title>"
+    "<title>MyPaperP4 Transfer</title>"
     "<style>"
     "body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:24px;max-width:720px;color:#111}"
     "h1{font-size:26px;margin:0 0 16px}.box{border:1px solid #bbb;padding:16px;margin:14px 0}"
-    "label{display:block;margin:12px 0 6px;font-weight:600}select,input,button{font-size:16px;width:100%;box-sizing:border-box}"
+    "label{display:block;margin:12px 0 6px;font-weight:600}input,button{font-size:16px;width:100%;box-sizing:border-box}"
     "button{margin-top:14px;padding:12px;background:#111;color:white;border:0}.muted{color:#666;font-size:14px}"
     "progress{width:100%;height:18px}pre{white-space:pre-wrap;background:#f3f3f3;padding:12px}"
     "</style></head><body>"
-    "<h1>MyPaperS3 WiFi Transfer</h1>"
+    "<h1>MyPaperP4 WiFi Transfer</h1>"
     "<div class='box'>"
-    "<div class='muted'>Upload books, images, and fonts to the SD card.</div>"
-    "<label>Target</label><select id='target'>"
-    "<option value='books'>Books: /sdcard/books (.txt .epub)</option>"
-    "<option value='images'>Images: /sdcard/images (.bmp .png .jpg .jpeg)</option>"
-    "<option value='fonts'>Fonts: /sdcard/fonts (.ttf .otf .bin)</option>"
-    "</select>"
-    "<label>Files</label><input id='files' type='file' multiple>"
+    "<div class='muted'>Choose any supported files. They will be sorted into books, images, fonts, or music automatically.</div>"
+    "<label>Files</label><input id='files' type='file' multiple "
+    "accept='.txt,.epub,.bmp,.png,.jpg,.jpeg,.ttf,.otf,.bin," AUDIO_FILE_ACCEPT_EXTENSIONS "'>"
     "<button onclick='upload()'>Upload</button>"
     "<p><progress id='bar' value='0' max='100'></progress></p>"
     "<pre id='log'>Ready.</pre>"
     "</div>"
     "<script>"
     "const log=t=>document.getElementById('log').textContent=t;"
-    "function sendFile(target,f,onp){return new Promise((resolve)=>{"
+    "function sendFile(f,onp){return new Promise((resolve)=>{"
     " const xhr=new XMLHttpRequest();"
-    " xhr.open('POST','/upload?target='+encodeURIComponent(target)+'&name='+encodeURIComponent(f.name));"
+    " xhr.open('POST','/upload?name='+encodeURIComponent(f.name));"
     " xhr.upload.onprogress=e=>{if(e.lengthComputable)onp(e.loaded,e.total);};"
     " xhr.onload=()=>resolve({ok:xhr.status>=200&&xhr.status<300,text:xhr.responseText,status:xhr.status});"
     " xhr.onerror=()=>resolve({ok:false,text:'Network error',status:0});"
@@ -76,14 +73,13 @@ static const char INDEX_HTML[] =
     "});}"
     "async function upload(){"
     " const files=[...document.getElementById('files').files];"
-    " const target=document.getElementById('target').value;"
     " const bar=document.getElementById('bar');"
     " if(!files.length){log('Choose at least one file.');return;}"
     " let out='';"
     " for(let i=0;i<files.length;i++){"
     "  const f=files[i]; bar.value=Math.round(i*100/files.length);"
     "  out+='Uploading '+f.name+'...\\n'; log(out);"
-    "  const r=await sendFile(target,f,(loaded,total)=>{"
+    "  const r=await sendFile(f,(loaded,total)=>{"
     "   const filePct=total?loaded/total:0;"
     "   bar.value=Math.round(((i+filePct)*100)/files.length);"
     "   log(out+'Progress '+Math.round(filePct*100)+'% ('+loaded+'/'+total+')');"
@@ -269,23 +265,23 @@ static bool load_wifi_config(std::string *ssid, std::string *password)
     return !ssid->empty();
 }
 
-static const char *target_dir(const std::string &target)
+static const char *upload_dir_for_name(const std::string &name)
 {
-    if (target == "fonts") return "/sdcard/fonts";
-    if (target == "images") return "/sdcard/images";
-    return "/sdcard/books";
-}
-
-static bool target_accepts(const std::string &target, const std::string &name)
-{
-    if (target == "fonts") {
-        return has_ext_ci(name, ".ttf") || has_ext_ci(name, ".otf") || has_ext_ci(name, ".bin");
+    if (has_ext_ci(name, ".txt") || has_ext_ci(name, ".epub")) {
+        return "/sdcard/books";
     }
-    if (target == "images") {
-        return has_ext_ci(name, ".bmp") || has_ext_ci(name, ".png") ||
-               has_ext_ci(name, ".jpg") || has_ext_ci(name, ".jpeg");
+    if (has_ext_ci(name, ".bmp") || has_ext_ci(name, ".png") ||
+        has_ext_ci(name, ".jpg") || has_ext_ci(name, ".jpeg")) {
+        return "/sdcard/images";
     }
-    return has_ext_ci(name, ".txt") || has_ext_ci(name, ".epub");
+    if (has_ext_ci(name, ".ttf") || has_ext_ci(name, ".otf") ||
+        has_ext_ci(name, ".bin")) {
+        return "/sdcard/fonts";
+    }
+    if (audio_file_formats::is_supported(name.c_str())) {
+        return "/sdcard/music";
+    }
+    return nullptr;
 }
 
 class WifiTransferActivity : public Activity {
@@ -347,7 +343,9 @@ private:
 
     bool init_net()
     {
-        esp_err_t ret = wifi_setting_deinit(false);
+        // Wi-Fi transfer owns the radio while switching between STA and AP,
+        // so fully stop the shared station session and reset the C6 first.
+        esp_err_t ret = wifi_setting_deinit(true);
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "wifi cleanup before transfer failed: %s", esp_err_to_name(ret));
         }
@@ -395,7 +393,8 @@ private:
 
         if (!ensure_dir_logged("/sdcard/books") ||
             !ensure_dir_logged("/sdcard/images") ||
-            !ensure_dir_logged("/sdcard/fonts")) {
+            !ensure_dir_logged("/sdcard/fonts") ||
+            !ensure_dir_logged("/sdcard/music")) {
             _error_message = "Create SD dirs failed";
             ESP_LOGE(TAG, "failed to create transfer dirs");
             return false;
@@ -638,7 +637,7 @@ private:
             std::string url = std::string("http://") + _ip;
             draw_line(url);
             y += 8;
-            draw_line("Targets: books images fonts");
+            draw_line("Auto-sort: books images fonts music");
             y += 8;
             draw_line(_last_ok ? "Last upload:" : "Upload error:");
             std::string last = _last_name;
@@ -668,28 +667,29 @@ private:
     {
         WifiTransferActivity *self = (WifiTransferActivity *)req->user_ctx;
         char query[512] = {};
-        std::string target = "books";
         std::string name = "upload.bin";
         if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
             char value[384] = {};
-            if (httpd_query_key_value(query, "target", value, sizeof(value)) == ESP_OK) target = url_decode(value);
             if (httpd_query_key_value(query, "name", value, sizeof(value)) == ESP_OK) name = url_decode(value);
         }
 
         name = safe_filename(name);
-        ESP_LOGI(TAG, "upload begin target=%s name=%s content_len=%d",
-                 target.c_str(),
-                 name.c_str(),
-                 req->content_len);
-        if (!target_accepts(target, name)) {
-            ESP_LOGW(TAG, "upload rejected target=%s name=%s", target.c_str(), name.c_str());
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unsupported file extension for target");
+        const char *dir = upload_dir_for_name(name);
+        ESP_LOGI(TAG, "upload begin dir=%s name=%s content_len=%d",
+                 dir ? dir : "unsupported", name.c_str(), req->content_len);
+        if (dir == nullptr) {
+            ESP_LOGW(TAG, "upload rejected unsupported name=%s", name.c_str());
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unsupported file type");
             if (self) self->record_upload(name, 0, false);
             return ESP_FAIL;
         }
 
-        const char *dir = target_dir(target);
-        ensure_dir(dir);
+        if (!ensure_dir(dir)) {
+            ESP_LOGE(TAG, "upload destination unavailable dir=%s", dir);
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Destination directory unavailable");
+            if (self) self->record_upload(name, 0, false);
+            return ESP_FAIL;
+        }
         std::string path = std::string(dir) + "/" + name;
         unlink(path.c_str());
         int64_t prealloc_t0 = esp_timer_get_time();

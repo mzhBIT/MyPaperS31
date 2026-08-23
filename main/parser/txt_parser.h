@@ -4,8 +4,19 @@
 #include <string>
 #include <vector>
 
+struct TxtPageLine {
+    // Byte range inside TxtPage::text. Keeping ranges instead of another copy
+    // of every line avoids duplicating a page of UTF-8 text in memory.
+    uint32_t text_offset = 0;
+    uint32_t text_length = 0;
+    uint16_t x_offset = 0;
+    uint16_t height = 0;
+    bool justify = false;
+};
+
 struct TxtPage {
     std::string text;
+    std::vector<TxtPageLine> lines;
     uint32_t start_offset = 0;
     uint32_t next_offset = 0;
     bool eof = false;

@@ -1,4 +1,5 @@
 #include "renderer/TextRenderer.h"
+#include "renderer/TextLayout.h"
 #include "storage/storage_sdcard.h"
 #include <algorithm>
 #include <cctype>
@@ -15,6 +16,7 @@
 #include <esp_timer.h>
 #include <ft2build.h>
 #include FT_FREETYPE_H
+#include FT_ADVANCES_H
 #include FT_OUTLINE_H
 #include FT_SYSTEM_H
 #include FT_MODULE_H
@@ -175,19 +177,12 @@ static int estimate_width_no_font(uint32_t cp, int font_size)
 
 static bool is_cjk_or_fullwidth(uint32_t cp)
 {
-    return (cp >= 0x2E80 && cp <= 0xA4CF) ||   // CJK radicals, kana, bopomofo, hangul, Yi
-           (cp >= 0xAC00 && cp <= 0xD7AF) ||   // Hangul syllables
-           (cp >= 0xF900 && cp <= 0xFAFF) ||   // CJK compatibility ideographs
-           (cp >= 0xFE10 && cp <= 0xFE6F) ||   // vertical/fullwidth punctuation
-           (cp >= 0xFF00 && cp <= 0xFFEF) ||   // fullwidth forms
-           (cp >= 0x20000 && cp <= 0x3FFFF);   // CJK extensions
+    return text_layout::is_cjk_or_fullwidth(cp);
 }
 
 static bool is_cjk_punctuation(uint32_t cp)
 {
-    return (cp >= 0x3000 && cp <= 0x303F) ||
-           cp == 0x2014 || cp == 0x2018 || cp == 0x2019 ||
-           cp == 0x201C || cp == 0x201D || cp == 0x2026;
+    return text_layout::is_cjk_punctuation(cp);
 }
 
 static uint16_t gray565(uint8_t v)
@@ -935,7 +930,15 @@ bool TextRenderer::loadAdvance(uint32_t codepoint, Advance &out)
     FT_Face face = (FT_Face)_face;
     FT_Int32 load_flags = FT_LOAD_NO_BITMAP | FT_LOAD_NO_HINTING | FT_LOAD_NO_AUTOHINT;
     int64_t t0 = esp_timer_get_time();
-    FT_Error err = FT_Load_Char(face, (FT_ULong)codepoint, load_flags);
+    FT_UInt glyph_index = FT_Get_Char_Index(face, (FT_ULong)codepoint);
+    FT_Fixed fixed_advance = 0;
+    FT_Error err = FT_Get_Advance(face, glyph_index,
+                                 load_flags | FT_ADVANCE_FLAG_FAST_ONLY,
+                                 &fixed_advance);
+    if (err != 0) {
+        err = FT_Load_Glyph(face, glyph_index, load_flags);
+        if (err == 0) fixed_advance = face->glyph->advance.x << 10;
+    }
     int64_t t1 = esp_timer_get_time();
     if (_perf) {
         _perf->advance_loads++;
@@ -944,7 +947,7 @@ bool TextRenderer::loadAdvance(uint32_t codepoint, Advance &out)
     if (err != 0) return false;
 
     out.codepoint = codepoint;
-    out.advance = (int)(face->glyph->advance.x >> 6);
+    out.advance = (int)((fixed_advance + 0x8000) >> 16);
     out.last_used = _lru_tick++;
     return true;
 }
@@ -1547,15 +1550,31 @@ int TextRenderer::measureCodepointForLayout(uint32_t codepoint)
         if (adv) return adv->advance;
         return estimate_width_no_font(codepoint, _bin_font_height ? _bin_font_height : _style.font_size);
     }
-    if (is_cjk_or_fullwidth(codepoint)) return _style.font_size;
-    if (is_cjk_punctuation(codepoint)) return _style.font_size;
-    if (codepoint < 0x80) return estimate_width_no_font(codepoint, _style.font_size);
-
-    int found = findLookup(_advance_lookup, codepoint);
-    if (found >= 0 && found < (int)_advance_cache.size()) {
-        return _advance_cache[(size_t)found].advance;
+    if (_ft_ready) {
+        const Advance *adv = getAdvance(codepoint);
+        if (adv && adv->advance > 0) return adv->advance;
     }
+    if (is_cjk_or_fullwidth(codepoint) || is_cjk_punctuation(codepoint)) return _style.font_size;
+    if (codepoint < 0x80) return estimate_width_no_font(codepoint, _style.font_size);
     return estimate_width_no_font(codepoint, _style.font_size);
+}
+
+int TextRenderer::measureFullwidthCellForLayout()
+{
+    const int fallback = std::max(1, _bin_ready && _bin_font_height
+        ? (int)_bin_font_height
+        : _style.font_size);
+    const uint32_t samples[] = {0x4E00, 0x56FD, 0x6C49}; // Representative CJK cells.
+    int measured = 0;
+    for (uint32_t cp : samples) {
+        int width = measureCodepointForLayout(cp);
+        // A missing glyph commonly reports the half-width .notdef advance.
+        // Only accept values that plausibly represent a full CJK cell.
+        if (width >= fallback * 3 / 4 && width <= fallback * 3 / 2) {
+            measured = std::max(measured, width);
+        }
+    }
+    return measured > 0 ? measured : fallback;
 }
 
 int TextRenderer::measureUtf8(const std::string &text)
@@ -1786,56 +1805,38 @@ bool TextRenderer::preparePage(const std::string &text)
     return ok;
 }
 
+std::vector<text_layout::Line> TextRenderer::layoutUtf8Paragraph(const std::string &text,
+                                                                 int max_width,
+                                                                 int first_line_indent)
+{
+    text_layout::Options options;
+    options.max_width = max_width;
+    options.letter_spacing = _style.letter_spacing;
+    int explicit_indent = 0;
+    for (size_t pos = 0; pos < text.size();) {
+        uint32_t cp = 0;
+        size_t next = nextUtf8(text, pos, cp);
+        if (cp != 0x3000) break;
+        explicit_indent += measureCodepointForLayout(cp);
+        pos = next;
+    }
+    // Preserve indentation already present in the document and only add the
+    // missing width needed to reach the configured full-width cell count.
+    options.first_line_indent = std::max(0, first_line_indent - explicit_indent);
+    options.prefer_word_break = true;
+    options.apply_cjk_kinsoku = true;
+    auto measure = [](void *context, uint32_t codepoint) -> int {
+        return static_cast<TextRenderer *>(context)->measureCodepointForLayout(codepoint);
+    };
+    return text_layout::break_utf8(text, options, measure, this);
+}
+
 std::vector<std::string> TextRenderer::wrapUtf8Line(const std::string &line, int max_width)
 {
+    std::vector<text_layout::Line> layout = layoutUtf8Paragraph(line, max_width);
     std::vector<std::string> lines;
-    if (line.empty()) {
-        lines.emplace_back();
-        return lines;
-    }
-
-    size_t line_start = 0;
-    size_t pos = 0;
-    size_t last_space_end = std::string::npos;
-    int cur_w = 0;
-    int last_space_w = 0;
-    int glyph_count = 0;
-
-    while (pos < line.size()) {
-        size_t cp_start = pos;
-        uint32_t cp = 0;
-        pos = nextUtf8(line, pos, cp);
-        int cw = measureCodepointForLayout(cp);
-        int extra = glyph_count > 0 ? _style.letter_spacing : 0;
-
-        if (cur_w + extra + cw > max_width && cp_start > line_start) {
-            size_t break_pos = cp_start;
-            if (last_space_end != std::string::npos && last_space_end > line_start) {
-                break_pos = last_space_end;
-            }
-            lines.emplace_back(line.substr(line_start, break_pos - line_start));
-            line_start = break_pos;
-            while (line_start < line.size() && line[line_start] == ' ') line_start++;
-            pos = line_start;
-            last_space_end = std::string::npos;
-            cur_w = 0;
-            last_space_w = 0;
-            glyph_count = 0;
-            continue;
-        }
-
-        cur_w += extra + cw;
-        glyph_count++;
-        if (cp == ' ') {
-            last_space_end = pos;
-            last_space_w = cur_w;
-            (void)last_space_w;
-        }
-    }
-
-    if (line_start < line.size()) {
-        lines.emplace_back(line.substr(line_start));
-    }
+    lines.reserve(layout.size());
+    for (auto &item : layout) lines.push_back(std::move(item.text));
     return lines;
 }
 
@@ -1906,7 +1907,8 @@ void TextRenderer::drawGlyphRuns(M5GFX &gfx, const Glyph &glyph, int x, int base
     }
 }
 
-void TextRenderer::drawUtf8Line(M5GFX &gfx, const std::string &text, int x, int y, uint16_t color)
+void TextRenderer::drawUtf8Line(M5GFX &gfx, const std::string &text, int x, int y,
+                                uint16_t color, int justify_width)
 {
     if (!_ft_ready && !_bin_ready && !_lv_ready) {
         ESP_LOGE(TAG, "drawUtf8Line skipped: font not ready");
@@ -1923,6 +1925,53 @@ void TextRenderer::drawUtf8Line(M5GFX &gfx, const std::string &text, int x, int 
 
     int cursor = x;
     int baseline_y = y + baseline();
+    std::vector<uint32_t> codepoints;
+    codepoints.reserve(text.size() / 2 + 1);
+    int cjk_count = 0;
+    for (size_t count_pos = 0; count_pos < text.size();) {
+        uint32_t cp = 0;
+        count_pos = nextUtf8(text, count_pos, cp);
+        if (cp != '\r' && cp != '\n') {
+            codepoints.push_back(cp);
+            if (is_cjk_or_fullwidth(cp) || is_cjk_punctuation(cp)) ++cjk_count;
+        }
+    }
+    const int glyph_count = (int)codepoints.size();
+    std::vector<int> gap_extra(glyph_count > 1 ? (size_t)glyph_count - 1 : 0, 0);
+    // Expand only suitable CJK gaps. Punctuation-adjacent gaps, whitespace,
+    // and paired dashes/ellipses remain untouched so justification does not
+    // create conspicuous holes around marks.
+    if (justify_width > 0 && glyph_count > 1 && cjk_count * 2 >= glyph_count) {
+        int natural_width = measureUtf8(text);
+        int requested_extra = std::max(0, justify_width - natural_width);
+        std::vector<int> eligible;
+        eligible.reserve((size_t)glyph_count - 1);
+        for (int i = 0; i + 1 < glyph_count; ++i) {
+            uint32_t left = codepoints[(size_t)i];
+            uint32_t right = codepoints[(size_t)i + 1];
+            bool left_cjk = is_cjk_or_fullwidth(left) || is_cjk_punctuation(left);
+            bool right_cjk = is_cjk_or_fullwidth(right) || is_cjk_punctuation(right);
+            bool whitespace = left == ' ' || left == '\t' || right == ' ' || right == '\t';
+            bool paired_mark = (left == right) &&
+                               (left == 0x2014 || left == 0x2025 || left == 0x2026);
+            if (left_cjk && right_cjk && !whitespace && !paired_mark &&
+                !text_layout::prohibited_at_line_end(left) &&
+                !text_layout::prohibited_at_line_start(right)) {
+                eligible.push_back(i);
+            }
+        }
+        if (!eligible.empty() && requested_extra > 0) {
+            int max_per_gap = std::max(1, _style.font_size / 4);
+            int distributed = std::min(requested_extra,
+                                       max_per_gap * (int)eligible.size());
+            int per_gap = distributed / (int)eligible.size();
+            int remainder = distributed % (int)eligible.size();
+            for (size_t i = 0; i < eligible.size(); ++i) {
+                gap_extra[(size_t)eligible[i]] = per_gap + ((int)i < remainder ? 1 : 0);
+            }
+        }
+    }
+    int glyph_index = 0;
     for (size_t pos = 0; pos < text.size();) {
         uint32_t cp = 0;
         pos = nextUtf8(text, pos, cp);
@@ -1932,12 +1981,20 @@ void TextRenderer::drawUtf8Line(M5GFX &gfx, const std::string &text, int x, int 
         if (!glyph) {
             int w = measureCodepoint(cp);
             gfx.drawRect(cursor, y, std::max(4, w), std::max(4, lineHeight() - _style.line_spacing), color);
-            cursor += w + _style.letter_spacing;
+            cursor += w;
+            if (glyph_index + 1 < glyph_count) {
+                cursor += _style.letter_spacing + gap_extra[(size_t)glyph_index];
+            }
+            ++glyph_index;
             continue;
         }
 
         drawGlyph(gfx, *glyph, cursor, baseline_y, color);
-        cursor += glyph->advance + _style.letter_spacing;
+        cursor += glyph->advance;
+        if (glyph_index + 1 < glyph_count) {
+            cursor += _style.letter_spacing + gap_extra[(size_t)glyph_index];
+        }
+        ++glyph_index;
     }
 }
 
@@ -1963,7 +2020,8 @@ std::string TextRenderer::layoutSignature() const
     }
 
     char buf[256];
-    std::snprintf(buf, sizeof(buf), "ft=%d;bin=%d;lv=%d;path=%s;size=%d;bin_height=%u;line=%d;letter=%d;bpp=%d;pool=%d;file_size=%ld;mtime=%ld",
+    std::snprintf(buf, sizeof(buf), "text_algo=%lu;ft=%d;bin=%d;lv=%d;path=%s;size=%d;bin_height=%u;line=%d;letter=%d;bpp=%d;pool=%d;file_size=%ld;mtime=%ld",
+                  (unsigned long)text_layout::ALGORITHM_VERSION,
                   _ft_ready ? 1 : 0,
                   _bin_ready ? 1 : 0,
                   _lv_ready ? 1 : 0,

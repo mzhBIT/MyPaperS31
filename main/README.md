@@ -38,7 +38,8 @@ Located in `main/activities/`.
   - Provides EPUB TOC navigation.
 - `ReaderSettingsActivity.cpp`
   - Shared reader settings panel.
-  - Font picker, refresh mode, font size, line spacing, margins, and image display toggle.
+  - Font picker, refresh mode, font size, line spacing, first-line indent,
+    paragraph spacing, margins, and image display toggle.
 - `ImageViewerActivity.cpp`
   - JPG/PNG/BMP image viewer.
   - Scans sibling images in the same folder and supports `UP`/`DOWN` navigation.
@@ -58,6 +59,8 @@ Located in `main/parser/`.
 - `txt_parser.*`
   - TXT file loading, encoding detection, line/page reading, and progress persistence.
   - Supports UTF-8, UTF-16LE, GBK, and Latin1 fallback.
+  - Shares first-line indent, paragraph spacing, CJK line-breaking, and
+    punctuation-aware justification with the reader layout settings.
 - `epub_zip.*`
   - Lightweight ZIP central-directory reader.
   - Reads entries to memory or extracts entries to SD card files.
@@ -65,7 +68,8 @@ Located in `main/parser/`.
   - EPUB container, OPF manifest/spine, title, TOC, and cover href parsing.
   - Supports EPUB3 `nav.xhtml`, EPUB2 `toc.ncx`, EPUB2 `meta name="cover"`, EPUB3 `cover-image`, and guide cover fallback.
 - `epub_html.*`
-  - Lightweight XHTML block parser for EPUB text and image blocks.
+  - Lightweight XHTML block parser for EPUB text, headings, hard line breaks,
+    horizontal rules, page breaks, and image blocks.
 
 ## Rendering
 
@@ -83,6 +87,8 @@ Located in `main/renderer/`.
     - refresh mode
     - font size
     - line spacing
+    - first-line indent
+    - paragraph spacing
     - margins
     - show images toggle
 - `reader_font.*`
@@ -114,6 +120,7 @@ Important SD card paths used by code in `main/`:
 /sdcard/.reader/txtprogress/
 /sdcard/.reader/epubprogress/
 /sdcard/.reader/epub_tmp/<book-key>/
+/sdcard/.reader/epub_meta/       # Validated ZIP index and EPUB metadata caches
 /sdcard/.reader/rss_img/
 ```
 

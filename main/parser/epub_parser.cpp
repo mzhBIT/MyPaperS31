@@ -2,10 +2,97 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <esp_log.h>
+#include <esp_timer.h>
+#include <sys/stat.h>
+#include <vector>
+
+#include "storage/app_paths.h"
 
 static const char *TAG = "EPUB";
+static const uint32_t EPUB_META_MAGIC = 0x4154454D; // META
+static const uint32_t EPUB_META_VERSION = 1;
+static const uint32_t EPUB_META_MAX_BYTES = 8 * 1024 * 1024;
+
+static uint32_t meta_rd32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static uint64_t meta_rd64(const uint8_t *p)
+{
+    return (uint64_t)meta_rd32(p) | ((uint64_t)meta_rd32(p + 4) << 32);
+}
+
+static void meta_append32(std::vector<uint8_t> *out, uint32_t value)
+{
+    out->push_back((uint8_t)value);
+    out->push_back((uint8_t)(value >> 8));
+    out->push_back((uint8_t)(value >> 16));
+    out->push_back((uint8_t)(value >> 24));
+}
+
+static void meta_append64(std::vector<uint8_t> *out, uint64_t value)
+{
+    meta_append32(out, (uint32_t)value);
+    meta_append32(out, (uint32_t)(value >> 32));
+}
+
+static bool meta_append_string(std::vector<uint8_t> *out, const std::string &value)
+{
+    if (value.size() > 1024 * 1024) return false;
+    meta_append32(out, (uint32_t)value.size());
+    out->insert(out->end(), value.begin(), value.end());
+    return true;
+}
+
+static uint64_t meta_path_hash64(const char *path)
+{
+    uint64_t hash = 1469598103934665603ULL;
+    for (const uint8_t *p = (const uint8_t *)(path ? path : ""); *p; ++p) {
+        hash ^= *p;
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+class MetaReader {
+public:
+    explicit MetaReader(const std::vector<uint8_t> &data) : _data(data) {}
+
+    bool u32(uint32_t *value)
+    {
+        if (!value || _pos + 4 > _data.size()) return false;
+        *value = meta_rd32(_data.data() + _pos);
+        _pos += 4;
+        return true;
+    }
+
+    bool u64(uint64_t *value)
+    {
+        if (!value || _pos + 8 > _data.size()) return false;
+        *value = meta_rd64(_data.data() + _pos);
+        _pos += 8;
+        return true;
+    }
+
+    bool string(std::string *value)
+    {
+        uint32_t length = 0;
+        if (!value || !u32(&length) || length > 1024 * 1024 || _pos + length > _data.size()) return false;
+        value->assign((const char *)_data.data() + _pos, length);
+        _pos += length;
+        return true;
+    }
+
+    bool done() const { return _pos == _data.size(); }
+
+private:
+    const std::vector<uint8_t> &_data;
+    size_t _pos = 0;
+};
 
 static std::string trim_copy(const std::string &s)
 {
@@ -184,9 +271,17 @@ static std::string strip_fragment(std::string href)
 
 bool EpubBook::open(const char *path)
 {
+    int64_t t0 = esp_timer_get_time();
     close();
     if (!_zip.open(path)) return false;
     _path = path ? path : "";
+
+    if (load_metadata_cache(path)) {
+        ESP_LOGI(TAG, "opened cached title=%s spine=%d toc=%d time=%lld ms",
+                 title.c_str(), spine_count(), toc_count(),
+                 (esp_timer_get_time() - t0) / 1000);
+        return true;
+    }
 
     std::string container;
     if (!_zip.read_entry_to_string("META-INF/container.xml", &container, true)) {
@@ -215,7 +310,10 @@ bool EpubBook::open(const char *path)
     load_toc();
 
     if (title.empty()) title = _path;
-    ESP_LOGI(TAG, "opened title=%s spine=%d toc=%d opf=%s", title.c_str(), spine_count(), toc_count(), _opf_path.c_str());
+    save_metadata_cache(path);
+    ESP_LOGI(TAG, "opened title=%s spine=%d toc=%d opf=%s time=%lld ms",
+             title.c_str(), spine_count(), toc_count(), _opf_path.c_str(),
+             (esp_timer_get_time() - t0) / 1000);
     return true;
 }
 
@@ -229,6 +327,7 @@ void EpubBook::close()
     _nav_path.clear();
     _cover_image_href.clear();
     _manifest_by_id.clear();
+    _spine_index_by_href.clear();
     _spine.clear();
     _toc.clear();
     _zip.close();
@@ -355,6 +454,8 @@ bool EpubBook::parse_opf(const std::string &xml)
         if (_zip.entry_info(sp.href, &entry)) sp.uncompressed_size = entry.uncompressed_size;
         _spine.push_back(sp);
     }
+
+    rebuild_spine_index();
 
     return !_spine.empty();
 }
@@ -548,10 +649,145 @@ std::string EpubBook::resolve_from_opf(const std::string &href) const
 int EpubBook::spine_index_for_href(const std::string &href) const
 {
     std::string target = strip_fragment(href);
+    auto it = _spine_index_by_href.find(target);
+    return it == _spine_index_by_href.end() ? -1 : it->second;
+}
+
+void EpubBook::rebuild_spine_index()
+{
+    _spine_index_by_href.clear();
+    _spine_index_by_href.reserve(_spine.size());
     for (size_t i = 0; i < _spine.size(); ++i) {
-        if (_spine[i].href == target) return (int)i;
+        _spine_index_by_href.emplace(_spine[i].href, (int)i);
     }
-    return -1;
+}
+
+std::string EpubBook::metadata_cache_path(const char *source_path)
+{
+    char name[48];
+    snprintf(name, sizeof(name), "/%016llx.epm", (unsigned long long)meta_path_hash64(source_path));
+    return std::string(app_paths::epub_metadata_dir()) + name;
+}
+
+bool EpubBook::load_metadata_cache(const char *source_path)
+{
+    if (!source_path || !source_path[0]) return false;
+    struct stat source_stat = {};
+    if (stat(source_path, &source_stat) != 0) return false;
+
+    std::string cache_path = metadata_cache_path(source_path);
+    struct stat cache_stat = {};
+    if (stat(cache_path.c_str(), &cache_stat) != 0 || cache_stat.st_size < 32 ||
+        cache_stat.st_size > EPUB_META_MAX_BYTES) return false;
+
+    FILE *fp = std::fopen(cache_path.c_str(), "rb");
+    if (!fp) return false;
+    std::vector<uint8_t> data((size_t)cache_stat.st_size);
+    bool read_ok = std::fread(data.data(), 1, data.size(), fp) == data.size();
+    std::fclose(fp);
+    if (!read_ok) return false;
+
+    MetaReader reader(data);
+    uint32_t magic = 0, version = 0, spine_count_value = 0, toc_count_value = 0;
+    uint64_t file_size = 0, mtime = 0;
+    std::string saved_path;
+    if (!reader.u32(&magic) || !reader.u32(&version) || !reader.u64(&file_size) ||
+        !reader.u64(&mtime) || !reader.string(&saved_path) ||
+        magic != EPUB_META_MAGIC || version != EPUB_META_VERSION ||
+        file_size != (uint64_t)source_stat.st_size || mtime != (uint64_t)source_stat.st_mtime ||
+        saved_path != source_path) return false;
+
+    std::string cached_title, cached_opf_path, cached_opf_base;
+    std::string cached_ncx_path, cached_nav_path, cached_cover_href;
+    if (!reader.string(&cached_title) || !reader.string(&cached_opf_path) ||
+        !reader.string(&cached_opf_base) || !reader.string(&cached_ncx_path) ||
+        !reader.string(&cached_nav_path) || !reader.string(&cached_cover_href) ||
+        !reader.u32(&spine_count_value) || spine_count_value == 0 || spine_count_value > 100000) return false;
+
+    std::vector<EpubSpineItem> cached_spine;
+    cached_spine.reserve(spine_count_value);
+    for (uint32_t i = 0; i < spine_count_value; ++i) {
+        EpubSpineItem item;
+        if (!reader.string(&item.id) || !reader.string(&item.href) ||
+            !reader.string(&item.media_type) || !reader.u32(&item.uncompressed_size) ||
+            item.href.empty()) return false;
+        cached_spine.push_back(std::move(item));
+    }
+
+    if (!reader.u32(&toc_count_value) || toc_count_value > 100000) return false;
+    std::vector<EpubTocItem> cached_toc;
+    cached_toc.reserve(toc_count_value);
+    for (uint32_t i = 0; i < toc_count_value; ++i) {
+        EpubTocItem item;
+        uint32_t spine_index = 0, depth = 0;
+        if (!reader.string(&item.title) || !reader.string(&item.href) ||
+            !reader.u32(&spine_index) || !reader.u32(&depth) ||
+            spine_index >= spine_count_value || depth > 1000) return false;
+        item.spine_index = (int)spine_index;
+        item.depth = (int)depth;
+        cached_toc.push_back(std::move(item));
+    }
+    if (!reader.done()) return false;
+
+    title = std::move(cached_title);
+    _opf_path = std::move(cached_opf_path);
+    _opf_base = std::move(cached_opf_base);
+    _ncx_path = std::move(cached_ncx_path);
+    _nav_path = std::move(cached_nav_path);
+    _cover_image_href = std::move(cached_cover_href);
+    _spine.swap(cached_spine);
+    _toc.swap(cached_toc);
+    rebuild_spine_index();
+    return true;
+}
+
+void EpubBook::save_metadata_cache(const char *source_path) const
+{
+    if (!source_path || !source_path[0] || _spine.empty()) return;
+    struct stat source_stat = {};
+    if (stat(source_path, &source_stat) != 0) return;
+
+    std::vector<uint8_t> data;
+    data.reserve(128 + std::strlen(source_path) + _spine.size() * 64 + _toc.size() * 64);
+    meta_append32(&data, EPUB_META_MAGIC);
+    meta_append32(&data, EPUB_META_VERSION);
+    meta_append64(&data, (uint64_t)source_stat.st_size);
+    meta_append64(&data, (uint64_t)source_stat.st_mtime);
+    if (!meta_append_string(&data, source_path) ||
+        !meta_append_string(&data, title) || !meta_append_string(&data, _opf_path) ||
+        !meta_append_string(&data, _opf_base) || !meta_append_string(&data, _ncx_path) ||
+        !meta_append_string(&data, _nav_path) || !meta_append_string(&data, _cover_image_href)) return;
+
+    meta_append32(&data, (uint32_t)_spine.size());
+    for (const auto &item : _spine) {
+        if (!meta_append_string(&data, item.id) || !meta_append_string(&data, item.href) ||
+            !meta_append_string(&data, item.media_type)) return;
+        meta_append32(&data, item.uncompressed_size);
+    }
+
+    meta_append32(&data, (uint32_t)_toc.size());
+    for (const auto &item : _toc) {
+        if (item.spine_index < 0 || item.spine_index >= (int)_spine.size() ||
+            !meta_append_string(&data, item.title) || !meta_append_string(&data, item.href)) return;
+        meta_append32(&data, (uint32_t)item.spine_index);
+        meta_append32(&data, (uint32_t)std::max(0, item.depth));
+    }
+    if (data.size() > EPUB_META_MAX_BYTES) return;
+
+    app_paths::ensure_dir(app_paths::epub_metadata_dir());
+    std::string cache_path = metadata_cache_path(source_path);
+    std::string temp_path = cache_path + ".tmp";
+    FILE *fp = std::fopen(temp_path.c_str(), "wb");
+    if (!fp) return;
+    bool ok = std::fwrite(data.data(), 1, data.size(), fp) == data.size();
+    std::fclose(fp);
+    if (!ok) {
+        std::remove(temp_path.c_str());
+        return;
+    }
+    std::remove(cache_path.c_str());
+    if (std::rename(temp_path.c_str(), cache_path.c_str()) != 0) std::remove(temp_path.c_str());
+    else ESP_LOGI(TAG, "metadata cache saved bytes=%u path=%s", (unsigned)data.size(), cache_path.c_str());
 }
 
 bool EpubBook::read_item_to_string(const std::string &href, std::string *out)

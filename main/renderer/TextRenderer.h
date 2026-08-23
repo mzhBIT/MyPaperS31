@@ -1,6 +1,7 @@
 #pragma once
 
 #include <M5Unified.h>
+#include "renderer/TextLayout.h"
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -35,10 +36,14 @@ public:
     int baseline() const;
     int measureCodepoint(uint32_t codepoint);
     int measureCodepointForLayout(uint32_t codepoint);
+    int measureFullwidthCellForLayout();
     int measureUtf8(const std::string &text);
+    std::vector<text_layout::Line> layoutUtf8Paragraph(const std::string &text, int max_width,
+                                                        int first_line_indent = 0);
     std::vector<std::string> wrapUtf8Line(const std::string &line, int max_width);
     bool preparePage(const std::string &text);
-    void drawUtf8Line(M5GFX &gfx, const std::string &text, int x, int y, uint16_t color);
+    void drawUtf8Line(M5GFX &gfx, const std::string &text, int x, int y,
+                      uint16_t color, int justify_width = 0);
     void clearGlyphCache();
     TextRenderStats stats() const;
     std::string layoutSignature() const;

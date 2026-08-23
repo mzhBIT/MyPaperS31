@@ -106,6 +106,14 @@ static uint32_t sdio_tx_buf_count = 0;
 /* Counter to hold the amount of bytes already received from sdio slave */
 static uint32_t sdio_rx_byte_count = 0;
 
+typedef enum {
+	SDIO_SLAVE_LINK_READY = 0,
+	SDIO_SLAVE_LINK_HELD_DOWN,
+	SDIO_SLAVE_LINK_REINIT,
+} sdio_slave_link_state_t;
+
+static volatile sdio_slave_link_state_t sdio_slave_link_state = SDIO_SLAVE_LINK_READY;
+
 // one-time trigger to start write thread
 static bool sdio_start_write_thread = false;
 
@@ -127,6 +135,63 @@ typedef struct {
 } double_buf_t;
 
 static double_buf_t double_buf;
+
+#if H_SDIO_HOST_RX_MODE == H_SDIO_HOST_STREAMING_MODE
+/*
+ * Streaming mode used to grow these DMA buffers lazily. A large aggregate
+ * arriving after the application had fragmented internal RAM could then fail
+ * a 17+ KiB aligned allocation and hit an assert in the RX task. Reserve one
+ * queue's worth for both ping-pong buffers while the DMA heap is still fresh.
+ */
+#define SDIO_STREAM_RX_PREALLOC_SIZE \
+	(((H_SDIO_RX_Q * MAX_SDIO_BUFFER_SIZE + ESP_BLOCK_SIZE - 1) / ESP_BLOCK_SIZE) * ESP_BLOCK_SIZE)
+
+esp_err_t esp_hosted_reserve_sdio_rx_buffers(void)
+{
+	int reserved = 0;
+	if (!sdio_bus_lock) {
+		ESP_LOGE(TAG, "cannot reserve stream RX buffers before SDIO init");
+		return ESP_ERR_INVALID_STATE;
+	}
+
+	SDIO_DRV_LOCK();
+	if (double_buf.read_index != -1) {
+		SDIO_DRV_UNLOCK();
+		ESP_LOGW(TAG, "stream RX buffers busy; reservation deferred");
+		return ESP_ERR_INVALID_STATE;
+	}
+
+	for (int i = 0; i < 2; ++i) {
+		if (double_buf.buffer[i].buf_size >= SDIO_STREAM_RX_PREALLOC_SIZE) {
+			reserved++;
+			continue;
+		}
+
+		uint8_t *new_buf = (uint8_t *)MEM_ALLOC(SDIO_STREAM_RX_PREALLOC_SIZE);
+		if (!new_buf) {
+			ESP_LOGE(TAG,
+				"failed to reserve stream RX buffer %d size=%u free_dma=%u largest_dma=%u",
+				i,
+				(unsigned)SDIO_STREAM_RX_PREALLOC_SIZE,
+				(unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+				(unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
+			continue;
+		}
+
+		if (double_buf.buffer[i].buf) {
+			g_h.funcs->_h_free(double_buf.buffer[i].buf);
+		}
+		double_buf.buffer[i].buf = new_buf;
+		double_buf.buffer[i].buf_size = SDIO_STREAM_RX_PREALLOC_SIZE;
+		reserved++;
+	}
+	SDIO_DRV_UNLOCK();
+
+	ESP_LOGI(TAG, "stream RX buffers reserved: %u bytes x%d",
+		(unsigned)SDIO_STREAM_RX_PREALLOC_SIZE, reserved);
+	return reserved == 2 ? ESP_OK : ESP_ERR_NO_MEM;
+}
+#endif
 
 // sem to trigger sdio_data_to_rx_buf_task()
 static semaphore_handle_t sem_double_buf_xfer_data;
@@ -167,6 +232,43 @@ static inline void sdio_buffer_free(void *buf)
 void transport_deinit_internal(void)
 {
 	/* TODO */
+}
+
+esp_err_t transport_prepare_slave_power_down_internal(void)
+{
+	/* The SDMMC host stays allocated, but no task may touch the old C6 card
+	 * state until the transport layer explicitly resumes it. */
+	sdio_slave_link_state = SDIO_SLAVE_LINK_HELD_DOWN;
+	/* sdio_read_task can be blocked indefinitely waiting for an interrupt
+	 * from the old slave instance. It cannot observe the recovery flag after
+	 * the C6 has been powered off, so replace that task on the next boot. */
+	SDIO_DRV_LOCK();
+	if (sdio_read_thread) {
+		g_h.funcs->_h_thread_cancel(sdio_read_thread);
+		sdio_read_thread = NULL;
+	}
+	SDIO_DRV_UNLOCK();
+	ESP_LOGI(TAG, "SDIO link held for slave power down");
+	return ESP_OK;
+}
+
+esp_err_t transport_resume_slave_internal(void)
+{
+	/* A fresh task executes the normal card-init/open-data-path sequence and
+	 * then receives a new INIT event from the restarted C6. */
+	sdio_tx_buf_count = 0;
+	sdio_rx_byte_count = 0;
+	sdio_slave_link_state = SDIO_SLAVE_LINK_READY;
+	if (sdio_read_thread == NULL) {
+		sdio_read_thread = g_h.funcs->_h_thread_create("sdio_read",
+			DFLT_TASK_PRIO, DFLT_TASK_STACK_SIZE, sdio_read_task, NULL);
+		if (sdio_read_thread == NULL) {
+			ESP_LOGE(TAG, "Failed to recreate SDIO read task");
+			return ESP_ERR_NO_MEM;
+		}
+	}
+	ESP_LOGI(TAG, "SDIO read task restarted for slave re-enumeration");
+	return ESP_OK;
 }
 
 static int sdio_generate_slave_intr(uint8_t intr_no)
@@ -662,12 +764,21 @@ static uint8_t * sdio_rx_get_buffer(uint32_t len)
 	uint8_t ** buf = &double_buf.buffer[index].buf;
 
 	if (len > double_buf.buffer[index].buf_size) {
-		if (*buf) {
-			// free already allocated memory
-			g_h.funcs->_h_free(*buf);
+		/* Keep the existing buffer valid until the larger allocation has
+		 * succeeded. The old order freed our safety net before allocating. */
+		uint8_t *new_buf = (uint8_t *)MEM_ALLOC(len);
+		if (!new_buf) {
+			ESP_LOGE(TAG,
+				"stream RX grow failed index=%d need=%lu have=%lu free_dma=%u largest_dma=%u",
+				index,
+				(unsigned long)len,
+				(unsigned long)double_buf.buffer[index].buf_size,
+				(unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+				(unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
+			return NULL;
 		}
-		*buf = (uint8_t *)MEM_ALLOC(len);
-		assert(*buf);
+		if (*buf) g_h.funcs->_h_free(*buf);
+		*buf = new_buf;
 		double_buf.buffer[index].buf_size = len;
 		ESP_LOGD(TAG, "buf %d size: %ld", index, double_buf.buffer[index].buf_size);
 	}
@@ -781,8 +892,10 @@ static void sdio_read_task(void const* pvParameters)
 	create_debugging_tasks();
 
 #if DO_COMBINED_REG_READ
-	reg_buf = MEM_ALLOC(REG_BUF_LEN);
-	assert(reg_buf);
+	if (reg_buf == NULL) {
+		reg_buf = MEM_ALLOC(REG_BUF_LEN);
+		assert(reg_buf);
+	}
 #endif
 
 	// display which SDIO mode we are operating in
@@ -798,6 +911,29 @@ static void sdio_read_task(void const* pvParameters)
 	sdio_generate_slave_intr(ESP_OPEN_DATA_PATH);
 
 	for (;;) {
+		if (sdio_slave_link_state == SDIO_SLAVE_LINK_HELD_DOWN) {
+			g_h.funcs->_h_msleep(20);
+			continue;
+		}
+
+		if (sdio_slave_link_state == SDIO_SLAVE_LINK_REINIT) {
+			SDIO_DRV_LOCK();
+			res = g_h.funcs->_h_sdio_card_init(sdio_handle);
+			if (res == ESP_OK) {
+				sdio_tx_buf_count = 0;
+				sdio_rx_byte_count = 0;
+				wifi_tx_throttling = 0;
+				sdio_slave_link_state = SDIO_SLAVE_LINK_READY;
+				ESP_LOGI(TAG, "SDIO card re-enumerated after slave power cycle");
+				res = sdio_generate_slave_intr(ESP_OPEN_DATA_PATH);
+			}
+			SDIO_DRV_UNLOCK();
+			if (res != ESP_OK) {
+				ESP_LOGE(TAG, "SDIO re-enumeration failed: %d", res);
+				g_h.funcs->_h_restart_host();
+			}
+			continue;
+		}
 
 		// wait for sdio interrupt from slave
 		// call will block until there is an interrupt, timeout or error
@@ -805,6 +941,9 @@ static void sdio_read_task(void const* pvParameters)
 
 		if (res != ESP_OK) {
 			ESP_LOGE(TAG, "wait_slave_intr error: %d", res);
+			continue;
+		}
+		if (sdio_slave_link_state != SDIO_SLAVE_LINK_READY) {
 			continue;
 		}
 
@@ -875,7 +1014,12 @@ static void sdio_read_task(void const* pvParameters)
 
 		/* Allocate rx buffer */
 		rxbuff = sdio_rx_get_buffer(len_from_slave);
-		assert(rxbuff);
+		if (!rxbuff) {
+			SDIO_DRV_UNLOCK();
+			ESP_LOGE(TAG, "RX buffer unavailable; restarting host to recover transport");
+			g_h.funcs->_h_restart_host();
+			continue;
+		}
 
 		data_left = len_from_slave;
 		pos = rxbuff;

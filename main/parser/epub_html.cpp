@@ -139,6 +139,11 @@ static bool is_heading_tag(const std::string &name)
     return name.size() == 2 && name[0] == 'h' && name[1] >= '1' && name[1] <= '6';
 }
 
+static int heading_level_for_tag(const std::string &name)
+{
+    return is_heading_tag(name) ? name[1] - '0' : 0;
+}
+
 static std::string tag_name_from(const std::string &tag)
 {
     size_t pos = 0;
@@ -207,6 +212,21 @@ static std::string attr_value(const std::unordered_map<std::string, std::string>
     return it == attrs.end() ? std::string() : it->second;
 }
 
+static bool tag_requests_page_break(const std::string &tag)
+{
+    std::string name;
+    std::unordered_map<std::string, std::string> attrs;
+    if (!parse_tag_attrs(tag, &name, &attrs)) return false;
+    std::string style = attr_value(attrs, "style");
+    std::transform(style.begin(), style.end(), style.begin(),
+                   [](unsigned char c) { return (char)std::tolower(c); });
+    bool legacy = style.find("page-break-before") != std::string::npos &&
+                  style.find("always") != std::string::npos;
+    bool modern = style.find("break-before") != std::string::npos &&
+                  style.find("page") != std::string::npos;
+    return legacy || modern;
+}
+
 static int parse_positive_px(const std::string &value)
 {
     if (value.empty() || value.find('%') != std::string::npos) return 0;
@@ -218,7 +238,7 @@ static int parse_positive_px(const std::string &value)
 static void append_normalized_text(const std::string &raw, std::string *current)
 {
     std::string decoded = decode_entities(raw);
-    bool last_space = current->empty() || current->back() == ' ';
+    bool last_space = current->empty() || current->back() == ' ' || current->back() == '\n';
 
     for (size_t i = 0; i < decoded.size(); ++i) {
         unsigned char c = (unsigned char)decoded[i];
@@ -234,7 +254,8 @@ static void append_normalized_text(const std::string &raw, std::string *current)
     }
 }
 
-static void flush_content_block(std::string *current, std::vector<EpubContentBlock> *blocks, bool heading)
+static void flush_content_block(std::string *current, std::vector<EpubContentBlock> *blocks,
+                                int heading_level)
 {
     std::string text = trim_copy(*current);
     current->clear();
@@ -243,9 +264,11 @@ static void flush_content_block(std::string *current, std::vector<EpubContentBlo
     EpubContentBlock block;
     block.type = EpubContentBlockType::Text;
     block.text = text;
-    block.heading = heading;
-    block.blank_before = heading ? 1 : 0;
-    block.blank_after = heading ? 1 : 1;
+    block.heading = heading_level > 0;
+    block.heading_level = heading_level;
+    block.page_break_before = heading_level > 0 && heading_level <= 2 && !blocks->empty();
+    block.blank_before = heading_level > 0 ? 1 : 0;
+    block.blank_after = heading_level > 0 ? 1 : 0;
     blocks->push_back(block);
 }
 
@@ -256,7 +279,7 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
 
     std::string current;
     std::string base = dirname_of(item_href);
-    bool heading = false;
+    int heading_level = 0;
     int skip_depth = 0;
     size_t pos = 0;
 
@@ -297,8 +320,16 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
         }
 
         if (!closing) {
+            if (name == "pagebreak" || tag_requests_page_break(tag)) {
+                flush_content_block(&current, blocks, heading_level);
+                if (!blocks->empty() && blocks->back().type != EpubContentBlockType::PageBreak) {
+                    EpubContentBlock page_break;
+                    page_break.type = EpubContentBlockType::PageBreak;
+                    blocks->push_back(page_break);
+                }
+            }
             if (name == "img") {
-                flush_content_block(&current, blocks, heading);
+                flush_content_block(&current, blocks, heading_level);
                 std::string parsed_name;
                 std::unordered_map<std::string, std::string> attrs;
                 if (parse_tag_attrs(tag, &parsed_name, &attrs)) {
@@ -315,23 +346,29 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
                         blocks->push_back(img);
                     }
                 }
-            } else if (name == "br" || name == "hr") {
-                flush_content_block(&current, blocks, heading);
+            } else if (name == "br") {
+                if (!current.empty() && current.back() != '\n') current.push_back('\n');
+            } else if (name == "hr") {
+                flush_content_block(&current, blocks, heading_level);
+                EpubContentBlock rule;
+                rule.type = EpubContentBlockType::HorizontalRule;
+                blocks->push_back(rule);
             } else if (is_block_tag(name)) {
-                flush_content_block(&current, blocks, heading);
-                if (is_heading_tag(name)) heading = true;
+                flush_content_block(&current, blocks, heading_level);
+                int level = heading_level_for_tag(name);
+                if (level > 0) heading_level = level;
             }
         } else {
             if (is_block_tag(name)) {
-                flush_content_block(&current, blocks, heading);
-                if (is_heading_tag(name)) heading = false;
+                flush_content_block(&current, blocks, heading_level);
+                if (is_heading_tag(name)) heading_level = 0;
             }
         }
 
         pos = tag_end + 1;
     }
 
-    flush_content_block(&current, blocks, heading);
+    flush_content_block(&current, blocks, heading_level);
     return true;
 }
 
@@ -349,6 +386,8 @@ bool epub_parse_xhtml_text_blocks(const std::string &xhtml, std::vector<EpubText
         block.blank_before = item.blank_before;
         block.blank_after = item.blank_after;
         block.heading = item.heading;
+        block.heading_level = item.heading_level;
+        block.page_break_before = item.page_break_before;
         blocks->push_back(block);
     }
     return true;

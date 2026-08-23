@@ -6,6 +6,8 @@
 enum class EpubContentBlockType {
     Text,
     Image,
+    HorizontalRule,
+    PageBreak,
 };
 
 struct EpubTextBlock {
@@ -13,6 +15,8 @@ struct EpubTextBlock {
     int blank_before = 0;
     int blank_after = 1;
     bool heading = false;
+    int heading_level = 0;
+    bool page_break_before = false;
 };
 
 struct EpubContentBlock {
@@ -24,6 +28,8 @@ struct EpubContentBlock {
     int blank_before = 0;
     int blank_after = 1;
     bool heading = false;
+    int heading_level = 0;
+    bool page_break_before = false;
 };
 
 bool epub_parse_xhtml_text_blocks(const std::string &xhtml, std::vector<EpubTextBlock> *blocks);

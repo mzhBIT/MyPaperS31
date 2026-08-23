@@ -1,6 +1,8 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "activities/MusicActivity.h"
 #include "activities/PlaceholderActivity.h"
+#include "audio/audio_file_formats.h"
 #include "reader_font.h"
 #include "ui/SystemFont.h"
 #include <M5Unified.h>
@@ -47,7 +49,8 @@ static bool is_supported(const char *n, bool is_dir) {
             strcasecmp(ext, ".bmp") == 0 || strcasecmp(ext, ".png") == 0 ||
             strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0 ||
             strcasecmp(ext, ".ttf") == 0 ||
-            strcasecmp(ext, ".otf") == 0 || strcasecmp(ext, ".bin") == 0);
+            strcasecmp(ext, ".otf") == 0 || strcasecmp(ext, ".bin") == 0 ||
+            audio_file_formats::is_supported(n));
 }
 
 static bool is_font_file(const char *n) {
@@ -304,6 +307,8 @@ public:
         } else if (is_font_file(full.c_str())) {
             reader_font_set(full.c_str());
             redraw_all();
+        } else if (audio_file_formats::is_supported(full.c_str())) {
+            launch_music(full.c_str());
         } else {
             ActivityManager::instance().push(new PlaceholderActivity(full.c_str()));
         }

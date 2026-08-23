@@ -2,6 +2,7 @@
 #include "activities/ActivityManager.h"
 #include "reader_font.h"
 #include "reader_style.h"
+#include "renderer/DocumentLayout.h"
 #include "renderer/TextRenderer.h"
 #include "storage/app_paths.h"
 #include "ui/SystemFont.h"
@@ -72,7 +73,6 @@ struct ArticleImage {
     int width = 0;
     int height = 0;
     bool progressive = false;
-    int after_line = 0;
 };
 
 static std::vector<RssFeed> g_feeds;
@@ -80,8 +80,8 @@ static std::vector<RssItem> g_items;
 static int g_focus = 0;
 static int g_scroll = 0;
 static int g_page = 0;
-static std::vector<std::string> g_article_lines;
 static std::vector<ArticleImage> g_article_images;
+static document_layout::Pages g_article_pages;
 static std::string g_status;
 
 extern void launch_reader_settings();
@@ -136,6 +136,70 @@ static std::string lower_copy(std::string s)
     std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) { return (char)std::tolower(c); });
     return s;
 }
+
+static void log_tls_heap(const char *phase)
+{
+    const size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t internal_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    const size_t dma_free = heap_caps_get_free_size(MALLOC_CAP_DMA);
+    const size_t dma_largest = heap_caps_get_largest_free_block(MALLOC_CAP_DMA);
+    const size_t spiram_free = heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    ESP_LOGI(TAG,
+             "TLS heap %s: internal=%u largest=%u dma=%u dma_largest=%u spiram=%u",
+             phase ? phase : "?",
+             (unsigned)internal_free,
+             (unsigned)internal_largest,
+             (unsigned)dma_free,
+             (unsigned)dma_largest,
+             (unsigned)spiram_free);
+}
+
+struct HttpDocumentEndDetector {
+    enum class Kind { Unknown, Xml, Json };
+
+    Kind kind = Kind::Unknown;
+    std::string xml_tail;
+    int json_depth = 0;
+    bool json_string = false;
+    bool json_escape = false;
+
+    bool consume(char c)
+    {
+        if (kind == Kind::Unknown && !std::isspace((unsigned char)c)) {
+            if (c == '{' || c == '[') kind = Kind::Json;
+            else if (c == '<') kind = Kind::Xml;
+        }
+
+        if (kind == Kind::Json) {
+            if (json_string) {
+                if (json_escape) json_escape = false;
+                else if (c == '\\') json_escape = true;
+                else if (c == '"') json_string = false;
+                return false;
+            }
+            if (c == '"') {
+                json_string = true;
+            } else if (c == '{' || c == '[') {
+                ++json_depth;
+            } else if (c == '}' || c == ']') {
+                if (json_depth > 0) --json_depth;
+                return json_depth == 0;
+            }
+            return false;
+        }
+
+        if (kind == Kind::Xml) {
+            char lower = (char)std::tolower((unsigned char)c);
+            xml_tail.push_back(lower);
+            if (xml_tail.size() > 12) xml_tail.erase(0, xml_tail.size() - 12);
+            return (xml_tail.size() >= 6 && xml_tail.compare(xml_tail.size() - 6, 6, "</rss>") == 0) ||
+                   (xml_tail.size() >= 7 && xml_tail.compare(xml_tail.size() - 7, 7, "</feed>") == 0) ||
+                   (xml_tail.size() >= 10 && xml_tail.compare(xml_tail.size() - 10, 10, "</channel>") == 0) ||
+                   (xml_tail.size() >= 10 && xml_tail.compare(xml_tail.size() - 10, 10, "</rdf:rdf>") == 0);
+        }
+        return false;
+    }
+};
 
 static std::string image_ext_from_url(const std::string &url)
 {
@@ -243,24 +307,37 @@ static std::string xml_unescape(const std::string &s)
 {
     std::string out;
     out.reserve(s.size());
+    size_t next_yield = 16 * 1024;
     for (size_t i = 0; i < s.size();) {
+        if (i >= next_yield) {
+            vTaskDelay(1);
+            next_yield = i + 16 * 1024;
+        }
         if (s[i] == '&') {
-            size_t semi = s.find(';', i + 1);
-            if (semi != std::string::npos && semi - i <= 12) {
-                std::string e = s.substr(i + 1, semi - i - 1);
-                if (e == "amp") out.push_back('&');
-                else if (e == "lt") out.push_back('<');
-                else if (e == "gt") out.push_back('>');
-                else if (e == "quot") out.push_back('"');
-                else if (e == "apos") out.push_back('\'');
-                else if (e == "nbsp") out.push_back(' ');
-                else {
-                    out += '&';
-                    i++;
+            // Search only inside the maximum supported entity length. The old
+            // unbounded find(';') made input containing many bare '&' bytes
+            // quadratic and could starve IDLE0 long enough to trip the WDT.
+            size_t semi = i + 1;
+            size_t limit = std::min(s.size(), i + 13);
+            while (semi < limit && s[semi] != ';' && s[semi] != '&' &&
+                   !std::isspace((unsigned char)s[semi])) {
+                ++semi;
+            }
+            if (semi < limit && s[semi] == ';') {
+                size_t start = i + 1;
+                size_t len = semi - start;
+                char decoded = 0;
+                if (len == 3 && s.compare(start, len, "amp") == 0) decoded = '&';
+                else if (len == 2 && s.compare(start, len, "lt") == 0) decoded = '<';
+                else if (len == 2 && s.compare(start, len, "gt") == 0) decoded = '>';
+                else if (len == 4 && s.compare(start, len, "quot") == 0) decoded = '"';
+                else if (len == 4 && s.compare(start, len, "apos") == 0) decoded = '\'';
+                else if (len == 4 && s.compare(start, len, "nbsp") == 0) decoded = ' ';
+                if (decoded != 0) {
+                    out.push_back(decoded);
+                    i = semi + 1;
                     continue;
                 }
-                i = semi + 1;
-                continue;
             }
         }
         out.push_back(s[i++]);
@@ -284,7 +361,12 @@ static std::string strip_html(const std::string &s)
     std::string out;
     out.reserve(s.size());
     bool in_tag = false;
+    size_t next_yield = 16 * 1024;
     for (size_t i = 0; i < s.size(); ++i) {
+        if (i >= next_yield) {
+            vTaskDelay(1);
+            next_yield = i + 16 * 1024;
+        }
         char c = s[i];
         if (c == '<') {
             in_tag = true;
@@ -327,7 +409,12 @@ static std::string normalize_article_text(const std::string &s)
 {
     std::string out;
     out.reserve(s.size());
+    size_t next_yield = 16 * 1024;
     for (size_t i = 0; i < s.size();) {
+        if (i >= next_yield) {
+            vTaskDelay(1);
+            next_yield = i + 16 * 1024;
+        }
         unsigned char c = (unsigned char)s[i];
         if (std::isspace(c)) {
             int newlines = 0;
@@ -536,7 +623,8 @@ static std::string normalize_image_url(const std::string &url)
     return std::string();
 }
 
-static std::string extract_image_url(const std::string &item_xml)
+static std::string extract_image_url(const std::string &item_xml,
+                                     const std::string &body_html)
 {
     std::string url = normalize_image_url(first_tag_attr_value(item_xml, "media:content", "url"));
     if (!url.empty() && !image_ext_from_url(url).empty()) return url;
@@ -545,8 +633,7 @@ static std::string extract_image_url(const std::string &item_xml)
     url = normalize_image_url(first_tag_attr_value(item_xml, "enclosure", "url"));
     if (!url.empty() && !image_ext_from_url(url).empty()) return url;
 
-    std::string body = extract_any_tag(item_xml, "content:encoded", "description");
-    url = normalize_image_url(first_tag_attr_value(body, "img", "src"));
+    url = normalize_image_url(first_tag_attr_value(body_html, "img", "src"));
     if (!url.empty() && !image_ext_from_url(url).empty()) return url;
     return std::string();
 }
@@ -598,8 +685,10 @@ static std::vector<RssImageRef> extract_image_refs(const std::string &item_xml, 
 static bool parse_rss_items(const std::string &xml, std::vector<RssItem> *items)
 {
     if (!items) return false;
+    int64_t t0 = esp_timer_get_time();
     items->clear();
     size_t pos = 0;
+    unsigned processed = 0;
     while (items->size() < 40) {
         size_t start = xml.find("<item", pos);
         if (start == std::string::npos) break;
@@ -613,12 +702,17 @@ static bool parse_rss_items(const std::string &xml, std::vector<RssItem> *items)
         item.link = strip_html(extract_tag(item_xml, "link"));
         item.date = strip_html(extract_any_tag(item_xml, "pubDate", "updated"));
         item.text = strip_html(body_html);
-        item.image_url = extract_image_url(item_xml);
+        item.image_url = extract_image_url(item_xml, body_html);
         item.image_before_text = text_before_first_img(body_html);
         item.images = extract_image_refs(item_xml, body_html);
         if (!item.title.empty()) items->push_back(item);
         pos = end + 7;
+        if ((++processed & 3u) == 0) vTaskDelay(1);
     }
+    ESP_LOGI(TAG, "parse feed bytes=%u items=%u time=%lld ms",
+             (unsigned)xml.size(),
+             (unsigned)items->size(),
+             (esp_timer_get_time() - t0) / 1000);
     return !items->empty();
 }
 
@@ -1013,7 +1107,8 @@ private:
 
     void stop_wifi()
     {
-        wifi_setting_deinit(false);
+        // RSS does not need background connectivity after the activity exits.
+        wifi_setting_deinit(true);
     }
 
     bool fetch_url_once(const std::string &url, std::string *body)
@@ -1027,13 +1122,23 @@ private:
         cfg.user_agent = "MyPaperS3 RSS Reader";
         esp_http_client_handle_t client = esp_http_client_init(&cfg);
         if (!client) return false;
+        // Every RSS request uses a fresh handle, so keeping the HTTP/1.1
+        // connection alive only makes unframed feeds wait for a timeout.
+        esp_http_client_set_header(client, "Connection", "close");
         esp_err_t err = esp_http_client_open(client, 0);
         if (err != ESP_OK) {
             ESP_LOGW(TAG, "open failed %s: %s", url.c_str(), esp_err_to_name(err));
             esp_http_client_cleanup(client);
             return false;
         }
-        esp_http_client_fetch_headers(client);
+        const int64_t content_length = esp_http_client_fetch_headers(client);
+        const bool chunked = esp_http_client_is_chunked_response(client);
+        const int status = esp_http_client_get_status_code(client);
+        ESP_LOGI(TAG, "feed response status=%d content_length=%lld chunked=%d",
+                 status, (long long)content_length, chunked ? 1 : 0);
+        // The connection/handshake may legitimately need the longer timeout,
+        // but a news feed that sends no body data for two seconds has stalled.
+        esp_http_client_set_timeout_ms(client, 2000);
         char *buf = (char *)heap_caps_malloc(4096, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!buf) buf = (char *)heap_caps_malloc(4096, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
         if (!buf) {
@@ -1041,25 +1146,84 @@ private:
             esp_http_client_cleanup(client);
             return false;
         }
-        while ((int)body->size() < MAX_FEED_BYTES) {
-            int n = esp_http_client_read(client, buf, 4096);
+        if (content_length > 0) {
+            body->reserve((size_t)std::min<int64_t>(content_length, MAX_FEED_BYTES));
+        } else {
+            body->reserve(64 * 1024);
+        }
+        const bool length_framed = !chunked && content_length >= 0;
+        HttpDocumentEndDetector document_end;
+        bool document_complete = false;
+        while ((int)body->size() < MAX_FEED_BYTES && !document_complete) {
+            if (esp_http_client_is_complete_data_received(client)) break;
+            int want = 4096;
+            if (length_framed) {
+                const int64_t remaining = content_length - static_cast<int64_t>(body->size());
+                if (remaining <= 0) break;
+                want = static_cast<int>(std::min<int64_t>(want, remaining));
+            }
+            int n = esp_http_client_read(client, buf, want);
             if (n <= 0) break;
             body->append(buf, n);
+            if (!length_framed) {
+                for (int i = 0; i < n; ++i) {
+                    if (document_end.consume(buf[i])) {
+                        document_complete = true;
+                        break;
+                    }
+                }
+                // esp_http_client_read() normally fills `want`. A shorter
+                // unframed read means the transport timed out or closed after
+                // returning its last partial block; do not immediately wait
+                // for a second timeout.
+                if (n < want && !document_complete &&
+                    !esp_http_client_is_complete_data_received(client)) {
+                    break;
+                }
+            }
+        }
+        const bool transport_complete = esp_http_client_is_complete_data_received(client);
+        const bool response_complete = length_framed
+                                           ? content_length >= 0 &&
+                                                 static_cast<int64_t>(body->size()) >= content_length
+                                           : document_complete || transport_complete;
+        if (!length_framed && !document_complete && !body->empty()) {
+            const size_t tail_start = body->size() > 96 ? body->size() - 96 : 0;
+            std::string tail = body->substr(tail_start);
+            for (char &c : tail) {
+                unsigned char uc = (unsigned char)c;
+                if (uc < 0x20 || uc == 0x7f) c = ' ';
+            }
+            ESP_LOGW(TAG, "feed stream ended without document marker bytes=%u tail=%s",
+                     (unsigned)body->size(), tail.c_str());
         }
         heap_caps_free(buf);
-        int status = esp_http_client_get_status_code(client);
         esp_http_client_close(client);
         esp_http_client_cleanup(client);
-        return status >= 200 && status < 300 && !body->empty();
+        return status >= 200 && status < 300 && !body->empty() && response_complete;
     }
 
     bool fetch_url(const std::string &url, std::string *body)
     {
         if (fetch_url_once(url, body)) return true;
+        std::string best_partial = body ? *body : std::string();
         if (url.rfind("https://", 0) == 0) {
             std::string http_url = "http://" + url.substr(8);
             ESP_LOGW(TAG, "retry without TLS: %s", http_url.c_str());
-            return fetch_url_once(http_url, body);
+            if (fetch_url_once(http_url, body)) return true;
+            if (body && best_partial.size() > body->size()) *body = std::move(best_partial);
+        }
+        // Both transports may be backed by the same streaming proxy. Preserve
+        // only completely closed RSS items from the better partial response;
+        // parse_rss_items() intentionally ignores the unfinished final item.
+        if (body && !body->empty()) {
+            const size_t last_item = body->rfind("</item>");
+            if (last_item != std::string::npos) {
+                body->resize(last_item + 7);
+                ESP_LOGW(TAG, "using partial feed snapshot bytes=%u",
+                         (unsigned)body->size());
+                return true;
+            }
         }
         return false;
     }
@@ -1073,6 +1237,7 @@ private:
         cfg.user_agent = "MyPaperS3 RSS Reader";
         esp_http_client_handle_t client = esp_http_client_init(&cfg);
         if (!client) return false;
+        esp_http_client_set_header(client, "Connection", "close");
 
         esp_err_t err = esp_http_client_open(client, 0);
         if (err != ESP_OK) {
@@ -1080,10 +1245,18 @@ private:
             esp_http_client_cleanup(client);
             return false;
         }
-        esp_http_client_fetch_headers(client);
+        const int64_t content_length = esp_http_client_fetch_headers(client);
+        const bool chunked = esp_http_client_is_chunked_response(client);
         int status = esp_http_client_get_status_code(client);
         if (status < 200 || status >= 300) {
             ESP_LOGW(TAG, "image http status=%d url=%s", status, url.c_str());
+            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
+            return false;
+        }
+        if (!chunked && content_length > MAX_IMAGE_BYTES) {
+            ESP_LOGW(TAG, "image too large content_length=%lld url=%s",
+                     (long long)content_length, url.c_str());
             esp_http_client_close(client);
             esp_http_client_cleanup(client);
             return false;
@@ -1108,7 +1281,14 @@ private:
         int total = 0;
         bool ok = true;
         while (total < MAX_IMAGE_BYTES) {
-            int n = esp_http_client_read(client, buf, 4096);
+            if (esp_http_client_is_complete_data_received(client)) break;
+            int want = 4096;
+            if (!chunked && content_length >= 0) {
+                const int64_t remaining = content_length - total;
+                if (remaining <= 0) break;
+                want = static_cast<int>(std::min<int64_t>(want, remaining));
+            }
+            int n = esp_http_client_read(client, buf, want);
             if (n < 0) {
                 ok = false;
                 break;
@@ -1136,7 +1316,11 @@ private:
 
     bool download_url_to_file(const std::string &url, const std::string &path)
     {
-        if (download_url_to_file_once(url, path)) return true;
+        const bool https = url.rfind("https://", 0) == 0;
+        if (https) log_tls_heap("image-before");
+        const bool downloaded = download_url_to_file_once(url, path);
+        if (https) log_tls_heap(downloaded ? "image-ok" : "image-failed");
+        if (downloaded) return true;
         if (url.rfind("https://", 0) == 0) {
             std::string http_url = "http://" + url.substr(8);
             ESP_LOGW(TAG, "retry image without TLS: %s", http_url.c_str());
@@ -1500,68 +1684,137 @@ private:
         ts.font_size = rs.font_size;
         ts.line_spacing = rs.line_spacing;
         reader_text_renderer().begin(ts);
-        int max_w = M5.Display.width() - rs.margin_left - rs.margin_right;
-        g_article_lines.clear();
-
-        auto append_text = [&](const std::string &text, std::vector<std::string> *out) {
-            if (!out) return;
+        std::vector<document_layout::Block> blocks;
+        uint64_t content_position = 0;
+        auto append_paragraphs = [&](const std::string &text, bool heading,
+                                     int final_gap, bool allow_indent) {
+            const size_t first_block = blocks.size();
             size_t start = 0;
-            bool has_paragraph = !out->empty();
             bool pending_gap = false;
             while (start <= text.size()) {
                 size_t end = text.find('\n', start);
                 if (end == std::string::npos) end = text.size();
-                std::string para = trim_copy(text.substr(start, end - start));
-                if (para.empty()) {
-                    if (has_paragraph) pending_gap = true;
+                std::string paragraph = trim_copy(text.substr(start, end - start));
+                if (paragraph.empty()) {
+                    if (!blocks.empty()) pending_gap = true;
                 } else {
-                    if (pending_gap && has_paragraph) out->push_back("");
-                    auto lines = reader_text_renderer().wrapUtf8Line(para, max_w);
-                    out->insert(out->end(), lines.begin(), lines.end());
-                    has_paragraph = true;
+                    document_layout::Block block;
+                    block.type = document_layout::BlockType::Paragraph;
+                    block.text = std::move(paragraph);
+                    block.content_position = content_position + start;
+                    block.blank_before = pending_gap ? 1 : 0;
+                    block.blank_after = 0;
+                    block.heading = heading;
+                    block.heading_level = heading ? 1 : 0;
+                    block.allow_first_line_indent = !heading && allow_indent;
+                    block.paragraph_spacing_after = !heading && allow_indent;
+                    blocks.push_back(std::move(block));
                     pending_gap = false;
                 }
                 if (end == text.size()) break;
                 start = end + 1;
             }
+            if (blocks.size() > first_block) {
+                blocks.back().blank_after = final_gap;
+            }
+            content_position += text.size() + 1;
         };
 
-        append_text(item.title, &g_article_lines);
-        if (!item.date.empty()) append_text(beijing_date(item.date), &g_article_lines);
-        int meta_lines = (int)g_article_lines.size();
-
+        append_paragraphs(item.title, true, 0, false);
+        if (!item.date.empty()) append_paragraphs(beijing_date(item.date), false, 1, false);
         std::string article_text = normalize_article_text(item.text.empty() ? item.link : item.text);
-        append_text(article_text, &g_article_lines);
-
+        struct PositionedImage {
+            size_t text_position = 0;
+            ArticleImage *image = nullptr;
+        };
+        std::vector<PositionedImage> positioned_images;
+        positioned_images.reserve(g_article_images.size());
         for (auto &image : g_article_images) {
-            if (!image.before_text.empty()) {
-                std::vector<std::string> before_lines;
-                append_text(normalize_article_text(image.before_text), &before_lines);
-                image.after_line = std::min<int>((int)g_article_lines.size(), meta_lines + (int)before_lines.size());
-            } else {
-                image.after_line = meta_lines;
+            std::string prefix = normalize_article_text(image.before_text);
+            size_t position = 0;
+            if (!prefix.empty()) {
+                if (prefix.size() <= article_text.size() &&
+                    article_text.compare(0, prefix.size(), prefix) == 0) {
+                    position = prefix.size();
+                } else {
+                    // Feeds occasionally normalize whitespace around <img>
+                    // differently. A common-prefix position is safer than
+                    // moving the image to an unrelated later occurrence.
+                    size_t limit = std::min(prefix.size(), article_text.size());
+                    while (position < limit && prefix[position] == article_text[position]) ++position;
+                    while (position > 0 && position < article_text.size() &&
+                           ((unsigned char)article_text[position] & 0xC0) == 0x80) {
+                        --position;
+                    }
+                }
             }
-            while (image.after_line > 0 &&
-                   image.after_line <= (int)g_article_lines.size() &&
-                   g_article_lines[image.after_line - 1].empty()) {
-                image.after_line--;
-            }
+            positioned_images.push_back({position, &image});
         }
-        std::sort(g_article_images.begin(), g_article_images.end(), [](const ArticleImage &a, const ArticleImage &b) {
-            if (a.after_line != b.after_line) return a.after_line < b.after_line;
-            return a.url < b.url;
+        std::sort(positioned_images.begin(), positioned_images.end(), [](const PositionedImage &a,
+                                                                         const PositionedImage &b) {
+            if (a.text_position != b.text_position) return a.text_position < b.text_position;
+            return a.image->url < b.image->url;
         });
+
+        size_t body_cursor = 0;
+        const uint64_t body_position = content_position;
+        for (const auto &positioned : positioned_images) {
+            size_t image_position = std::max(body_cursor,
+                                             std::min(positioned.text_position, article_text.size()));
+            if (image_position > body_cursor) {
+                content_position = body_position + body_cursor;
+                append_paragraphs(article_text.substr(body_cursor, image_position - body_cursor), false, 0, true);
+            }
+            document_layout::Block image_block;
+            image_block.type = document_layout::BlockType::Image;
+            image_block.resource = positioned.image->path;
+            image_block.content_position = body_position + image_position;
+            image_block.image_height = std::min(320, std::max(120, (int)M5.Display.height() / 3));
+            image_block.blank_after = 0;
+            blocks.push_back(std::move(image_block));
+            body_cursor = image_position;
+        }
+        if (body_cursor < article_text.size()) {
+            content_position = body_position + body_cursor;
+            append_paragraphs(article_text.substr(body_cursor), false, 1, true);
+        }
+
+        int line_height = reader_text_renderer().lineHeight();
+        if (line_height <= 0) line_height = 48;
+        document_layout::Options options;
+        options.content_width = std::max(100, (int)M5.Display.width() - rs.margin_left - rs.margin_right);
+        const int footer_height = 50;
+        options.content_height = std::max(
+            line_height,
+            (int)M5.Display.height() - TOP_H - rs.margin_top -
+                std::max(rs.margin_bottom, footer_height));
+        options.line_height = line_height;
+        int fullwidth_advance = reader_text_renderer().measureFullwidthCellForLayout();
+        options.first_line_indent = fullwidth_advance * rs.first_line_indent;
+        options.paragraph_spacing_percent = rs.paragraph_spacing * 50;
+        options.layout_paragraph = [](void *context, const std::string &text, int width, int indent) {
+            return static_cast<TextRenderer *>(context)->layoutUtf8Paragraph(text, width, indent);
+        };
+        options.text_context = &reader_text_renderer();
+        options.resolve_image = [](void *, const std::string &resource,
+                                   document_layout::ImageInfo *info) {
+            if (!info) return false;
+            for (const auto &image : g_article_images) {
+                if (image.path == resource && image.width > 0 && image.height > 0) {
+                    info->width = image.width;
+                    info->height = image.height;
+                    return true;
+                }
+            }
+            return false;
+        };
+        g_article_pages = document_layout::paginate(blocks, options);
+
         int pages = article_page_count();
         if (reset_page) g_page = 0;
         else if (g_page >= pages) g_page = pages - 1;
-    }
-
-    int lines_per_article_page() const
-    {
-        ReaderStyle rs = reader_style_get();
-        int lh = reader_text_renderer().lineHeight();
-        if (lh <= 0) lh = 48;
-        return std::max(1, ((int)M5.Display.height() - TOP_H - rs.margin_top - rs.margin_bottom) / lh);
+        ESP_LOGI(TAG, "article layout blocks=%u pages=%d images=%u",
+                 (unsigned)blocks.size(), pages, (unsigned)g_article_images.size());
     }
 
     bool bing_wallpaper_mode() const
@@ -1693,111 +1946,10 @@ private:
         draw_article();
     }
 
-    bool article_image_box(const ArticleImage &image, int y_top, int *x, int *y, int *w, int *h, float *scale) const
-    {
-        if (image.path.empty() || image.width <= 0 || image.height <= 0) return false;
-        ReaderStyle rs = reader_style_get();
-        int max_w = M5.Display.width() - rs.margin_left - rs.margin_right;
-        int max_h = std::min(320, std::max(120, (int)M5.Display.height() / 3));
-        if (y_top > 0) {
-            int available_h = (int)M5.Display.height() - y_top - rs.margin_bottom - 34;
-            max_h = std::max(80, std::min(max_h, available_h));
-        }
-        float s = std::min((float)max_w / (float)image.width, (float)max_h / (float)image.height);
-        if (s <= 0.0f) return false;
-        int draw_w = std::max(1, (int)(image.width * s));
-        int draw_h = std::max(1, (int)(image.height * s));
-        if (x) *x = rs.margin_left + std::max(0, (max_w - draw_w) / 2);
-        if (y) *y = y_top;
-        if (w) *w = draw_w;
-        if (h) *h = draw_h;
-        if (scale) *scale = s;
-        return true;
-    }
-
-    int image_reserved_height(const ArticleImage &image) const
-    {
-        int x = 0, y = 0, w = 0, h = 0;
-        float scale = 1.0f;
-        if (!article_image_box(image, 0, &x, &y, &w, &h, &scale)) return 0;
-        return h + 14;
-    }
-
-    int image_reserved_line_count(const ArticleImage &image) const
-    {
-        int lh = reader_text_renderer().lineHeight();
-        if (lh <= 0) lh = 48;
-        int h = image_reserved_height(image);
-        return h > 0 ? std::max(1, (h + lh - 1) / lh) : 0;
-    }
-
-    void article_page_info(int page, int *start, int *count, int *image_index) const
-    {
-        int normal = lines_per_article_page();
-        int total = (int)g_article_lines.size();
-        int cur = 0;
-        int next_image = 0;
-
-        for (int p = 0; p <= page; ++p) {
-            int c = normal;
-            int img = -1;
-            while (next_image < (int)g_article_images.size() && g_article_images[next_image].after_line < cur) {
-                next_image++;
-            }
-            if (next_image < (int)g_article_images.size()) {
-                const ArticleImage &image = g_article_images[next_image];
-                int reserved = image_reserved_line_count(image);
-                if (reserved > 0 && image.after_line >= cur && image.after_line <= cur + normal) {
-                    int before = image.after_line - cur;
-                    if (before + reserved <= normal) {
-                        c = std::max(1, normal - reserved);
-                        img = next_image++;
-                    } else if (before <= 0) {
-                        c = std::max(1, normal - reserved);
-                        img = next_image++;
-                    } else {
-                        c = before;
-                    }
-                }
-            }
-            if (p == page) {
-                if (start) *start = cur;
-                if (count) *count = std::max(1, std::min(c, std::max(1, total - cur)));
-                if (image_index) *image_index = img;
-                return;
-            }
-            cur += c;
-        }
-    }
-
     int article_page_count() const
     {
         if (bing_wallpaper_mode()) return 1;
-        int total = (int)g_article_lines.size();
-        if (total <= 0) return 1;
-        int page = 0;
-        while (page < 512) {
-            int start = 0, count = 0;
-            int img = -1;
-            article_page_info(page, &start, &count, &img);
-            if (start + count >= total) return page + 1;
-            page++;
-        }
-        return 1;
-    }
-
-    int article_page_start_line(int page) const
-    {
-        int start = 0;
-        article_page_info(page, &start, nullptr, nullptr);
-        return start;
-    }
-
-    int article_page_line_count(int page) const
-    {
-        int count = 0;
-        article_page_info(page, nullptr, &count, nullptr);
-        return count;
+        return std::max(1, (int)g_article_pages.size());
     }
 
     void draw_article()
@@ -1812,52 +1964,84 @@ private:
         int lh = reader_text_renderer().lineHeight();
         if (lh <= 0) lh = 48;
         int y = TOP_H + rs.margin_top;
-        int lpp = article_page_line_count(g_page);
-        int start = article_page_start_line(g_page);
-        int image_index = -1;
-        article_page_info(g_page, nullptr, nullptr, &image_index);
-        int image_after = (image_index >= 0 && image_index < (int)g_article_images.size())
-                              ? g_article_images[image_index].after_line
-                              : -1;
-        auto draw_page_image = [&](int y_top) {
-            if (image_index < 0 || image_index >= (int)g_article_images.size()) return y_top;
-            const ArticleImage &image = g_article_images[image_index];
-            int ix = 0, iy = 0, iw = 0, ih = 0;
-            float scale = 1.0f;
-            if (!article_image_box(image, y_top, &ix, &iy, &iw, &ih, &scale)) return y_top;
-            bool ok = false;
-            if (image.ext == ".jpg" && !image.progressive) {
-                ok = M5.Display.drawJpgFile(image.path.c_str(), ix, iy, iw, ih, 0, 0, scale, scale);
-            } else if (image.ext == ".png") {
-                ok = M5.Display.drawPngFile(image.path.c_str(), ix, iy, iw, ih, 0, 0, scale, scale);
-            } else if (image.ext == ".bmp") {
-                ok = M5.Display.drawBmpFile(image.path.c_str(), ix, iy, iw, ih, 0, 0, scale, scale);
-            }
-            if (ok) return iy + ih + 14;
-
-            M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-            system_font::draw_center(M5.Display,
-                                     image.progressive ? "Progressive JPEG unsupported" : "Image decode failed",
-                                     M5.Display.width() / 2,
-                                     y_top + 10);
-            return y_top + 52;
-        };
+        const int content_width = std::max(100, (int)M5.Display.width() - rs.margin_left - rs.margin_right);
+        const document_layout::Page *page = nullptr;
+        if (g_page >= 0 && g_page < (int)g_article_pages.size()) {
+            page = &g_article_pages[(size_t)g_page];
+        }
         std::string page_text;
-        for (int i = 0; i < lpp && start + i < (int)g_article_lines.size(); ++i) {
-            page_text += g_article_lines[start + i];
-            page_text += '\n';
-        }
-        reader_text_renderer().preparePage(page_text);
-        if (image_after == start) {
-            y = draw_page_image(y);
-        }
-        for (int i = 0; i < lpp && start + i < (int)g_article_lines.size(); ++i) {
-            if (!g_article_lines[start + i].empty()) {
-                reader_text_renderer().drawUtf8Line(M5.Display, g_article_lines[start + i], rs.margin_left, y, TFT_BLACK);
+        if (page) {
+            for (const auto &layout_item : *page) {
+                if (layout_item.type == document_layout::PageItemType::Text &&
+                    !layout_item.text.empty()) {
+                    page_text += layout_item.text;
+                    page_text += '\n';
+                }
             }
-            y += lh;
-            if (image_after >= 0 && start + i + 1 == image_after) {
-                y = draw_page_image(y + 6);
+        }
+        if (!page_text.empty()) reader_text_renderer().preparePage(page_text);
+
+        if (page) {
+            for (size_t i = 0; i < page->size(); ++i) {
+                if ((i & 7u) == 0) vTaskDelay(1);
+                const auto &layout_item = (*page)[i];
+                if (layout_item.type == document_layout::PageItemType::Text) {
+                    if (!layout_item.text.empty()) {
+                        int text_x = rs.margin_left + layout_item.x_offset;
+                        if (layout_item.centered) {
+                            int text_width = reader_text_renderer().measureUtf8(layout_item.text);
+                            text_x = rs.margin_left + std::max(0, (content_width - text_width) / 2);
+                        }
+                        reader_text_renderer().drawUtf8Line(
+                            M5.Display, layout_item.text, text_x, y, TFT_BLACK,
+                            layout_item.justify ? layout_item.width : 0);
+                    }
+                    y += lh;
+                } else if (layout_item.type == document_layout::PageItemType::Space) {
+                    y += layout_item.height > 0 ? layout_item.height : lh;
+                } else if (layout_item.type == document_layout::PageItemType::HorizontalRule) {
+                    int rule_y = y + layout_item.height / 2;
+                    int inset = std::max(20, content_width / 8);
+                    M5.Display.drawFastHLine(rs.margin_left + inset, rule_y,
+                                             std::max(1, content_width - inset * 2), TFT_BLACK);
+                    y += layout_item.height;
+                } else if (layout_item.type == document_layout::PageItemType::Image) {
+                    const ArticleImage *image = nullptr;
+                    for (const auto &candidate : g_article_images) {
+                        if (candidate.path == layout_item.resource) {
+                            image = &candidate;
+                            break;
+                        }
+                    }
+                    if (!image) {
+                        y += layout_item.height;
+                        continue;
+                    }
+                    int draw_w = layout_item.width;
+                    int draw_h = layout_item.height;
+                    float scale = layout_item.scale;
+                    int x = rs.margin_left + std::max(0, (content_width - draw_w) / 2);
+                    bool ok = false;
+                    if (image->ext == ".jpg" && !image->progressive) {
+                        ok = M5.Display.drawJpgFile(image->path.c_str(), x, y,
+                                                   draw_w, draw_h, 0, 0, scale, scale);
+                    } else if (image->ext == ".png") {
+                        ok = M5.Display.drawPngFile(image->path.c_str(), x, y,
+                                                   draw_w, draw_h, 0, 0, scale, scale);
+                    } else if (image->ext == ".bmp") {
+                        ok = M5.Display.drawBmpFile(image->path.c_str(), x, y,
+                                                   draw_w, draw_h, 0, 0, scale, scale);
+                    }
+                    if (!ok) {
+                        M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+                        system_font::draw_center(
+                            M5.Display,
+                            image->progressive ? "Progressive JPEG unsupported" : "Image decode failed",
+                            M5.Display.width() / 2,
+                            y + std::max(0, draw_h / 2 - 18));
+                    }
+                    y += draw_h;
+                }
             }
         }
         char pct[24];

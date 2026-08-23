@@ -97,6 +97,7 @@ int esp_netdev_xmit(netdev_handle_t netdev, struct pbuf *net_buf);
 esp_err_t transport_drv_init(void(*esp_hosted_up_cb)(void));
 esp_err_t transport_drv_deinit(void);
 esp_err_t transport_drv_reconfigure(void);
+esp_err_t transport_drv_prepare_slave_power_down(void);
 transport_channel_t *transport_drv_add_channel(void *api_chan,
 		esp_hosted_if_type_t if_type, uint8_t secure,
 		transport_channel_tx_fn_t *tx, const transport_channel_rx_fn_t rx);
@@ -106,6 +107,10 @@ esp_err_t transport_drv_remove_channel(transport_channel_t *channel);
 void process_capabilities(uint8_t cap);
 void transport_init_internal(void);
 void transport_deinit_internal(void);
+#if CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE
+esp_err_t transport_prepare_slave_power_down_internal(void);
+esp_err_t transport_resume_slave_internal(void);
+#endif
 
 void process_priv_communication(interface_buffer_handle_t *buf_handle);
 void print_capabilities(uint32_t cap);

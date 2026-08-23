@@ -591,15 +591,41 @@ namespace lgfx
   {
     if (0 < w && 0 < h)
     {
-      _range_mod.left   = std::min<int16_t>(_range_mod.left  , x        );
-      _range_mod.right  = std::max<int16_t>(_range_mod.right , x + w - 1);
-      _range_mod.top    = std::min<int16_t>(_range_mod.top   , y        );
-      _range_mod.bottom = std::max<int16_t>(_range_mod.bottom, y + h - 1);
+      uint_fast16_t xs = x;
+      uint_fast16_t ys = y;
+      uint_fast16_t xe = x + w - 1;
+      uint_fast16_t ye = y + h - 1;
+      _update_transferred_rect(xs, ys, xe, ye);
     }
 
     if (_range_mod.empty()) {
       ESP_LOGW(TAG, "display skipped: update range is empty");
       return;
+    }
+
+    const int32_t original_left = _range_mod.left;
+    const int32_t original_right = _range_mod.right;
+    const int32_t original_top = _range_mod.top;
+    const int32_t original_bottom = _range_mod.bottom;
+    _range_mod.left = std::max<int32_t>(0, _range_mod.left);
+    _range_mod.right = std::min<int32_t>(_cfg.panel_width - 1, _range_mod.right);
+    _range_mod.top = std::max<int32_t>(0, _range_mod.top);
+    _range_mod.bottom = std::min<int32_t>(_cfg.panel_height - 1, _range_mod.bottom);
+    if (_range_mod.empty()) {
+      ESP_LOGE(TAG, "display skipped: update range is outside panel");
+      _range_mod.top = INT16_MAX;
+      _range_mod.left = INT16_MAX;
+      _range_mod.right = 0;
+      _range_mod.bottom = 0;
+      return;
+    }
+    if (original_left != _range_mod.left || original_right != _range_mod.right ||
+        original_top != _range_mod.top || original_bottom != _range_mod.bottom) {
+      ESP_LOGW(TAG, "clamped update range: %ld,%ld..%ld,%ld -> %ld,%ld..%ld,%ld",
+               (long)original_left, (long)original_top,
+               (long)original_right, (long)original_bottom,
+               (long)_range_mod.left, (long)_range_mod.top,
+               (long)_range_mod.right, (long)_range_mod.bottom);
     }
 
     uint_fast16_t xs = (_range_mod.left + _cfg.offset_x) & ~1u;
@@ -1318,25 +1344,6 @@ __asm__ __volatile(
       const uint32_t active_group_total = groups_per_row * mh;
       const bool use_sparse_blit = active_group_map
                                 && active_groups_in * 8u < active_group_total * 7u;
-
-      // The sparse blitter clears a group bit as soon as every pixel state in
-      // that group has reached its terminal (negative) state. The legacy
-      // blitter needs one additional all-zero frame to discover completion;
-      // the bitmap already proves that frame cannot drive any panel pixel.
-      if (active_group_map && active_groups_in == 0 && remain) {
-        remain = false;
-        ESP_LOGI(TAG, "terminal empty scan skipped: frame=%lu active_groups=0/%u",
-                 (unsigned long)frame_number, (unsigned)active_group_total);
-        bool power_off_ok = bus->powerControl(false);
-        if (power_off_ok) {
-          ESP_LOGI(TAG, "refresh complete: frames=%lu (last scan skipped), power off OK",
-                   (unsigned long)(frame_number - 1));
-        } else {
-          ESP_LOGE(TAG, "refresh complete: power off FAILED");
-        }
-        frame_number = 0;
-        continue;
-      }
 #endif
       remain = false;
       for (uint_fast16_t y = 0; y < mh; y++) {

@@ -23,6 +23,15 @@ esp_err_t esp_hosted_init(void);
 esp_err_t esp_hosted_deinit(void);
 esp_err_t esp_hosted_reinit(void);
 esp_err_t esp_hosted_slave_reset(void);
+esp_err_t esp_hosted_prepare_slave_power_down(void);
+
+#if CONFIG_ESP_HOSTED_SDIO_HOST_INTERFACE
+/*
+ * Reserve the streaming RX ping-pong buffers after latency-sensitive device
+ * drivers have finished allocating their internal DMA memory.
+ */
+esp_err_t esp_hosted_reserve_sdio_rx_buffers(void);
+#endif
 
 esp_err_t esp_hosted_slave_ota(const char* image_url);
 esp_err_t esp_hosted_get_coprocessor_fwversion(esp_hosted_coprocessor_fwver_t *ver_info);

@@ -231,7 +231,7 @@ public:
 class ReaderSettingsActivity : public Activity {
     int m_focus = 0;
 
-    static const int ROW_COUNT = 7;
+    static const int ROW_COUNT = 9;
 
     void adjust(int delta)
     {
@@ -249,12 +249,18 @@ class ReaderSettingsActivity : public Activity {
             style.line_spacing += delta * 2;
             break;
         case 4:
-            style.margin_left += delta * 5;
+            style.first_line_indent += delta;
             break;
         case 5:
-            style.margin_right += delta * 5;
+            style.paragraph_spacing += delta;
             break;
         case 6:
+            style.margin_left += delta * 5;
+            break;
+        case 7:
+            style.margin_right += delta * 5;
+            break;
+        case 8:
             style.show_images = style.show_images ? 0 : 1;
             break;
         default:
@@ -281,12 +287,19 @@ class ReaderSettingsActivity : public Activity {
             snprintf(buf, len, "Line spacing: %d", style.line_spacing);
             break;
         case 4:
-            snprintf(buf, len, "Left margin: %d", style.margin_left);
+            snprintf(buf, len, "First-line indent: %d chars", style.first_line_indent);
             break;
         case 5:
-            snprintf(buf, len, "Right margin: %d", style.margin_right);
+            if (style.paragraph_spacing == 0) snprintf(buf, len, "Paragraph gap: Off");
+            else snprintf(buf, len, "Paragraph gap: %.1f line", style.paragraph_spacing * 0.5);
             break;
         case 6:
+            snprintf(buf, len, "Left margin: %d", style.margin_left);
+            break;
+        case 7:
+            snprintf(buf, len, "Right margin: %d", style.margin_right);
+            break;
+        case 8:
             snprintf(buf, len, "Show images: %s", style.show_images ? "On" : "Off");
             break;
         default:

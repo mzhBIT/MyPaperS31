@@ -1,8 +1,9 @@
 #include "parser/txt_parser.h"
-#include "gbk_unicode_table.h"
+#include "parser/gbk_decode.h"
 #include "reader_font.h"
 #include "reader_style.h"
 #include "renderer/TextRenderer.h"
+#include "renderer/TextLayout.h"
 #include "storage/app_paths.h"
 
 #include <M5Unified.h>
@@ -18,6 +19,7 @@ static const char *TAG = "TXT";
 static const uint32_t PROGRESS_MAGIC = 0x54585032; // TXP2
 static const uint32_t PROGRESS_VERSION = 1;
 static const uint32_t MAX_SAVED_HISTORY = 64;
+static const uint32_t TXT_LAYOUT_VERSION = 2;
 
 enum Enc { UTF8, UTF16LE, GBK, LATIN1 };
 
@@ -75,14 +77,6 @@ static Enc detect_encoding(const uint8_t *data, size_t len)
     return LATIN1;
 }
 
-static uint32_t gbk_to_ucs(uint8_t hi, uint8_t lo)
-{
-    int idx = gbk_table_index(hi, lo);
-    if (idx < 0) return 0xFFFD;
-    uint32_t cp = gbk_unicode_table[idx];
-    return cp ? cp : 0xFFFD;
-}
-
 static std::string cp_to_utf8(uint32_t cp)
 {
     std::string out;
@@ -120,7 +114,7 @@ static bool read_cp(FILE *fp, Enc enc, uint32_t &cp, uint32_t &start, uint32_t &
             cp = (uint8_t)c0;
         } else {
             int c1 = fgetc(fp);
-            cp = (c1 == EOF) ? 0xFFFD : gbk_to_ucs((uint8_t)c0, (uint8_t)c1);
+            cp = (c1 == EOF) ? 0xFFFD : gbk_decode_codepoint((uint8_t)c0, (uint8_t)c1);
         }
         break;
 
@@ -240,12 +234,16 @@ std::string TxtBook::cache_key(const char *path)
 uint32_t TxtBook::layout_signature() const
 {
     std::string sig = reader_text_renderer().layoutSignature();
+    ReaderStyle style = reader_style_get();
     char buf[128];
-    snprintf(buf, sizeof(buf), ";w=%d;h=%d;dw=%d;lpp=%d;enc=%d;file=%lu",
+    snprintf(buf, sizeof(buf), ";algo=%lu;w=%d;h=%d;dw=%d;lpp=%d;indent=%d;paragraph=%d;enc=%d;file=%lu",
+             (unsigned long)TXT_LAYOUT_VERSION,
              (int)M5.Display.width(),
              (int)M5.Display.height(),
              display_width(),
              lines_per_page(),
+             style.first_line_indent,
+             style.paragraph_spacing,
              _enc,
              (unsigned long)_file_size);
     sig += buf;
@@ -346,24 +344,78 @@ TxtPage TxtBook::read_page(uint32_t offset)
 
     FILE *fp = fopen(_path.c_str(), "rb");
     if (!fp) return page;
+    bool first_line_of_paragraph = offset <= _content_offset;
+    if (!first_line_of_paragraph && _enc == UTF16LE && offset >= _content_offset + 2) {
+        if (fseek(fp, (long)offset - 2, SEEK_SET) == 0) {
+            int lo = fgetc(fp);
+            int hi = fgetc(fp);
+            first_line_of_paragraph = lo == '\n' && hi == 0;
+        }
+    } else if (!first_line_of_paragraph && fseek(fp, (long)offset - 1, SEEK_SET) == 0) {
+        first_line_of_paragraph = fgetc(fp) == '\n';
+    }
     fseek(fp, offset, SEEK_SET);
 
+    ReaderStyle style = reader_style_get();
     const int max_w = std::max(100, display_width());
-    const int max_lines = lines_per_page();
-    int line_count = 0;
+    int line_h = reader_text_renderer().lineHeight();
+    if (line_h <= 0) line_h = 48;
+    const int max_height = std::max(line_h,
+        (int)M5.Display.height() - 50 - style.margin_top - style.margin_bottom);
+    int fullwidth_advance = reader_text_renderer().measureFullwidthCellForLayout();
+    const int indent_width = std::min(max_w - 1,
+                                      fullwidth_advance * style.first_line_indent);
+    const int paragraph_gap = line_h * style.paragraph_spacing / 2;
+    int used_height = 0;
+    int text_line_count = 0;
+    bool reading_explicit_indent = first_line_of_paragraph;
+    int explicit_indent_width = 0;
     int line_width = 0;
     std::string line;
     line.reserve(256);
+    uint32_t last_cp = 0;
+    uint32_t last_cp_start = 0;
+    size_t last_cp_utf8_bytes = 0;
+    int last_cp_width = 0;
     page.text.reserve(2048);
+    page.lines.reserve((size_t)lines_per_page() * 2);
+    auto current_indent = [&]() {
+        return first_line_of_paragraph
+            ? std::max(0, indent_width - explicit_indent_width)
+            : 0;
+    };
+    auto append_line = [&page, &used_height, &text_line_count](
+                           const std::string &value, bool justify,
+                           int x_offset, int height) {
+        TxtPageLine output;
+        output.text_offset = static_cast<uint32_t>(page.text.size());
+        output.text_length = static_cast<uint32_t>(value.size());
+        output.x_offset = (uint16_t)std::max(0, x_offset);
+        output.height = (uint16_t)std::max(1, height);
+        output.justify = justify && !value.empty();
+        page.text += value;
+        page.text += '\n';
+        page.lines.push_back(output);
+        used_height += output.height;
+        ++text_line_count;
+    };
+    auto append_gap = [&page, &used_height](int height) {
+        if (height <= 0) return;
+        TxtPageLine output;
+        output.text_offset = static_cast<uint32_t>(page.text.size());
+        output.text_length = 0;
+        output.height = (uint16_t)height;
+        page.lines.push_back(output);
+        used_height += height;
+    };
     int64_t t0 = esp_timer_get_time();
 
-    while (line_count < max_lines) {
+    while (used_height + line_h <= max_height || page.lines.empty()) {
         uint32_t cp = 0, cp_start = 0, cp_next = 0;
         if (!read_cp(fp, (Enc)_enc, cp, cp_start, cp_next)) {
-            if (!line.empty() && line_count < max_lines) {
-                page.text += line;
-                page.text += '\n';
-                line_count++;
+            if (!line.empty()) {
+                // The final line of a paragraph/file must not be stretched.
+                append_line(line, false, current_indent(), line_h);
             }
             page.next_offset = _file_size;
             page.eof = true;
@@ -376,13 +428,25 @@ TxtPage TxtBook::read_page(uint32_t offset)
         }
 
         if (cp == '\n') {
-            page.text += line;
-            page.text += '\n';
+            // An explicit newline terminates the paragraph. This includes an
+            // empty line, whose vertical space must be retained.
+            bool had_text = !line.empty();
+            append_line(line, false, had_text ? current_indent() : 0, line_h);
             line.clear();
             line_width = 0;
-            line_count++;
+            reading_explicit_indent = true;
+            explicit_indent_width = 0;
+            last_cp = 0;
+            last_cp_start = 0;
+            last_cp_utf8_bytes = 0;
+            last_cp_width = 0;
             page.next_offset = cp_next;
-            if (line_count >= max_lines) {
+            first_line_of_paragraph = true;
+            if (had_text && paragraph_gap > 0 &&
+                used_height + paragraph_gap <= max_height) {
+                append_gap(paragraph_gap);
+            }
+            if (used_height + line_h > max_height) {
                 page.eof = cp_next >= _file_size;
                 break;
             }
@@ -391,21 +455,83 @@ TxtPage TxtBook::read_page(uint32_t offset)
 
         std::string ch = cp_to_utf8(cp);
         int ch_width = estimate_codepoint_width(cp);
-        if (!line.empty() && line_width + ch_width > max_w) {
-            page.text += line;
-            page.text += '\n';
+        // Preserve ideographic spaces already present in the TXT and add only
+        // the remaining width required by the configured paragraph indent.
+        if (first_line_of_paragraph && reading_explicit_indent) {
+            if (cp == 0x3000) explicit_indent_width += ch_width;
+            else reading_explicit_indent = false;
+        }
+        int line_limit = std::max(1, max_w - current_indent());
+        if (!line.empty() && line_width + ch_width > line_limit) {
+            bool move_last = (text_layout::prohibited_at_line_start(cp) ||
+                              text_layout::prohibited_at_line_end(last_cp)) &&
+                             last_cp_utf8_bytes > 0 &&
+                             line.size() > last_cp_utf8_bytes;
+
+            // A pathological one-glyph line cannot move its only glyph. Keep
+            // the closing punctuation with it instead of starting the next
+            // line with punctuation; overflow is limited to one glyph.
+            if (text_layout::prohibited_at_line_start(cp) && !move_last) {
+                line += ch;
+                line_width += ch_width;
+                append_line(line, true, current_indent(), line_h);
+                line.clear();
+                line_width = 0;
+                last_cp = 0;
+                last_cp_start = 0;
+                last_cp_utf8_bytes = 0;
+                last_cp_width = 0;
+                first_line_of_paragraph = false;
+                reading_explicit_indent = false;
+                explicit_indent_width = 0;
+                page.next_offset = cp_next;
+                if (used_height + line_h > max_height) {
+                    page.eof = cp_next >= _file_size;
+                    break;
+                }
+                continue;
+            }
+
+            // Move the previous glyph when the current punctuation cannot
+            // start a line, or when the previous opening bracket cannot end
+            // one. Original file offsets are retained so a page boundary can
+            // restart exactly for UTF-8, UTF-16, GBK and Latin-1 alike.
+            std::string carried;
+            if (move_last) {
+                carried = line.substr(line.size() - last_cp_utf8_bytes);
+                line.resize(line.size() - last_cp_utf8_bytes);
+                line_width -= last_cp_width;
+            }
+
+            // Width overflow is a soft wrap and is eligible for two-ended
+            // alignment. Paragraph-ending lines above remain left aligned.
+            append_line(line, true, current_indent(), line_h);
             line.clear();
             line_width = 0;
-            line_count++;
-            if (line_count >= max_lines) {
-                page.next_offset = cp_start;
-                page.eof = cp_start >= _file_size;
+            first_line_of_paragraph = false;
+            reading_explicit_indent = false;
+            explicit_indent_width = 0;
+            if (used_height + line_h > max_height) {
+                page.next_offset = move_last ? last_cp_start : cp_start;
+                page.eof = page.next_offset >= _file_size;
                 break;
             }
+
+            if (move_last) {
+                line = carried;
+                line_width = last_cp_width;
+            }
+            last_cp = move_last ? last_cp : 0;
+            last_cp_utf8_bytes = move_last ? carried.size() : 0;
+            last_cp_width = move_last ? last_cp_width : 0;
         }
 
         line += ch;
         line_width += ch_width;
+        last_cp = cp;
+        last_cp_start = cp_start;
+        last_cp_utf8_bytes = ch.size();
+        last_cp_width = ch_width;
         page.next_offset = cp_next;
     }
 
@@ -414,7 +540,7 @@ TxtPage TxtBook::read_page(uint32_t offset)
     ESP_LOGI(TAG, "read_page offset=%lu next=%lu lines=%d eof=%d time=%lld ms",
              (unsigned long)page.start_offset,
              (unsigned long)page.next_offset,
-             line_count,
+             text_line_count,
              page.eof ? 1 : 0,
              (t1 - t0) / 1000);
     return page;

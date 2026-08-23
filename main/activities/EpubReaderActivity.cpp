@@ -3,8 +3,10 @@
 #include "parser/epub_html.h"
 #include "parser/epub_parser.h"
 #include "recent_books.h"
+#include "renderer/CoverThumbnail.h"
 #include "reader_font.h"
 #include "reader_style.h"
+#include "renderer/DocumentLayout.h"
 #include "renderer/P4JpegDecoder.h"
 #include "renderer/TextRenderer.h"
 #include "renderer/TurboJpegDecoder.h"
@@ -28,7 +30,8 @@
 static const char *TAG = "EPUB_READER";
 static const int TOP_H = 50;
 static const uint32_t EPUB_PROGRESS_MAGIC = 0x45504231; // EPB1
-static const uint32_t EPUB_PROGRESS_VERSION = 1;
+static const uint32_t EPUB_PROGRESS_VERSION = 2;
+static const uint32_t EPUB_LAYOUT_VERSION = 5;
 static EpubBook g_epub;
 
 extern void launch_reader_settings();
@@ -229,9 +232,9 @@ public:
             refresh_text_renderer();
             _layout_sig = layout_signature();
             int saved_spine = 0;
-            int saved_page = 0;
-            if (load_progress(&saved_spine, &saved_page) && load_spine(saved_spine)) {
-                _page_index = std::min(saved_page, std::max(0, _page_count - 1));
+            uint64_t saved_position = 0;
+            if (load_progress(&saved_spine, &saved_position) && load_spine(saved_spine)) {
+                _page_index = page_for_position(saved_position);
             } else {
                 load_spine(0);
             }
@@ -351,21 +354,8 @@ public:
     }
 
 private:
-    enum class PageItemType {
-        Text,
-        Space,
-        Image,
-    };
-
-    struct PageItem {
-        PageItemType type = PageItemType::Text;
-        std::string text;
-        std::string href;
-        std::string ext;
-        int width = 0;
-        int height = 0;
-        float scale = 1.0f;
-    };
+    using PageItemType = document_layout::PageItemType;
+    using PageItem = document_layout::PageItem;
 
     struct CachedImage {
         std::string path;
@@ -392,6 +382,8 @@ private:
         bool software_ok = false;
         int software_scale_denom = 1;
         uint32_t software_memory_budget = 0;
+        uint32_t software_legacy_coefficients = 0;
+        uint32_t software_compact_coefficients = 0;
         int64_t hardware_read_ms = 0;
         int64_t hardware_header_ms = 0;
         int64_t hardware_decode_ms = 0;
@@ -416,7 +408,7 @@ private:
     uint32_t _layout_sig = 0;
     std::string _progress_path;
     std::string _image_cache_dir;
-    std::vector<std::vector<PageItem>> _pages;
+    document_layout::Pages _pages;
     std::unordered_map<std::string, CachedImage> _image_cache;
 
     void release_runtime_cache()
@@ -426,7 +418,7 @@ private:
         for (const auto &page : _pages) page_item_count += page.size();
         size_t image_count = _image_cache.size();
 
-        std::vector<std::vector<PageItem>>().swap(_pages);
+        document_layout::Pages().swap(_pages);
         std::unordered_map<std::string, CachedImage>().swap(_image_cache);
         _page_count = 0;
         _page_index = 0;
@@ -451,7 +443,9 @@ private:
         char buf[192];
         snprintf(buf,
                  sizeof(buf),
-                 ";w=%d;h=%d;cw=%d;lpp=%d;m=%d,%d,%d,%d;spine=%d;file=%ld",
+                 ";algo=%lu;doc_algo=%lu;w=%d;h=%d;cw=%d;lpp=%d;m=%d,%d,%d,%d;indent=%d;paragraph=%d;spine=%d;file=%ld",
+                 (unsigned long)EPUB_LAYOUT_VERSION,
+                 (unsigned long)document_layout::ALGORITHM_VERSION,
                  (int)M5.Display.width(),
                  (int)M5.Display.height(),
                  content_width(),
@@ -460,31 +454,56 @@ private:
                  style.margin_right,
                  style.margin_top,
                  style.margin_bottom,
+                 style.first_line_indent,
+                 style.paragraph_spacing,
                  g_epub.spine_count(),
                  file_size);
         sig += buf;
         return hash32_string(sig);
     }
 
-    bool load_progress(int *spine, int *page)
+    uint64_t page_position(int page_index) const
+    {
+        if (page_index < 0 || page_index >= (int)_pages.size()) return 0;
+        const auto &page = _pages[(size_t)page_index];
+        for (const auto &item : page) {
+            if (item.type != PageItemType::Space) return item.content_position;
+        }
+        return page.empty() ? 0 : page.front().content_position;
+    }
+
+    int page_for_position(uint64_t position) const
+    {
+        if (_pages.empty()) return 0;
+        int result = 0;
+        for (int i = 0; i < (int)_pages.size(); ++i) {
+            uint64_t start = page_position(i);
+            if (start > position) break;
+            result = i;
+        }
+        return result;
+    }
+
+    bool load_progress(int *spine, uint64_t *position)
     {
         if (spine) *spine = 0;
-        if (page) *page = 0;
+        if (position) *position = 0;
         if (_progress_path.empty()) return false;
 
         FILE *fp = fopen(_progress_path.c_str(), "rb");
         if (!fp) return false;
 
         uint32_t magic = 0, version = 0, layout = 0;
-        uint32_t saved_spine = 0, saved_page = 0;
+        uint32_t saved_spine = 0;
+        uint64_t saved_position = 0;
         bool ok = fread(&magic, 1, sizeof(magic), fp) == sizeof(magic) &&
                   fread(&version, 1, sizeof(version), fp) == sizeof(version) &&
                   fread(&layout, 1, sizeof(layout), fp) == sizeof(layout) &&
                   fread(&saved_spine, 1, sizeof(saved_spine), fp) == sizeof(saved_spine) &&
-                  fread(&saved_page, 1, sizeof(saved_page), fp) == sizeof(saved_page);
+                  fread(&saved_position, 1, sizeof(saved_position), fp) == sizeof(saved_position);
         fclose(fp);
 
-        if (!ok || magic != EPUB_PROGRESS_MAGIC || version != EPUB_PROGRESS_VERSION || layout != _layout_sig) {
+        if (!ok || magic != EPUB_PROGRESS_MAGIC || version != EPUB_PROGRESS_VERSION) {
             ESP_LOGI(TAG, "progress ignored ok=%d magic=%08lx version=%lu layout=%08lx/%08lx",
                      ok ? 1 : 0,
                      (unsigned long)magic,
@@ -496,8 +515,12 @@ private:
         if (saved_spine >= (uint32_t)g_epub.spine_count()) return false;
 
         if (spine) *spine = (int)saved_spine;
-        if (page) *page = (int)saved_page;
-        ESP_LOGI(TAG, "progress loaded spine=%lu page=%lu", (unsigned long)saved_spine + 1, (unsigned long)saved_page + 1);
+        if (position) *position = saved_position;
+        ESP_LOGI(TAG, "progress loaded spine=%lu position=%llu layout=%08lx/%08lx",
+                 (unsigned long)saved_spine + 1,
+                 (unsigned long long)saved_position,
+                 (unsigned long)layout,
+                 (unsigned long)_layout_sig);
         return true;
     }
 
@@ -512,14 +535,18 @@ private:
         uint32_t magic = EPUB_PROGRESS_MAGIC;
         uint32_t version = EPUB_PROGRESS_VERSION;
         uint32_t spine = (uint32_t)std::max(0, _spine_index);
-        uint32_t page = (uint32_t)std::max(0, _page_index);
+        uint64_t position = page_position(_page_index);
         fwrite(&magic, 1, sizeof(magic), fp);
         fwrite(&version, 1, sizeof(version), fp);
         fwrite(&_layout_sig, 1, sizeof(_layout_sig), fp);
         fwrite(&spine, 1, sizeof(spine), fp);
-        fwrite(&page, 1, sizeof(page), fp);
+        fwrite(&position, 1, sizeof(position), fp);
         fclose(fp);
-        ESP_LOGI(TAG, "progress saved spine=%lu page=%lu", (unsigned long)spine + 1, (unsigned long)page + 1);
+        ESP_LOGI(TAG, "progress saved spine=%lu position=%llu page=%d/%d",
+                 (unsigned long)spine + 1,
+                 (unsigned long long)position,
+                 _page_index + 1,
+                 _page_count);
     }
 
     int content_x() const
@@ -596,9 +623,9 @@ private:
 
     void repaginate_current_spine()
     {
-        int old_page = _page_index;
+        uint64_t old_position = page_position(_page_index);
         load_spine(_spine_index);
-        if (_page_count > 0) _page_index = std::min(old_page, _page_count - 1);
+        if (_page_count > 0) _page_index = page_for_position(old_position);
     }
 
     std::string image_cache_path(const std::string &href) const
@@ -624,14 +651,23 @@ private:
         if (href.empty()) return std::string();
         std::string out_path = cover_cache_path(href);
         if (out_path.empty()) return std::string();
-        if (file_exists(out_path)) return out_path;
+        std::string thumbnail_path = cover_thumbnail::cache_path_for(out_path);
+        if (file_exists(thumbnail_path)) {
+            if (file_exists(out_path)) remove(out_path.c_str());
+            return thumbnail_path;
+        }
         app_paths::ensure_dir(app_paths::epub_cache_dir());
         mkdir(_image_cache_dir.c_str(), 0);
-        if (!g_epub.extract_item_to_file(href, out_path)) {
+        if (!file_exists(out_path) && !g_epub.extract_item_to_file(href, out_path)) {
             ESP_LOGW(TAG, "cover extract failed href=%s path=%s", href.c_str(), out_path.c_str());
             remove(out_path.c_str());
             return std::string();
         }
+        if (cover_thumbnail::ensure(out_path, thumbnail_path)) {
+            remove(out_path.c_str());
+            return thumbnail_path;
+        }
+        ESP_LOGW(TAG, "cover thumbnail failed, retaining original path=%s", out_path.c_str());
         return out_path;
     }
 
@@ -695,55 +731,10 @@ private:
         return true;
     }
 
-    void push_page_if_needed(std::vector<PageItem> *page, int *used_h, int next_h)
-    {
-        int max_h = content_height();
-        if (!page || !used_h) return;
-        if (!page->empty() && *used_h + next_h > max_h) {
-            _pages.push_back(*page);
-            page->clear();
-            *used_h = 0;
-        }
-    }
-
-    void add_space(std::vector<PageItem> *page, int *used_h, int line_h)
-    {
-        if (!page || !used_h || page->empty()) return;
-        PageItem item;
-        item.type = PageItemType::Space;
-        item.height = line_h;
-        push_page_if_needed(page, used_h, item.height);
-        if (!page->empty()) {
-            page->push_back(item);
-            *used_h += item.height;
-        }
-    }
-
-    void add_text_line(std::vector<PageItem> *page, int *used_h, const std::string &line, int line_h)
-    {
-        if (!page || !used_h || line.empty()) return;
-        PageItem item;
-        item.type = PageItemType::Text;
-        item.text = line;
-        item.height = line_h;
-        push_page_if_needed(page, used_h, item.height);
-        page->push_back(item);
-        *used_h += item.height;
-    }
-
     void fit_image_box(int src_w, int src_h, int max_w, int max_h, int *draw_w, int *draw_h, float *scale) const
     {
-        if (draw_w) *draw_w = max_w;
-        if (draw_h) *draw_h = max_h;
-        if (scale) *scale = 1.0f;
-        if (src_w <= 0 || src_h <= 0 || max_w <= 0 || max_h <= 0) return;
-
-        float s = (float)max_w / (float)src_w;
-        if ((int)(src_h * s) > max_h) s = (float)max_h / (float)src_h;
-        if (s <= 0.0f) s = 1.0f;
-        if (scale) *scale = s;
-        if (draw_w) *draw_w = std::max(1, (int)(src_w * s));
-        if (draw_h) *draw_h = std::max(1, (int)(src_h * s));
+        document_layout::fit_image_box(src_w, src_h, max_w, max_h, false,
+                                       draw_w, draw_h, scale);
     }
 
     bool read_file_bytes(const std::string &path, std::vector<uint8_t> *out, size_t max_size = 12 * 1024 * 1024)
@@ -777,6 +768,8 @@ private:
                     stats->software_ok = ok;
                     stats->software_scale_denom = sw.scale_denom;
                     stats->software_memory_budget = sw.memory_budget;
+                    stats->software_legacy_coefficients = sw.legacy_coefficient_bytes;
+                    stats->software_compact_coefficients = sw.compact_coefficient_bytes;
                     stats->software_header_ms = sw.header_ms;
                     stats->software_decode_ms = sw.decode_ms;
                     stats->software_push_ms = sw.push_ms;
@@ -866,61 +859,95 @@ private:
         system_font::draw_center(M5.Display, message, x + w / 2, yy + 32);
     }
 
-    void add_image_block(std::vector<PageItem> *page, int *used_h, const EpubContentBlock &block, int line_h)
+    void build_pages(std::vector<EpubContentBlock> &blocks)
     {
-        std::string ext = lower_ext(block.href);
-        if (ext != ".jpg" && ext != ".png" && ext != ".bmp") {
-            ESP_LOGW(TAG, "unsupported image ext href=%s", block.href.c_str());
-            add_text_line(page, used_h, "[image]", line_h);
-            return;
-        }
-
-        int max_w = content_width();
-        int max_h = content_height();
-
-        PageItem item;
-        item.type = PageItemType::Image;
-        item.href = block.href;
-        item.ext = ext;
-        if (block.image_width > 0 && block.image_height > 0) {
-            fit_image_box(block.image_width, block.image_height, max_w, max_h, &item.width, &item.height, &item.scale);
-        } else {
-            item.width = max_w;
-            item.height = max_h;
-            item.scale = 1.0f;
-        }
-
-        push_page_if_needed(page, used_h, item.height);
-        page->push_back(item);
-        *used_h += item.height;
-    }
-
-    void build_pages(const std::vector<EpubContentBlock> &blocks)
-    {
-        _pages.clear();
         auto &renderer = reader_text_renderer();
-        int max_width = content_width();
         int line_h = renderer.lineHeight();
         if (line_h <= 0) line_h = 48;
-        std::vector<PageItem> page;
-        int used_h = 0;
 
-        for (const auto &block : blocks) {
-            for (int i = 0; i < block.blank_before; ++i) add_space(&page, &used_h, line_h);
-
+        std::vector<document_layout::Block> document_blocks;
+        document_blocks.reserve(blocks.size());
+        uint64_t content_position = 0;
+        for (auto &block : blocks) {
+            document_layout::Block output;
+            bool is_image = block.type == EpubContentBlockType::Image;
             if (block.type == EpubContentBlockType::Image) {
-                add_image_block(&page, &used_h, block, line_h);
+                output.type = document_layout::BlockType::Image;
+            } else if (block.type == EpubContentBlockType::HorizontalRule) {
+                output.type = document_layout::BlockType::HorizontalRule;
+            } else if (block.type == EpubContentBlockType::PageBreak) {
+                output.type = document_layout::BlockType::PageBreak;
             } else {
-                std::vector<std::string> wrapped = renderer.wrapUtf8Line(block.text, max_width);
-                for (auto &line : wrapped) add_text_line(&page, &used_h, line, line_h);
+                output.type = document_layout::BlockType::Paragraph;
             }
+            output.text = std::move(block.text);
+            output.resource = std::move(block.href);
+            output.content_position = content_position;
+            output.image_width = block.image_width;
+            output.image_height = block.image_height;
+            output.blank_before = block.blank_before;
+            output.blank_after = block.blank_after;
+            output.heading = block.heading;
+            output.heading_level = block.heading_level;
+            output.page_break_before = block.page_break_before;
+            output.allow_first_line_indent = !block.heading &&
+                                             block.type == EpubContentBlockType::Text;
+            output.paragraph_spacing_after = output.allow_first_line_indent;
+            size_t text_bytes = output.text.size();
+            document_blocks.push_back(std::move(output));
 
-            for (int i = 0; i < block.blank_after; ++i) add_space(&page, &used_h, line_h);
+            if (is_image) {
+                content_position += 1;
+            } else {
+                content_position += text_bytes + 1;
+            }
         }
 
-        while (!page.empty() && page.back().type == PageItemType::Space) page.pop_back();
-        if (!page.empty()) _pages.push_back(page);
-        if (_pages.empty()) _pages.push_back(std::vector<PageItem>());
+        document_layout::Options options;
+        options.content_width = content_width();
+        options.content_height = content_height();
+        options.line_height = line_h;
+        ReaderStyle reader_style = reader_style_get();
+        int fullwidth_advance = renderer.measureFullwidthCellForLayout();
+        options.first_line_indent = fullwidth_advance * reader_style.first_line_indent;
+        options.paragraph_spacing_percent = reader_style.paragraph_spacing * 50;
+        options.layout_paragraph = [](void *context, const std::string &text, int width, int indent) {
+            return static_cast<TextRenderer *>(context)->layoutUtf8Paragraph(text, width, indent);
+        };
+        options.text_context = &renderer;
+        options.resolve_image = [](void *context,
+                                   const std::string &resource,
+                                   document_layout::ImageInfo *info) {
+            auto *reader = static_cast<EpubReaderActivity *>(context);
+            if (!reader || !info || !reader->is_supported_image_href(resource)) {
+                ESP_LOGW(TAG, "unsupported image href=%s", resource.c_str());
+                return false;
+            }
+            CachedImage image;
+            if (!reader->ensure_cached_image(resource, &image)) {
+                ESP_LOGW(TAG, "image layout probe failed href=%s", resource.c_str());
+                return false;
+            }
+            info->width = image.width;
+            info->height = image.height;
+            return true;
+        };
+        options.image_context = this;
+        _pages = document_layout::paginate(document_blocks, options);
+
+        for (const auto &page : _pages) {
+            for (const auto &item : page) {
+                if (item.type != PageItemType::Image) continue;
+                ESP_LOGI(TAG,
+                         "image layout href=%s src=%dx%d declared=%dx%d box=%dx%d scale=%.3f remaining=%d/%d fit_current=%d",
+                         item.resource.c_str(), item.source_width, item.source_height,
+                         item.declared_width, item.declared_height,
+                         item.width, item.height, (double)item.scale,
+                         item.remaining_height, content_height(),
+                         item.fitted_current_page ? 1 : 0);
+            }
+        }
+
         _page_count = (int)_pages.size();
         _page_index = std::min(_page_index, std::max(0, _page_count - 1));
     }
@@ -929,8 +956,8 @@ private:
     {
         if (!href || page_index < 0 || page_index >= (int)_pages.size()) return false;
         for (const auto &item : _pages[(size_t)page_index]) {
-            if (item.type == PageItemType::Image && is_supported_image_href(item.href)) {
-                *href = item.href;
+            if (item.type == PageItemType::Image && is_supported_image_href(item.resource)) {
+                *href = item.resource;
                 return true;
             }
         }
@@ -1037,7 +1064,6 @@ private:
     {
         M5.Display.fillRect(0, 0, w, TOP_H, TFT_WHITE);
         M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-        system_font::draw_left(M5.Display, "<", 8, 3);
 
         std::string title = _ok ? short_title(g_epub.title) : "EPUB open failed";
         system_font::draw_center(M5.Display, system_font::ellipsize(title, w - 180), w / 2, 3);
@@ -1080,14 +1106,29 @@ private:
             if ((i & 7) == 0) vTaskDelay(1);
             const PageItem &item = page[i];
             if (item.type == PageItemType::Text) {
-                if (!item.text.empty()) reader_text_renderer().drawUtf8Line(M5.Display, item.text, x, y, TFT_BLACK);
+                if (!item.text.empty()) {
+                    int text_x = x + item.x_offset;
+                    if (item.centered) {
+                        int text_width = reader_text_renderer().measureUtf8(item.text);
+                        text_x = x + std::max(0, (content_width() - text_width) / 2);
+                    }
+                    reader_text_renderer().drawUtf8Line(
+                        M5.Display, item.text, text_x, y, TFT_BLACK,
+                        item.justify ? item.width : 0);
+                }
                 y += line_h;
             } else if (item.type == PageItemType::Space) {
                 y += item.height > 0 ? item.height : line_h;
+            } else if (item.type == PageItemType::HorizontalRule) {
+                int rule_y = y + item.height / 2;
+                int inset = std::max(20, content_width() / 8);
+                M5.Display.drawFastHLine(x + inset, rule_y,
+                                         std::max(1, content_width() - inset * 2), TFT_BLACK);
+                y += item.height;
             } else if (item.type == PageItemType::Image) {
                 CachedImage image;
                 ImageLoadStats load_stats;
-                if (!ensure_cached_image(item.href, &image, &load_stats)) {
+                if (!ensure_cached_image(item.resource, &image, &load_stats)) {
                     system_font::draw_left(M5.Display, "[image]", x, y);
                     y += item.height;
                     continue;
@@ -1096,14 +1137,16 @@ private:
                 int draw_w = item.width;
                 int draw_h = item.height;
                 float scale = item.scale;
-                fit_image_box(image.width, image.height, content_width(), item.height, &draw_w, &draw_h, &scale);
+                fit_image_box(image.width, image.height,
+                              item.width > 0 ? item.width : content_width(),
+                              item.height, &draw_w, &draw_h, &scale);
                 int draw_x = x + std::max(0, (content_width() - draw_w) / 2);
                 int draw_y = y + std::max(0, (item.height - draw_h) / 2);
                 ImageDrawStats draw_stats;
                 bool ok = draw_cached_image(image, draw_x, draw_y, draw_w, draw_h, scale, &draw_stats);
                 ESP_LOGI(TAG,
-                         "image timing href=%s ext=%s src=%dx%d draw=%dx%d scale=%.3f mem_cache=%d file_cache=%d extract=%lld probe=%lld load=%lld hw_try=%d hw_ok=%d hw_read=%lld hw_header=%lld hw_decode=%lld hw_scale=%lld hw_push=%lld hw_total=%lld sw_try=%d sw_ok=%d sw_denom=%d sw_budget=%u sw_header=%lld sw_decode=%lld sw_push=%lld sw_total=%lld file_draw=%lld fallback=%d fallback_read=%lld fallback_draw=%lld draw=%lld ok=%d progressive=%d",
-                         item.href.c_str(),
+                         "image timing href=%s ext=%s src=%dx%d draw=%dx%d scale=%.3f mem_cache=%d file_cache=%d extract=%lld probe=%lld load=%lld hw_try=%d hw_ok=%d hw_read=%lld hw_header=%lld hw_decode=%lld hw_scale=%lld hw_push=%lld hw_total=%lld sw_try=%d sw_ok=%d sw_denom=%d sw_budget=%u sw_coeff=%u/%u sw_header=%lld sw_decode=%lld sw_push=%lld sw_total=%lld file_draw=%lld fallback=%d fallback_read=%lld fallback_draw=%lld draw=%lld ok=%d progressive=%d",
+                         item.resource.c_str(),
                          image.ext.c_str(),
                          image.width,
                          image.height,
@@ -1127,6 +1170,8 @@ private:
                          draw_stats.software_ok ? 1 : 0,
                          draw_stats.software_scale_denom,
                          (unsigned)draw_stats.software_memory_budget,
+                         (unsigned)draw_stats.software_compact_coefficients,
+                         (unsigned)draw_stats.software_legacy_coefficients,
                          draw_stats.software_header_ms,
                          draw_stats.software_decode_ms,
                          draw_stats.software_push_ms,
