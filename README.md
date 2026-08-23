@@ -1,260 +1,248 @@
-| Supported Targets | ESP32 | ESP32-P4 | ESP32-S3 |
-| ----------------- | ----- | -------- | -------- |
+# MyPaperP4
 
-# SD Card example (SDMMC)
+MyPaperP4 是一套面向自定义 **ESP32-P4 单色墨水屏设备**的阅读与音频固件。项目以本地阅读为核心，同时集成 SD 卡文件管理、网页传输、本地音乐、网络收音机和 RSS 阅读，并针对 1216 × 684 墨水屏、PSRAM、ESP32-C6 Hosted Wi-Fi 和 ES8311 音频链路做了适配与性能优化。
 
-(See the README.md file in the upper level 'examples' directory for more information about examples.)
+> 本项目与具体硬件连接紧密耦合，并不是通用 ESP32-P4 开发板示例。直接移植到其他硬件前，需要重新配置屏幕总线、电源、触摸、SDMMC、Wi-Fi 协处理器和音频引脚。
 
-__WARNING:__ This example can potentially delete all data from your SD card (when formatting is enabled). Back up your data first before proceeding.
+## 主要功能
 
-This example demonstrates how to use an SD card with an ESP device. Example does the following steps:
+### 阅读
 
-1. Use an "all-in-one" `esp_vfs_fat_sdmmc_mount` function to:
-    - initialize SDMMC peripheral,
-    - probe and initialize an SD card,
-    - mount FAT filesystem using FATFS library (and format card, if the filesystem cannot be mounted),
-    - register FAT filesystem in VFS, enabling C standard library and POSIX functions to be used.
-1. Print information about the card, such as name, type, capacity, and maximum supported frequency.
-1. Create a file using `fopen` and write to it using `fprintf`.
-1. Rename the file. Before renaming, check if destination file already exists using `stat` function, and remove it using `unlink` function.
-1. Open renamed file for reading, read back the line, and print it to the terminal.
-1. __OPTIONAL:__ Format the SD card, check if the file doesn't exist anymore.
+- TXT 与 EPUB 阅读。
+- TXT 支持 UTF-8、UTF-16LE、GBK 和 Latin-1 回退。
+- EPUB2/EPUB3 目录、封面、正文图片和阅读进度。
+- EPUB ZIP 索引与元数据持久化缓存，加快再次打开速度。
+- 最近阅读书架，支持 EPUB 封面缩略图缓存。
+- 共用分页与排版框架：
+  - 字号与行距
+  - 首行缩进字符数
+  - 段间距
+  - 左右页边距
+  - CJK 标点避头尾与两端排版
+  - 图片显示开关
+- TTF、OTF 和 EDCBook `.bin` 字体切换。
+- `quality`、`text`、`fast`、`fastest` 四种墨水屏刷新模式。
 
-This example supports SD (SDSC, SDHC, SDXC) cards and eMMC chips.
+### 音频
 
-## Hardware
+- 从 SD 卡递归扫描并播放 MP3、FLAC、WAV、M4A、AAC、Ogg Vorbis 和 Opus。
+- 顺序播放、随机播放、上一首、下一首、暂停与音量调节。
+- 播放进度、已播放时间和总时长显示。
+- 44.1 kHz、48 kHz 音频按原采样率输出；高于 48 kHz 时转换到设备支持范围。
+- 相邻歌曲采样率相同时避免重复配置 I²S/Codec。
+- 支持 ID3 `SYLT`、`USLT`/`TXXX`、Vorbis Comment 和 M4A `©lyr` 中的同步歌词。
+- 没有可用内嵌歌词时，自动查找音频同目录下的同名 `.lrc` 文件。
+- 外置 LRC 支持 UTF-8、UTF-16 和 GBK。
+- 内置 CNR HLS 网络电台，支持顺序或随机切台。
 
-This example requires an ESP32 or ESP32-S3 development board with an SD card slot and an SD card.
+### 网络与内容
 
-Although it is possible to connect an SD card breakout adapter, keep in mind that connections using breakout cables are often unreliable and have poor signal integrity. You may need to use lower clock frequency when working with SD card breakout adapters.
+- ESP32-C6 作为 ESP-Hosted Wi-Fi 协处理器，通过 SDIO 与 ESP32-P4 通信。
+- 离开网络功能后可停止 Wi-Fi、关闭 C6 电源，降低待机功耗。
+- RSS 源列表、新闻列表、正文分页和文章图片缓存。
+- Bing 每日壁纸浏览与保存。
+- 浏览器批量上传文件，按扩展名自动保存到 SD 卡对应目录。
 
-This example doesn't utilize card detect (CD) and write protect (WP) signals from SD card slot.
+### 文件与交互
 
-### Pin assignments for ESP32
+- SD 卡文件浏览器可打开书籍、图片、字体和音频。
+- JPG、PNG、BMP 图片浏览。
+- 电容触摸：点击、长按、上下左右滑动和边缘返回手势。
+- 五键 ADC 键盘：返回、上、下、确认和扩展功能。
+- 墨水屏局部脏区刷新，减少无关区域刷新和闪烁。
 
-On ESP32, SDMMC peripheral is connected to specific GPIO pins using the IO MUX. GPIO pins cannot be customized. Please see the table below for the pin connections.
+## 当前界面状态
 
-When using an ESP-WROVER-KIT board, this example runs without any extra modifications required. Only an SD card needs to be inserted into the slot.
+| 入口 | 状态 |
+| --- | --- |
+| Book | 最近阅读书架与阅读器 |
+| Files / Images | SD 卡文件与图片浏览 |
+| Music | 本地音乐、歌词与播放控制 |
+| Radio | 网络收音机 |
+| News | RSS 与 Bing 壁纸 |
+| Transfer | Wi-Fi 网页传输 |
+| Clock / Setting | 当前仍为占位界面 |
 
-ESP32 pin     | SD card pin | Notes
---------------|-------------|------------
-GPIO14 (MTMS) | CLK         | 10k pullup in SD mode
-GPIO15 (MTDO) | CMD         | 10k pullup in SD mode
-GPIO2         | D0          | 10k pullup in SD mode, pull low to go into download mode (see Note about GPIO2 below!)
-GPIO4         | D1          | not used in 1-line SD mode; 10k pullup in 4-line SD mode
-GPIO12 (MTDI) | D2          | not used in 1-line SD mode; 10k pullup in 4-line SD mode (see Note about GPIO12 below!)
-GPIO13 (MTCK) | D3          | not used in 1-line SD mode, but card's D3 pin must have a 10k pullup
+## 硬件与构建配置
 
+| 项目 | 配置 |
+| --- | --- |
+| 主控 | ESP32-P4，最低芯片版本 1.0 |
+| CPU | 360 MHz |
+| Flash | 32 MB |
+| PSRAM | 200 MHz Hex PSRAM |
+| 屏幕 | 1216 × 684 单色 EPD |
+| 触摸 | GT911 兼容触摸链路 |
+| 存储 | 4-bit SDMMC |
+| Wi-Fi | ESP32-C6 + ESP-Hosted SDIO |
+| 音频 | ES8311 + I²S + PA |
+| SDK | ESP-IDF 5.3.5 |
 
-### Pin assignments for ESP32-S3
+主要外设引脚如下：
 
-On ESP32-S3, SDMMC peripheral is connected to GPIO pins using GPIO matrix. This allows arbitrary GPIOs to be used to connect an SD card. In this example, GPIOs can be configured in two ways:
+| 外设 | 引脚 |
+| --- | --- |
+| SDMMC CLK/CMD/D0/D1/D2/D3 | GPIO43/44/39/40/41/42 |
+| Audio I²C SDA/SCL | GPIO7/8 |
+| I²S MCLK/SCLK/DOUT/LRCK/DIN | GPIO13/12/11/10/9 |
+| Audio PA | GPIO53 |
+| ESP32-C6 Reset/Enable | GPIO54 |
+| ADC keys | GPIO1 / ADC1_CH0 |
 
-1. Using menuconfig: Run `idf.py menuconfig` in the project directory and open "SD/MMC Example Configuration" menu.
-2. In the source code: See the initialization of `sdmmc_slot_config_t slot_config` structure in the example code.
+屏幕数据总线、电源管理和触摸配置位于仓库内定制的 M5GFX/M5Unified 实现中。
 
-The table below lists the default pin assignments.
+## 构建与烧录
 
-When using an ESP32-S3-USB-OTG board, this example runs without any extra modifications required. Only an SD card needs to be inserted into the slot.
+### 1. 准备环境
 
-ESP32-S3 pin  | SD card pin | Notes
---------------|-------------|------------
-GPIO36        | CLK         | 10k pullup
-GPIO35        | CMD         | 10k pullup
-GPIO37        | D0          | 10k pullup
-GPIO38        | D1          | not used in 1-line SD mode; 10k pullup in 4-line mode
-GPIO33        | D2          | not used in 1-line SD mode; 10k pullup in 4-line mode
-GPIO34        | D3          | not used in 1-line SD mode, but card's D3 pin must have a 10k pullup
+安装 ESP-IDF 5.3.5，并加载 ESP-IDF 环境。仓库已经包含当前使用的 M5GFX、M5Unified、FreeType，以及经过项目适配的部分 managed components。
 
-### Pin assignments for ESP32-P4
-
-On ESP32-P4, Slot 1 of the SDMMC peripheral is connected to GPIO pins using GPIO matrix. This allows arbitrary GPIOs to be used to connect an SD card. In this example, GPIOs can be configured in two ways:
-
-1. Using menuconfig: Run `idf.py menuconfig` in the project directory and open `SD/MMC Example Configuration` menu.
-2. In the source code: See the initialization of `sdmmc_slot_config_t slot_config` structure in the example code.
-
-The table below lists the default pin assignments.
-
-ESP32-P4 pin  | SD card pin | Notes
---------------|-------------|------------
-GPIO43        | CLK         | 10k pullup
-GPIO44        | CMD         | 10k pullup
-GPIO39        | D0          | 10k pullup
-GPIO40        | D1          | not used in 1-line SD mode; 10k pullup in 4-line mode
-GPIO41        | D2          | not used in 1-line SD mode; 10k pullup in 4-line mode
-GPIO42        | D3          | not used in 1-line SD mode, but card's D3 pin must have a 10k pullup
-
-Default dedicated pins on ESP32-P4 are able to connect to an ultra high-speed SD card (UHS-I) which requires 1.8V switching (instead of the regular 3.3V). This means the user has to provide an external LDO power supply to use them, or to enable and configure an internal LDO via `idf.py menuconfig` -> `SD/MMC Example Configuration` -> `SD power supply comes from internal LDO IO`.
-
-When using different GPIO pins this is not required and `SD power supply comes from internal LDO IO` setting can be disabled.
-
-### 4-line and 1-line SD modes
-
-By default, this example uses 4 line SD mode, utilizing 6 pins: CLK, CMD, D0 - D3. It is possible to use 1-line mode (CLK, CMD, D0) by changing "SD/MMC bus width" in the example configuration menu (see `CONFIG_EXAMPLE_SDMMC_BUS_WIDTH_1`).
-
-Note that even if card's D3 line is not connected to the ESP chip, it still has to be pulled up, otherwise the card will go into SPI protocol mode.
-
-### Note about GPIO2 (ESP32 only)
-
-GPIO2 pin is used as a bootstrapping pin, and should be low to enter UART download mode. One way to do this is to connect GPIO0 and GPIO2 using a jumper, and then the auto-reset circuit on most development boards will pull GPIO2 low along with GPIO0, when entering download mode.
-
-- Some boards have pulldown and/or LED on GPIO2. LED is usually ok, but pulldown will interfere with D0 signals and must be removed. Check the schematic of your development board for anything connected to GPIO2.
-
-### Note about GPIO12 (ESP32 only)
-
-GPIO12 is used as a bootstrapping pin to select output voltage of an internal regulator which powers the flash chip (VDD_SDIO). This pin has an internal pulldown so if left unconnected it will read low at reset (selecting default 3.3V operation). When adding a pullup to this pin for SD card operation, consider the following:
-
-- For boards which don't use the internal regulator (VDD_SDIO) to power the flash, GPIO12 can be pulled high.
-- For boards which use 1.8V flash chip, GPIO12 needs to be pulled high at reset. This is fully compatible with SD card operation.
-- On boards which use the internal regulator and a 3.3V flash chip, GPIO12 must be low at reset. This is incompatible with SD card operation.
-    * In most cases, external pullup can be omitted and an internal pullup can be enabled using a `gpio_pullup_en(GPIO_NUM_12);` call. Most SD cards work fine when an internal pullup on GPIO12 line is enabled. Note that if ESP32 experiences a power-on reset while the SD card is sending data, high level on GPIO12 can be latched into the bootstrapping register, and ESP32 will enter a boot loop until external reset with correct GPIO12 level is applied.
-    * Another option is to burn the flash voltage selection efuses. This will permanently select 3.3V output voltage for the internal regulator, and GPIO12 will not be used as a bootstrapping pin. Then it is safe to connect a pullup resistor to GPIO12. This option is suggested for production use.
-
-The following command can be used to program flash voltage selection efuses **to 3.3V**:
-
-```sh
-    components/esptool_py/esptool/espefuse.py set_flash_voltage 3.3V
+```bash
+git clone https://github.com/mzhBIT/MyPaperP4.git
+cd MyPaperP4
+idf.py set-target esp32p4
+idf.py build
 ```
 
-This command will burn the `XPD_SDIO_TIEH`, `XPD_SDIO_FORCE`, and `XPD_SDIO_REG` efuses. With all three burned to value 1, the internal VDD_SDIO flash voltage regulator is permanently enabled at 3.3V. See the technical reference manual for more details.
+如果仓库中已有正确的 `sdkconfig`，通常可以跳过 `set-target`，直接构建。
 
-`espefuse.py` has a `--do-not-confirm` option if running from an automated flashing script.
+### 2. 烧录与串口监视
 
-See [the document about pullup requirements](https://docs.espressif.com/projects/esp-idf/en/latest/api-reference/peripherals/sd_pullup_requirements.html) for more details about pullup support and compatibility of modules and development boards.
+Windows：
 
-## How to use example
-
-### Build and flash
-
-Build the project and flash it to the board, then run monitor tool to view serial output:
-
-```
-idf.py -p PORT flash monitor
+```powershell
+idf.py -p COM5 flash monitor
 ```
 
-(Replace PORT with serial port name.)
+Linux/macOS：
 
-(To exit the serial monitor, type ``Ctrl-]``.)
-
-See the Getting Started Guide for full steps to configure and use ESP-IDF to build projects.
-
-
-## Example output
-
-Here is an example console output. In this case a 128MB SDSC card was connected, and `EXAMPLE_FORMAT_IF_MOUNT_FAILED` menuconfig option enabled. Card was unformatted, so the initial mount has failed. Card was then partitioned, formatted, and mounted again.
-
-```
-I (336) example: Initializing SD card
-I (336) example: Using SDMMC peripheral
-I (336) gpio: GPIO[13]| InputEn: 0| OutputEn: 1| OpenDrain: 0| Pullup: 0| Pulldown: 0| Intr:0
-W (596) vfs_fat_sdmmc: failed to mount card (13)
-W (596) vfs_fat_sdmmc: partitioning card
-W (596) vfs_fat_sdmmc: formatting card, allocation unit size=16384
-W (7386) vfs_fat_sdmmc: mounting again
-Name: XA0E5
-Type: SDHC/SDXC
-Speed: 20 MHz
-Size: 61068MB
-I (7386) example: Opening file /sdcard/hello.txt
-I (7396) example: File written
-I (7396) example: Renaming file /sdcard/hello.txt to /sdcard/foo.txt
-I (7396) example: Reading file /sdcard/foo.txt
-I (7396) example: Read from file: 'Hello XA0E5!'
-I (7396) example: Card unmounted
+```bash
+idf.py -p /dev/ttyUSB0 flash monitor
 ```
 
-## Troubleshooting
+串口监视默认波特率为 115200。退出 ESP-IDF monitor 使用 `Ctrl-]`。
 
-### Failure to download the example
+自定义分区表位于 [`partitions.csv`](partitions.csv)，当前 factory app 分区大小为 8 MB。
 
-```
-Connecting........_____....._____....._____....._____....._____....._____....._____
+## SD 卡准备
 
-A fatal error occurred: Failed to connect to Espressif device: Invalid head of packet (0x34)
-```
+建议使用 FAT32，并在卡根目录准备以下结构。应用会在需要时创建大部分目录：
 
-Disconnect the SD card D0/MISO line from GPIO2 and try uploading again. Read "Note about GPIO2" above.
-
-### Card fails to initialize with `sdmmc_init_sd_scr: send_scr (1) returned 0x107` error
-
-Check connections between the card and the ESP32. For example, if you have disconnected GPIO2 to work around the flashing issue, connect it back and reset the ESP32 (using a button on the development board, or by pressing Ctrl-T Ctrl-R in IDF Monitor).
-
-### Card fails to initialize with `sdmmc_check_scr: send_scr returned 0xffffffff` error
-
-Connections between the card and the ESP32 are too long for the frequency used. Try using shorter connections, or try reducing the clock speed of SD interface.
-
-### Failure to mount filesystem
-
-```
-example: Failed to mount filesystem. If you want the card to be formatted, set the EXAMPLE_FORMAT_IF_MOUNT_FAILED menuconfig option.
-```
-The example will be able to mount only cards formatted using FAT32 filesystem. If the card is formatted as exFAT or some other filesystem, you have an option to format it in the example code. Enable the `EXAMPLE_FORMAT_IF_MOUNT_FAILED` menuconfig option, then build and flash the example.
-
-### Debug SD connections and pullup strength
-
-> If the initialization of the SD card fails, initially follow the above options. If the issue persists, confirm the connection of pullups to the SD pins. To do this, enable the` Debug sd pin connections and pullup strength` option from menuconfig and rerun the code. This will provide the following result:
-
-```
-**** PIN recovery time ****
-
-PIN 14 CLK  10044 cycles
-PIN 15 CMD  10034 cycles
-PIN  2  D0  10034 cycles
-PIN  4  D1  10034 cycles
-PIN 12  D2  10034 cycles
-PIN 13  D3  10034 cycles
-
-**** PIN recovery time with weak pullup ****
-
-PIN 14 CLK  100 cycles
-PIN 15 CMD  100 cycles
-PIN  2  D0  100 cycles
-PIN  4  D1  100 cycles
-PIN 12  D2  100 cycles
-PIN 13  D3  100 cycles
-
-**** PIN voltage levels ****
-
-PIN 14 CLK  0.6V
-PIN 15 CMD  0.3V
-PIN  2  D0  0.8V
-PIN  4  D1  0.6V
-PIN 12  D2  0.4V
-PIN 13  D3  0.8V
-
-**** PIN voltage levels with weak pullup ****
-
-PIN 14 CLK  1.0V
-PIN 15 CMD  1.1V
-PIN  2  D0  1.0V
-PIN  4  D1  1.0V
-PIN 12  D2  1.0V
-PIN 13  D3  1.2V
-
-**** PIN cross-talk ****
-
-              CLK   CMD    D0    D1    D2    D3
-PIN 14 CLK     --   0.2V  0.1V  0.1V  0.1V  0.2V
-PIN 15 CMD    0.1V   --   0.1V  0.1V  0.1V  0.1V
-PIN  2  D0    0.1V  0.1V   --   0.2V  0.1V  0.1V
-PIN  4  D1    0.1V  0.1V  0.3V   --   0.1V  0.1V
-PIN 12  D2    0.1V  0.2V  0.2V  0.1V   --   0.1V
-PIN 13  D3    0.1V  0.2V  0.1V  0.1V  0.1V   --
-
-**** PIN cross-talk with weak pullup ****
-
-              CLK   CMD    D0    D1    D2    D3
-PIN 14 CLK     --   1.0V  1.0V  1.0V  1.0V  1.2V
-PIN 15 CMD    0.9V   --   1.0V  1.0V  1.0V  1.2V
-PIN  2  D0    0.9V  1.0V   --   1.0V  1.0V  1.2V
-PIN  4  D1    0.9V  1.0V  1.2V   --   1.0V  1.2V
-PIN 12  D2    0.9V  1.1V  1.2V  0.9V   --   1.2V
-PIN 13  D3    0.9V  1.2V  1.1V  0.9V  0.9V   --
-I (845) main_task: Returned from app_main()
+```text
+/books/                 TXT、EPUB
+/images/                JPG、JPEG、PNG、BMP
+/fonts/                 TTF、OTF、EDCBook BIN 字体
+/music/                 MP3、FLAC、WAV、M4A、AAC、OGG、OPUS
+/wifi.txt               Wi-Fi 凭据
+/rss.txt                自定义 RSS 源
+/.reader/               自动生成的应用数据与缓存
 ```
 
-In the absence of connected pullups and having the weak pullups enabled, you can assess the pullup connections by comparing PIN recovery time measured in CPU cycles. To check pullup connections, configure the pin as open drain, set it to low state, and count the cpu cycles consumed before returning to high state. If a pullup is connected, the pin will get back to high state after reasonably small cycle count, typically around 50-300 cycles, depending on pullup strength. If no pullup is connected, the PIN stays low and the measurement times out after 10000 cycles.
+歌词文件与音频保持同目录、同文件名：
 
-It will also provide the voltage levels at the corresponding SD pins. By default, this information is provided for ESP32 chip only, and for other chipsets, verify the availability of ADC pins for the respective GPIO using [this](https://docs.espressif.com/projects/esp-idf/en/latest/esp32/api-reference/peripherals/gpio.html#gpio-summary) and configure ADC mapped pins using menuconfig. Then test the voltage levels accordingly.
+```text
+/music/林俊杰 - 江南.flac
+/music/林俊杰 - 江南.lrc
+```
 
-You can monitor the voltage levels of individual pins using `PIN voltage levels` and `PIN voltage levels with weak pullup`. However, if one pin being pulled low and experiencing interference with another pin, you can detect it through `PIN cross-talk` and `PIN cross-talk with weak pullup`. In the absence of pullups, voltage levels at each pin should range from 0 to 0.3V. With 10k pullups connected, the voltage will be between 3.1V to 3.3V, contingent on the connection between ADC pins and SD pins, and with weak pullups connected, it can fluctuate between 0.8V to 1.2V, depending on pullup strength.
+### Wi-Fi 配置
+
+`/sdcard/wifi.txt` 支持键值格式：
+
+```ini
+ssid=YourWiFiName
+password=YourWiFiPassword
+```
+
+也支持第一行 SSID、第二行密码的简单格式。
+
+> 不要把真实 Wi-Fi 密码提交到公开仓库。发布固件前，请检查 `sdkconfig.defaults`、`WifiTransferActivity.cpp` 和 `RssReaderActivity.cpp` 中的构建期默认值。
+
+### RSS 配置
+
+`/sdcard/rss.txt` 每行一个源，可使用 `标题|URL`：
+
+```text
+IT之家|https://www.ithome.com/rss
+Bing Wallpaper|https://rsshub.app/bing
+```
+
+空行和以 `#` 开头的行会被忽略。没有配置文件或没有有效条目时，应用使用内置 RSS 源。
+
+## Wi-Fi 文件传输
+
+打开主页的 **Transfer**：
+
+1. 设备优先尝试连接已配置的路由器。
+2. 连接成功后，屏幕显示设备 IP 地址。
+3. 若 STA 连接失败，设备回退到 AP 模式；默认 AP 密码为 `12345678`。
+4. 手机或电脑访问屏幕显示的 HTTP 地址。
+5. 选择一个或多个支持的文件并上传。
+
+上传文件会自动分类：
+
+| 文件类型 | 目标目录 |
+| --- | --- |
+| TXT、EPUB | `/sdcard/books` |
+| JPG、JPEG、PNG、BMP | `/sdcard/images` |
+| TTF、OTF、BIN | `/sdcard/fonts` |
+| 支持的音频格式 | `/sdcard/music` |
+
+## 缓存与持久化数据
+
+应用数据保存在 `/sdcard/.reader/`：
+
+```text
+recent_books             最近阅读列表
+reader_style             阅读排版设置
+reader_font              当前字体
+txtprogress/             TXT 阅读进度
+epubprogress/            EPUB 阅读进度
+epub_tmp/                EPUB 图片按需解压缓存
+epub_meta/               EPUB ZIP 索引与元数据缓存
+rss_img/                 RSS 图片缓存
+```
+
+缓存文件可以删除，应用会在下次使用时重新生成；删除进度文件会丢失对应阅读位置。
+
+## 项目结构
+
+```text
+MyPaperP4/
+├─ main/
+│  ├─ activities/        页面与交互逻辑
+│  ├─ audio/             本地音乐、收音机、Codec 与歌词
+│  ├─ input/             触摸与 ADC 按键
+│  ├─ parser/            TXT、EPUB、HTML 与编码解析
+│  ├─ renderer/          分页、文字、图片与封面缩略图
+│  ├─ storage/           SD 卡和应用路径
+│  ├─ ui/                字体、样式和位图图标
+│  └─ wifi/              ESP-Hosted Wi-Fi 生命周期
+├─ components/           定制 M5GFX、M5Unified、FreeType
+├─ managed_components/   项目使用并做过适配的 Espressif 组件
+├─ Assets/               SVG 设计与图标源文件
+├─ tools/                图标转换等开发工具
+├─ sdkconfig.defaults
+└─ partitions.csv
+```
+
+应用内部采用 `Activity`/`ActivityManager` 管理页面。更详细的源码模块说明见 [`main/README.md`](main/README.md)。
+
+## 注意事项
+
+- 本项目不会在 SD 卡挂载失败时自动格式化存储卡。
+- 网络电台地址和 RSS 服务可能因第三方服务变化而失效。
+- 墨水屏快速局刷会产生一定残影；Music、Radio 等页面首次进入时使用高质量模式清屏。
+- Progressive JPEG 解码设有内存预算，大分辨率图片会优先缩放或使用紧凑解码路径。
+- 单扬声器设备最终听到的声道由硬件布线决定；软件音频管线当前使用双声道 I²S 格式输出。
+- `managed_components/` 中包含项目级修订，升级 ESP-IDF 或组件版本时需要重新核对这些改动。
+
+## 开发状态
+
+项目仍在持续开发中。提交问题时建议附上：
+
+- 使用的提交版本
+- ESP-IDF 版本
+- 完整串口日志
+- 触发问题的文件格式与操作步骤
+- 是否同时启用了 EPD、SD、Wi-Fi 或音频
