@@ -234,15 +234,16 @@ private:
     void draw_topbar()
     {
         int w = M5.Display.width();
-        M5.Display.fillRect(0, 0, w, TOP_H, TFT_BLACK);
-        M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-        system_font::draw_left(M5.Display, "<", 8, 3, TFT_WHITE);
-        system_font::draw_center(M5.Display, system_font::ellipsize(short_name(_path), w - 170), w / 2, 3, TFT_WHITE);
+        M5.Display.fillRect(0, 0, w, TOP_H, TFT_WHITE);
+        M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+        system_font::draw_left(M5.Display, "<", 8, 3, TFT_BLACK);
+        system_font::draw_center(M5.Display, system_font::ellipsize(short_name(_path), w - 170), w / 2, 3, TFT_BLACK);
         if (_images.size() > 1) {
             char buf[24];
             std::snprintf(buf, sizeof(buf), "%d/%d", _index + 1, (int)_images.size());
-            system_font::draw_right(M5.Display, buf, w - 8, 3, TFT_WHITE);
+            system_font::draw_right(M5.Display, buf, w - 8, 3, TFT_BLACK);
         }
+        M5.Display.drawFastHLine(0, TOP_H - 1, w, TFT_BLACK);
     }
 
     void draw_message(const char *msg)

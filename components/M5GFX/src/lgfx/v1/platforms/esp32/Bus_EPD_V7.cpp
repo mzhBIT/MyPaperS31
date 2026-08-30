@@ -1,4 +1,5 @@
 #include "Bus_EPD_V7.hpp"
+#include "EpdScan2DContinuous.hpp"
 
 #if SOC_LCD_I80_SUPPORTED
 
@@ -111,6 +112,18 @@ bool Bus_EPD_V7::init(void) {
     out &= ~(PCA_BIT_OE | PCA_BIT_MODE | PCA_BIT_PWRUP | PCA_BIT_VCOMCTRL | PCA_BIT_WAKEUP);
     pca_write_init(3, out);
 
+#if defined(CONFIG_IDF_TARGET_ESP32P4) \
+ && MYPAPER_EPD_USE_2D_ENGINE && MYPAPER_EPD_2D_CONTINUOUS_SCAN
+    if (!epd2d_continuous_scan_init(_config,
+                                    MYPAPER_EPD_MEMORY_WIDTH,
+                                    MYPAPER_EPD_MEMORY_HEIGHT)) {
+        ESP_LOGE(TAG, "2D continuous scan initialization failed");
+        return false;
+    }
+    ESP_LOGI(TAG, "2D continuous LCD_CAM scan selected; legacy I80 not initialized");
+    return true;
+#endif
+
     // i80 bus setup
     esp_lcd_i80_bus_config_t bus_config;
     memset(&bus_config, 0, sizeof(bus_config));
@@ -159,6 +172,45 @@ bool Bus_EPD_V7::init(void) {
              (int)_config.pin_spv, (int)_config.pin_le);
 
     return true;
+}
+
+bool Bus_EPD_V7::supports2DContinuousScan(void) const {
+#if defined(CONFIG_IDF_TARGET_ESP32P4) \
+ && MYPAPER_EPD_USE_2D_ENGINE && MYPAPER_EPD_2D_CONTINUOUS_SCAN
+    return true;
+#else
+    return false;
+#endif
+}
+
+bool Bus_EPD_V7::write2DFrame(const uint8_t* data, size_t length,
+                              uint32_t timeout_ms, uint32_t* scan_time_us) {
+#if defined(CONFIG_IDF_TARGET_ESP32P4) \
+ && MYPAPER_EPD_USE_2D_ENGINE && MYPAPER_EPD_2D_CONTINUOUS_SCAN
+    return epd2d_continuous_scan_frame(data, length, timeout_ms, scan_time_us);
+#else
+    (void)data;
+    (void)length;
+    (void)timeout_ms;
+    if (scan_time_us) { *scan_time_us = 0; }
+    return false;
+#endif
+}
+
+bool Bus_EPD_V7::write2DStream(epd_2d_line_renderer_t renderer, void* context,
+                               uint32_t timeout_ms,
+                               epd_2d_stream_stats_t* stats) {
+#if defined(CONFIG_IDF_TARGET_ESP32P4) \
+ && MYPAPER_EPD_USE_2D_ENGINE && MYPAPER_EPD_2D_CONTINUOUS_SCAN \
+ && MYPAPER_EPD_2D_LINE_STREAM
+    return epd2d_continuous_scan_stream(renderer, context, timeout_ms, stats);
+#else
+    (void)renderer;
+    (void)context;
+    (void)timeout_ms;
+    if (stats) { *stats = {}; }
+    return false;
+#endif
 }
 
 // ─── Override powerControl ────────────────────────────────────────

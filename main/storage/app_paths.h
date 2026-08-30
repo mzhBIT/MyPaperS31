@@ -11,6 +11,8 @@ const char *epub_progress_dir();
 const char *epub_cache_dir();
 const char *epub_metadata_dir();
 const char *rss_image_cache_dir();
+const char *music_cover_cache_dir();
+const char *deepseek_sessions_dir();
 
 void ensure_data_dir();
 void ensure_dir(const char *path);

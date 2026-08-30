@@ -1,6 +1,9 @@
 #include "recent_books.h"
+#include "parser/epub_parser.h"
 #include "storage/app_paths.h"
 
+#include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <strings.h>
@@ -8,12 +11,99 @@
 #include <vector>
 
 static constexpr size_t RECENT_BOOK_LIMIT = 12;
+static constexpr uint32_t TXT_PROGRESS_MAGIC = 0x54585032; // TXP2
+static constexpr uint32_t TXT_PROGRESS_VERSION = 1;
+static constexpr uint32_t EPUB_PROGRESS_MAGIC = 0x45504231; // EPB1
+static constexpr uint32_t EPUB_PROGRESS_VERSION = 2;
 
 const char *recent_book_base_name(const char *path)
 {
     if (!path || !path[0]) return "";
     const char *slash = strrchr(path, '/');
     return slash ? slash + 1 : path;
+}
+
+static std::string recent_book_file_stem(const char *path)
+{
+    std::string name = recent_book_base_name(path);
+    size_t dot = name.find_last_of('.');
+    if (dot != std::string::npos && dot > 0) name.erase(dot);
+    return name;
+}
+
+static std::string recent_book_progress_key(const char *path)
+{
+    size_t hash = 0;
+    for (const char *p = path ? path : ""; *p; ++p) {
+        hash = hash * 31 + (unsigned char)*p;
+    }
+    char key[32];
+    std::snprintf(key, sizeof(key), "%08lx", (unsigned long)hash);
+    return key;
+}
+
+static int txt_progress_percent(const char *path)
+{
+    struct stat source = {};
+    if (!path || stat(path, &source) != 0 || source.st_size <= 0) return 0;
+
+    std::string progress_path = std::string(app_paths::txt_progress_dir()) + "/" +
+                                recent_book_progress_key(path) + ".pos";
+    FILE *fp = std::fopen(progress_path.c_str(), "rb");
+    if (!fp) return 0;
+
+    uint32_t first = 0;
+    uint32_t offset = 0;
+    bool ok = std::fread(&first, 1, sizeof(first), fp) == sizeof(first);
+    if (ok && first == TXT_PROGRESS_MAGIC) {
+        uint32_t version = 0, layout = 0;
+        ok = std::fread(&version, 1, sizeof(version), fp) == sizeof(version) &&
+             std::fread(&layout, 1, sizeof(layout), fp) == sizeof(layout) &&
+             std::fread(&offset, 1, sizeof(offset), fp) == sizeof(offset) &&
+             version == TXT_PROGRESS_VERSION;
+    } else if (ok) {
+        // Legacy TXT progress files stored the byte offset directly.
+        offset = first;
+    }
+    std::fclose(fp);
+    if (!ok) return 0;
+
+    uint64_t file_size = (uint64_t)source.st_size;
+    uint64_t bounded = std::min<uint64_t>(offset, file_size);
+    return (int)std::min<uint64_t>(100, (bounded * 100 + file_size / 2) / file_size);
+}
+
+static RecentBookProgress epub_progress(const char *path)
+{
+    RecentBookProgress result;
+    std::string progress_path = std::string(app_paths::epub_progress_dir()) + "/" +
+                                recent_book_progress_key(path) + ".pos";
+    FILE *fp = std::fopen(progress_path.c_str(), "rb");
+    if (!fp) return result;
+
+    uint32_t magic = 0, version = 0, layout = 0, spine = 0;
+    uint64_t position = 0;
+    bool ok = std::fread(&magic, 1, sizeof(magic), fp) == sizeof(magic) &&
+              std::fread(&version, 1, sizeof(version), fp) == sizeof(version) &&
+              std::fread(&layout, 1, sizeof(layout), fp) == sizeof(layout) &&
+              std::fread(&spine, 1, sizeof(spine), fp) == sizeof(spine) &&
+              std::fread(&position, 1, sizeof(position), fp) == sizeof(position);
+    std::fclose(fp);
+    if (!ok || magic != EPUB_PROGRESS_MAGIC || version != EPUB_PROGRESS_VERSION) return result;
+
+    EpubBook::cached_progress_info(path, spine, position,
+                                   &result.percent, &result.chapter, &result.chapter_count);
+    return result;
+}
+
+RecentBookProgress recent_book_progress(const RecentBook &book)
+{
+    if (strcasecmp(book.type.c_str(), "epub") == 0) {
+        return epub_progress(book.path.c_str());
+    }
+    RecentBookProgress result;
+    result.percent = txt_progress_percent(book.path.c_str());
+    return result;
 }
 
 static void trim_line(std::string *s)
@@ -37,12 +127,18 @@ static void normalize_book(RecentBook *book)
     trim_line(&book->type);
     trim_line(&book->title);
     trim_line(&book->cover_path);
-    if (book->title.empty()) book->title = recent_book_base_name(book->path.c_str());
     if (!book->cover_path.empty() && !file_exists(book->cover_path)) book->cover_path.clear();
     if (book->type.empty()) {
         const char *dot = strrchr(book->path.c_str(), '.');
         if (dot && strcasecmp(dot, ".epub") == 0) book->type = "epub";
         else book->type = "txt";
+    }
+    // EPUB package titles are often extended with edition or promotional
+    // text. The recent shelf is file-oriented, so always show the original
+    // filename without its format suffix. The reader itself still uses the
+    // OPF title.
+    if (strcasecmp(book->type.c_str(), "epub") == 0 || book->title.empty()) {
+        book->title = recent_book_file_stem(book->path.c_str());
     }
 }
 
@@ -105,12 +201,15 @@ bool recent_book_save(const char *path, const char *type, const char *title, con
     RecentBook current;
     current.path = path;
     current.type = type;
-    current.title = (title && title[0]) ? title : recent_book_base_name(path);
+    current.title = strcasecmp(type, "epub") == 0
+                        ? recent_book_file_stem(path)
+                        : ((title && title[0]) ? title : recent_book_base_name(path));
     current.cover_path = (cover_path && cover_path[0]) ? cover_path : "";
 
     for (auto it = books.begin(); it != books.end(); ++it) {
         if (it->path != current.path) continue;
-        if ((!title || !title[0]) && !it->title.empty()) current.title = it->title;
+        if (strcasecmp(type, "epub") != 0 &&
+            (!title || !title[0]) && !it->title.empty()) current.title = it->title;
         if ((!cover_path || !cover_path[0]) && !it->cover_path.empty()) current.cover_path = it->cover_path;
         books.erase(it);
         break;
@@ -139,6 +238,67 @@ bool recent_book_save(const char *path, const char *type, const char *title, con
     if (std::rename(temp_path.c_str(), app_paths::recent_books_file()) != 0) {
         std::remove(temp_path.c_str());
         return false;
+    }
+    return true;
+}
+
+bool recent_books_rename_path(const char *old_path, const char *new_path)
+{
+    if (!old_path || !old_path[0] || !new_path || !new_path[0]) return false;
+    FILE *fp = std::fopen(app_paths::recent_books_file(), "rb");
+    if (!fp) return true;  // No shelf state to migrate.
+
+    std::vector<RecentBook> books;
+    while (books.size() < RECENT_BOOK_LIMIT) {
+        RecentBook book;
+        if (!read_line(fp, &book.path)) break;
+        if (!read_line(fp, &book.type) || !read_line(fp, &book.title) || !read_line(fp, &book.cover_path)) break;
+        trim_line(&book.path);
+        trim_line(&book.type);
+        trim_line(&book.title);
+        trim_line(&book.cover_path);
+        if (book.path == old_path) {
+            book.path = new_path;
+            book.title = recent_book_file_stem(new_path);
+        }
+        books.push_back(std::move(book));
+    }
+    std::fclose(fp);
+
+    app_paths::ensure_data_dir();
+    std::string temp_path = std::string(app_paths::recent_books_file()) + ".tmp";
+    fp = std::fopen(temp_path.c_str(), "wb");
+    if (!fp) return false;
+    bool ok = true;
+    for (const auto &book : books) {
+        if (std::fprintf(fp, "%s\n%s\n%s\n%s\n", book.path.c_str(), book.type.c_str(),
+                         book.title.c_str(), book.cover_path.c_str()) < 0) {
+            ok = false;
+            break;
+        }
+    }
+    if (std::fclose(fp) != 0) ok = false;
+    if (!ok) {
+        std::remove(temp_path.c_str());
+        return false;
+    }
+    std::remove(app_paths::recent_books_file());
+    if (std::rename(temp_path.c_str(), app_paths::recent_books_file()) != 0) {
+        std::remove(temp_path.c_str());
+        return false;
+    }
+
+    const std::string old_key = recent_book_progress_key(old_path);
+    const std::string new_key = recent_book_progress_key(new_path);
+    const char *dirs[] = {app_paths::txt_progress_dir(), app_paths::epub_progress_dir()};
+    for (const char *dir : dirs) {
+        std::string old_progress = std::string(dir) + "/" + old_key + ".pos";
+        std::string new_progress = std::string(dir) + "/" + new_key + ".pos";
+        struct stat st = {};
+        if (stat(old_progress.c_str(), &st) == 0) {
+            std::remove(new_progress.c_str());
+            std::rename(old_progress.c_str(), new_progress.c_str());
+        }
     }
     return true;
 }

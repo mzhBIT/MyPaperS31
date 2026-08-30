@@ -17,6 +17,7 @@ enum class HomeIconId {
     Music,
     Radio,
     Setting,
+    DeepSeek,
     Count,
 };
 

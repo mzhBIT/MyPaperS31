@@ -4,7 +4,10 @@
 #include "activities/ActivityManager.h"
 #include "audio/audio_file_formats.h"
 #include "audio/audio_radio.h"
+#include "audio/embedded_cover.h"
 #include "audio/embedded_lyrics.h"
+#include "renderer/CoverThumbnail.h"
+#include "renderer/P4JpegDecoder.h"
 #include "ui/SystemFont.h"
 #include "ui/music_icons_1bpp.h"
 
@@ -47,10 +50,16 @@ constexpr int MAIN_CONTROL_Y = 996;
 constexpr int BOTTOM_CONTROL_Y = 1135;
 constexpr int LIST_ROW_H = 62;
 constexpr int LIST_INSET = 8;
-constexpr int LIST_FOOTER_H = 42;
+constexpr int LIST_FOOTER_H = 62;
 constexpr int LYRICS_TOP = COVER_Y + 18;
-constexpr int LYRICS_BOTTOM = COVER_Y + COVER_H - 18;
+constexpr int LYRICS_BOTTOM = COVER_Y + COVER_H - 52;
 constexpr int LYRICS_ROWS = 9;
+constexpr int ALBUM_ART_SIZE = 430;
+constexpr int ALBUM_ART_X = COVER_X + (COVER_W - ALBUM_ART_SIZE) / 2;
+constexpr int ALBUM_ART_Y = COVER_Y + 48;
+constexpr int CURRENT_LYRIC_TOP = ALBUM_ART_Y + ALBUM_ART_SIZE + 42;
+constexpr int CURRENT_LYRIC_H = 112;
+constexpr int VIEW_INDICATOR_Y = COVER_Y + COVER_H - 14;
 constexpr int VOLUME_TOAST_H = 58;
 // Place the transient value beside the volume-up icon, vertically aligned
 // with the bottom controls and flush toward the screen's right edge.
@@ -62,6 +71,18 @@ constexpr int64_t VOLUME_TOAST_US = 1000000;
 struct Track {
     std::string path;
     std::string label;
+};
+
+enum class ContentView : uint8_t {
+    Cover = 0,
+    Lyrics,
+    List,
+};
+
+enum class PlayMode : uint8_t {
+    Sequence = 0,
+    Shuffle,
+    RepeatOne,
 };
 
 int design_x(int value)
@@ -203,7 +224,7 @@ public:
         audio_playback_state_t state = audio_radio_get_state();
         if (state == AUDIO_PLAYBACK_FINISHED && !_terminal_handled && _current >= 0) {
             _terminal_handled = true;
-            play_next();
+            play_next(true);
             return;
         } else if (state == AUDIO_PLAYBACK_ERROR && !_terminal_handled) {
             _terminal_handled = true;
@@ -221,13 +242,23 @@ public:
             ActivityManager::instance().pop();
             return true;
         }
+        if (event.type == TouchEventType::SwipeLeft ||
+            event.type == TouchEventType::SwipeRight) {
+            int start_y = event.start_y != 0 ? event.start_y : event.y;
+            if (start_y >= design_y(COVER_Y) && start_y <= design_y(COVER_Y + COVER_H) &&
+                _current >= 0) {
+                switch_view(event.type == TouchEventType::SwipeLeft ? 1 : -1);
+                return true;
+            }
+            return false;
+        }
         if (event.type == TouchEventType::SwipeUp) {
-            if (_show_list) page_down();
-            return _show_list;
+            if (_view == ContentView::List) page_down();
+            return _view == ContentView::List;
         }
         if (event.type == TouchEventType::SwipeDown) {
-            if (_show_list) page_up();
-            return _show_list;
+            if (_view == ContentView::List) page_up();
+            return _view == ContentView::List;
         }
         if (event.type != TouchEventType::Tap) return false;
 
@@ -249,15 +280,16 @@ public:
             return true;
         }
         if (hit_center(event.x, event.y, 91, BOTTOM_CONTROL_Y, 52, 46)) {
-            set_mode(true);
+            cycle_mode();
             return true;
         }
         if (hit_center(event.x, event.y, 207, BOTTOM_CONTROL_Y, 52, 46)) {
-            set_mode(false);
+            toggle_refresh_freeze();
             return true;
         }
         if (hit_center(event.x, event.y, 342, BOTTOM_CONTROL_Y, 52, 46)) {
-            _show_list = !_show_list;
+            if (_view == ContentView::List && _current < 0) return true;
+            _view = _view == ContentView::List ? ContentView::Cover : ContentView::List;
             ensure_focus_visible();
             draw_all();
             return true;
@@ -288,26 +320,26 @@ public:
             return true;
         }
         if (key == APP_KEY_EXTRA) {
-            set_mode(!_random);
+            cycle_mode();
             return true;
         }
         if (_tracks.empty()) return false;
         if (key == APP_KEY_UP && _focus > 0) {
-            _show_list = true;
+            _view = ContentView::List;
             --_focus;
             ensure_focus_visible();
             draw_all();
             return true;
         }
         if (key == APP_KEY_DOWN && _focus + 1 < (int)_tracks.size()) {
-            _show_list = true;
+            _view = ContentView::List;
             ++_focus;
             ensure_focus_visible();
             draw_all();
             return true;
         }
         if (key == APP_KEY_OK) {
-            if (_show_list && _current != _focus) play_index(_focus);
+            if (_view == ContentView::List && _current != _focus) play_index(_focus);
             else toggle_pause();
             return true;
         }
@@ -323,9 +355,10 @@ private:
     int _focus = 0;
     int _scroll = 0;
     int _current = -1;
-    bool _random = false;
-    bool _show_list = true;
+    PlayMode _play_mode = PlayMode::Sequence;
+    ContentView _view = ContentView::List;
     bool _terminal_handled = true;
+    bool _refresh_frozen = false;
     uint32_t _progress_permille = 0;
     uint32_t _elapsed_ms = 0;
     uint32_t _duration_ms = 0;
@@ -335,12 +368,22 @@ private:
     int64_t _volume_toast_hide_us = 0;
     bool _volume_toast_pending = false;
     bool _volume_toast_drawn = false;
+    std::string _cover_thumbnail_path;
     std::string _status;
 
     bool hit_center(int x, int y, int center_x, int center_y, int half_w, int half_h) const
     {
         return x >= design_x(center_x - half_w) && x <= design_x(center_x + half_w) &&
                y >= design_y(center_y - half_h) && y <= design_y(center_y + half_h);
+    }
+
+    void switch_view(int direction)
+    {
+        int view = static_cast<int>(_view);
+        view = (view + direction + 3) % 3;
+        _view = static_cast<ContentView>(view);
+        ensure_focus_visible();
+        draw_all();
     }
 
     int list_top() const
@@ -370,7 +413,8 @@ private:
 
     int hit_track(int x, int y) const
     {
-        if (!_show_list || x < design_x(COVER_X) || x > design_x(COVER_X + COVER_W)) return -1;
+        if (_view != ContentView::List ||
+            x < design_x(COVER_X) || x > design_x(COVER_X + COVER_W)) return -1;
         if (y < list_top()) return -1;
         int row = (y - list_top()) / list_row_height();
         if (row < 0 || row >= visible_rows()) return -1;
@@ -412,10 +456,11 @@ private:
         }
     }
 
-    void set_mode(bool random)
+    void cycle_mode()
     {
-        _random = random;
-        if (_random && !_tracks.empty()) {
+        int next = (static_cast<int>(_play_mode) + 1) % 3;
+        _play_mode = static_cast<PlayMode>(next);
+        if (_play_mode == PlayMode::Shuffle && !_tracks.empty()) {
             rebuild_shuffle(_current >= 0 ? _current : _focus);
         } else {
             _shuffle_order.clear();
@@ -424,6 +469,20 @@ private:
         // The selected mode is already visible on the active control icon.
         _status.clear();
         draw_all();
+    }
+
+    void prepare_cover(const std::string &audio_path)
+    {
+        _cover_thumbnail_path.clear();
+        std::string source_path;
+        if (!embedded_cover::find_or_extract(audio_path.c_str(), &source_path)) return;
+        std::string thumbnail_path = embedded_cover::square_thumbnail_path(audio_path.c_str());
+        if (!thumbnail_path.empty() &&
+            cover_thumbnail::ensure_square(source_path, thumbnail_path)) {
+            _cover_thumbnail_path = thumbnail_path;
+        } else {
+            ESP_LOGW(TAG, "Cover thumbnail failed source=%s", source_path.c_str());
+        }
     }
 
     void play_index(int index, bool keep_shuffle_order = false)
@@ -437,19 +496,38 @@ private:
         _last_progress_update_us = 0;
         _last_lyric_index = -2;
         _lyrics.clear();
+        _cover_thumbnail_path.clear();
         _status = "正在打开...";
+
+        audio_playback_state_t previous_state = audio_radio_get_state();
+        if (previous_state == AUDIO_PLAYBACK_PLAYING ||
+            previous_state == AUDIO_PLAYBACK_PAUSED) {
+            esp_err_t stop_ret = audio_radio_stop();
+            if (stop_ret != ESP_OK) {
+                ESP_LOGW(TAG, "Stop before track preparation failed: %s",
+                         esp_err_to_name(stop_ret));
+            }
+        }
+        // Keep SD-heavy metadata and image preparation outside active audio
+        // playback. This avoids contending with the decoder while the cover
+        // thumbnail is generated for the first time.
+        embedded_lyrics::load(_tracks[index].path.c_str(), &_lyrics);
+        prepare_cover(_tracks[index].path);
+
         esp_err_t ret = audio_radio_play_file(_tracks[index].path.c_str());
         if (ret == ESP_OK) {
-            embedded_lyrics::load(_tracks[index].path.c_str(), &_lyrics);
             _current = index;
-            _show_list = false;
+            _view = ContentView::Cover;
             _terminal_handled = false;
             _status.clear();
-            if (_random && !keep_shuffle_order) rebuild_shuffle(index);
+            if (_play_mode == PlayMode::Shuffle && !keep_shuffle_order) {
+                rebuild_shuffle(index);
+            }
             ESP_LOGI(TAG, "Playing %d/%u: %s", index + 1,
                      (unsigned)_tracks.size(), _tracks[index].path.c_str());
         } else {
             _lyrics.clear();
+            _cover_thumbnail_path.clear();
             _terminal_handled = true;
             char message[64] = {};
             snprintf(message, sizeof(message), "播放失败: %s", esp_err_to_name(ret));
@@ -460,11 +538,15 @@ private:
         draw_all();
     }
 
-    void play_next()
+    void play_next(bool automatic = false)
     {
         if (_tracks.empty()) return;
+        if (automatic && _play_mode == PlayMode::RepeatOne) {
+            restart_current();
+            return;
+        }
         int next = 0;
-        if (_random) {
+        if (_play_mode == PlayMode::Shuffle) {
             if (_shuffle_order.size() != _tracks.size() || _shuffle_pos < 0) {
                 rebuild_shuffle(_current >= 0 ? _current : _focus);
             }
@@ -483,11 +565,52 @@ private:
         play_index(next, true);
     }
 
+    void restart_current()
+    {
+        if (_current < 0 || _current >= static_cast<int>(_tracks.size())) {
+            play_index(_focus, true);
+            return;
+        }
+        _progress_permille = 0;
+        _elapsed_ms = 0;
+        _duration_ms = 0;
+        _last_progress_update_us = 0;
+        _last_lyric_index = -2;
+        esp_err_t ret = audio_radio_play_file(_tracks[_current].path.c_str());
+        if (ret != ESP_OK) {
+            _terminal_handled = true;
+            _status = "单曲循环失败";
+            draw_all();
+            return;
+        }
+        _terminal_handled = false;
+        _status.clear();
+
+        if (_refresh_frozen) {
+            _last_progress_update_us = esp_timer_get_time();
+            _last_lyric_index = current_lyric_index();
+            return;
+        }
+
+        // The cover, title and controls are unchanged. Reset only the time
+        // and visible lyric area so repeat-one does not trigger a full-screen
+        // refresh or regenerate cover/lyric metadata at every loop.
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        draw_progress_section(0);
+        if (_view == ContentView::Cover) draw_current_lyric_section();
+        else if (_view == ContentView::Lyrics) draw_lyrics_section();
+        M5.Display.display();
+        M5.Display.endWrite();
+        _last_progress_update_us = esp_timer_get_time();
+        _last_lyric_index = current_lyric_index();
+    }
+
     void play_previous()
     {
         if (_tracks.empty()) return;
         int previous = 0;
-        if (_random) {
+        if (_play_mode == PlayMode::Shuffle) {
             if (_shuffle_order.size() != _tracks.size() || _shuffle_pos < 0) {
                 rebuild_shuffle(_current >= 0 ? _current : _focus);
             }
@@ -642,9 +765,78 @@ private:
         return next == _lyrics.begin() ? -1 : static_cast<int>(next - _lyrics.begin() - 1);
     }
 
+    void draw_view_indicator()
+    {
+        int center_x = design_x(COVER_X + COVER_W / 2);
+        int y = design_y(VIEW_INDICATOR_Y);
+        int gap = std::max(8, design_x(18));
+        for (int i = 0; i < 3; ++i) {
+            int radius = i == static_cast<int>(_view) ? std::max(3, design_x(5))
+                                                       : std::max(2, design_x(3));
+            if (i == static_cast<int>(_view)) {
+                M5.Display.fillCircle(center_x + (i - 1) * gap, y, radius, TFT_BLACK);
+            } else {
+                M5.Display.drawCircle(center_x + (i - 1) * gap, y, radius, TFT_BLACK);
+            }
+        }
+    }
+
+    void draw_current_lyric_section()
+    {
+        if (_view != ContentView::Cover) return;
+        int left = design_x(COVER_X + 18);
+        int right = design_x(COVER_X + COVER_W - 18);
+        int top = design_y(CURRENT_LYRIC_TOP);
+        int height = std::max(1, design_y(CURRENT_LYRIC_H));
+        M5.Display.fillRect(left, top, std::max(1, right - left), height, TFT_WHITE);
+
+        int active = current_lyric_index();
+        if (_lyrics.empty()) return;
+        if (active < 0) active = 0;
+        int row_height = std::max(1, height / 3);
+        for (int row = 0; row < 3; ++row) {
+            int index = active + row - 1;
+            if (index < 0 || index >= static_cast<int>(_lyrics.size())) continue;
+            int y = top + row * row_height;
+            std::string text = system_font::ellipsize(
+                _lyrics[index].text, right - left - design_x(20));
+            system_font::draw_center(
+                M5.Display, text, (left + right) / 2,
+                y + std::max(0, (row_height - system_font::line_height()) / 2), TFT_BLACK);
+        }
+    }
+
+    void draw_cover_view()
+    {
+        int x = design_x(ALBUM_ART_X);
+        int y = design_y(ALBUM_ART_Y);
+        int width = std::max(1, design_x(ALBUM_ART_SIZE));
+        int height = std::max(1, design_y(ALBUM_ART_SIZE));
+        M5.Display.fillRect(x, y, width, height, TFT_WHITE);
+
+        bool drew_cover = false;
+        if (!_cover_thumbnail_path.empty()) {
+            drew_cover = p4_jpeg::draw_file(M5.Display, _cover_thumbnail_path.c_str(),
+                                             x, y, width, height);
+            if (!drew_cover) {
+                float scale = std::min((float)width / 360.0f, (float)height / 360.0f);
+                drew_cover = M5.Display.drawJpgFile(_cover_thumbnail_path.c_str(),
+                                                     x, y, width, height,
+                                                     0, 0, scale, scale);
+            }
+        }
+        if (!drew_cover) {
+            system_font::draw_center(M5.Display, "暂无封面", x + width / 2,
+                                     y + std::max(0, (height - system_font::line_height()) / 2),
+                                     TFT_BLACK);
+        }
+        draw_current_lyric_section();
+        draw_view_indicator();
+    }
+
     void draw_lyrics_section()
     {
-        if (_lyrics.empty() || _show_list) return;
+        if (_lyrics.empty() || _view != ContentView::Lyrics) return;
 
         int left = design_x(COVER_X + 10);
         int right = design_x(COVER_X + COVER_W - 10);
@@ -675,6 +867,7 @@ private:
                 y + std::max(0, (row_height - system_font::line_height()) / 2),
                 foreground);
         }
+        draw_view_indicator();
     }
 
     void draw_progress_bar(uint32_t progress_permille)
@@ -719,6 +912,7 @@ private:
 
     void update_progress_if_due()
     {
+        if (_refresh_frozen) return;
         if (_current < 0 || audio_radio_get_state() != AUDIO_PLAYBACK_PLAYING) return;
 
         int64_t now = esp_timer_get_time();
@@ -732,7 +926,7 @@ private:
         uint32_t previous_duration = _duration_ms;
         uint32_t progress = read_progress();
         int lyric_index = current_lyric_index();
-        bool lyric_changed = !_show_list && !_lyrics.empty() &&
+        bool lyric_changed = _view != ContentView::List && !_lyrics.empty() &&
                              lyric_index != _last_lyric_index;
         if (progress == previous && _elapsed_ms / 1000 == previous_elapsed_second &&
             _duration_ms == previous_duration && !lyric_changed) return;
@@ -742,7 +936,10 @@ private:
         // Switching between fast/fastest here causes a visible dark flash.
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         draw_progress_section(progress);
-        if (lyric_changed) draw_lyrics_section();
+        if (lyric_changed) {
+            if (_view == ContentView::Cover) draw_current_lyric_section();
+            else if (_view == ContentView::Lyrics) draw_lyrics_section();
+        }
         // Drawing already records a rotation-correct dirty rectangle inside
         // Panel_EPD. Queue that range directly instead of merging these
         // logical portrait coordinates into the panel's landscape range.
@@ -809,6 +1006,7 @@ private:
             system_font::draw_center(M5.Display, "未找到支持的音频文件",
                                      design_x(COVER_X + COVER_W / 2),
                                      design_y(COVER_Y + COVER_H / 2 - 20), TFT_BLACK);
+            draw_view_indicator();
             return;
         }
 
@@ -833,34 +1031,22 @@ private:
         snprintf(position, sizeof(position), "%d / %u", _focus + 1, (unsigned)_tracks.size());
         system_font::draw_center(M5.Display, position,
                                  design_x(COVER_X + COVER_W / 2),
-                                 design_y(COVER_Y + COVER_H - 38), TFT_BLACK);
+                                 design_y(COVER_Y + COVER_H - 56), TFT_BLACK);
+        draw_view_indicator();
     }
 
     void draw_now_playing_panel()
     {
-        int center_x = design_x(COVER_X + COVER_W / 2);
-        if (_show_list) {
+        if (_view == ContentView::List) {
             draw_track_list();
             return;
         }
-
-        if (!_lyrics.empty()) {
-            draw_lyrics_section();
+        if (_view == ContentView::Cover) {
+            draw_cover_view();
             return;
         }
-
-        const char *placeholder = _tracks.empty() ? "没有可播放的歌曲" : "暂无封面或歌词";
-        system_font::draw_center(M5.Display, placeholder, center_x,
-                                 design_y(COVER_Y + COVER_H / 2 - 42), TFT_BLACK);
-        system_font::draw_center(M5.Display,
-                                 system_font::ellipsize(state_text(), design_x(COVER_W - 60)),
-                                 center_x, design_y(COVER_Y + COVER_H / 2 + 20), TFT_BLACK);
-        if (_current >= 0) {
-            char position[32] = {};
-            snprintf(position, sizeof(position), "%d / %u", _current + 1, (unsigned)_tracks.size());
-            system_font::draw_center(M5.Display, position, center_x,
-                                     design_y(COVER_Y + COVER_H / 2 + 76), TFT_BLACK);
-        }
+        draw_lyrics_section();
+        if (_lyrics.empty()) draw_view_indicator();
     }
 
     void draw_controls()
@@ -871,9 +1057,13 @@ private:
                   342, MAIN_CONTROL_Y);
         draw_icon(MusicIconId::Next, 479, MAIN_CONTROL_Y);
 
-        draw_icon(MusicIconId::Shuffle, 91, BOTTOM_CONTROL_Y, _random);
-        draw_icon(MusicIconId::Sequence, 207, BOTTOM_CONTROL_Y, !_random);
-        draw_icon(MusicIconId::Playlist, 342, BOTTOM_CONTROL_Y, _show_list);
+        MusicIconId mode_icon = MusicIconId::Sequence;
+        if (_play_mode == PlayMode::Shuffle) mode_icon = MusicIconId::Shuffle;
+        else if (_play_mode == PlayMode::RepeatOne) mode_icon = MusicIconId::RepeatOne;
+        draw_icon(mode_icon, 91, BOTTOM_CONTROL_Y);
+        draw_icon(MusicIconId::Snowflake, 207, BOTTOM_CONTROL_Y, _refresh_frozen);
+        draw_icon(MusicIconId::Playlist, 342, BOTTOM_CONTROL_Y,
+                  _view == ContentView::List);
         draw_icon(MusicIconId::VolumeDown, 474, BOTTOM_CONTROL_Y);
         draw_icon(MusicIconId::VolumeUp, 579, BOTTOM_CONTROL_Y);
     }
@@ -890,7 +1080,7 @@ private:
         M5.Display.fillScreen(TFT_WHITE);
 
         std::string title;
-        if (_show_list) title = "歌曲列表";
+        if (_view == ContentView::List) title = "歌曲列表";
         else if (_current >= 0) title = track_title(_tracks[_current].path);
         else title = "选择歌曲";
         system_font::draw_left(M5.Display,
@@ -901,10 +1091,43 @@ private:
                             design_x(COVER_W), design_y(COVER_H), TFT_BLACK);
         draw_now_playing_panel();
 
-        draw_progress_section(read_progress());
+        // A frozen screen must not advance its cached playback time merely
+        // because another interactive control caused a full redraw.
+        draw_progress_section(_refresh_frozen ? _progress_permille : read_progress());
 
         draw_controls();
 
+        M5.Display.display();
+        M5.Display.endWrite();
+        _last_progress_update_us = esp_timer_get_time();
+        _last_lyric_index = current_lyric_index();
+    }
+
+    void draw_refresh_freeze_control()
+    {
+        int center_x = design_x(207);
+        int center_y = design_y(BOTTOM_CONTROL_Y);
+        int width = design_x(64);
+        int height = design_y(60);
+        M5.Display.fillRect(center_x - width / 2, center_y - height / 2,
+                            width, height, TFT_WHITE);
+        draw_icon(MusicIconId::Snowflake, 207, BOTTOM_CONTROL_Y, _refresh_frozen);
+    }
+
+    void toggle_refresh_freeze()
+    {
+        _refresh_frozen = !_refresh_frozen;
+        uint32_t progress = _progress_permille;
+        if (!_refresh_frozen) progress = read_progress();
+
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        draw_refresh_freeze_control();
+        if (!_refresh_frozen) {
+            draw_progress_section(progress);
+            if (_view == ContentView::Cover) draw_current_lyric_section();
+            else if (_view == ContentView::Lyrics) draw_lyrics_section();
+        }
         M5.Display.display();
         M5.Display.endWrite();
         _last_progress_update_us = esp_timer_get_time();

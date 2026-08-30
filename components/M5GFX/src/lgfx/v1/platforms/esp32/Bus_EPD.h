@@ -101,6 +101,41 @@ class Bus_EPD : public Bus_NULL
 
   void writeScanLine(const uint8_t *data, uint32_t length);
 
+  // Optional whole-frame scan used only by Panel_EPD_2D.  The base
+  // implementation reports unsupported, preserving the legacy per-line bus.
+  virtual bool supports2DContinuousScan(void) const { return false; }
+  virtual bool write2DFrame(const uint8_t* data, size_t length,
+                            uint32_t timeout_ms, uint32_t* scan_time_us)
+  {
+    (void)data;
+    (void)length;
+    (void)timeout_ms;
+    if (scan_time_us) { *scan_time_us = 0; }
+    return false;
+  }
+
+  using epd_2d_line_renderer_t = void (*)(void* context, size_t row,
+                                           uint8_t* output, size_t length);
+  struct epd_2d_stream_stats_t {
+    uint32_t prefetch_time_us = 0;
+    uint32_t scan_time_us = 0;
+    uint32_t underruns = 0;
+  };
+
+  // Optional line-streaming scan used by the 2D engine.  Implementations
+  // render a bounded number of lines ahead and feed DMA bounce buffers while
+  // the LCD peripheral is scanning the current phase.
+  virtual bool write2DStream(epd_2d_line_renderer_t renderer, void* context,
+                             uint32_t timeout_ms,
+                             epd_2d_stream_stats_t* stats)
+  {
+    (void)renderer;
+    (void)context;
+    (void)timeout_ms;
+    if (stats) { *stats = {}; }
+    return false;
+  }
+
   void beginTransaction(void) override;
   void endTransaction(void) override;
 

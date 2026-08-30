@@ -11,6 +11,8 @@ enum class MusicIconId : uint8_t {
     Next,
     Shuffle,
     Sequence,
+    RepeatOne,
+    Snowflake,
     Playlist,
     VolumeDown,
     VolumeUp,

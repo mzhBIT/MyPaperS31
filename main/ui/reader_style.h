@@ -10,7 +10,7 @@ struct ReaderStyle {
     int refresh_mode = 3;
     int show_images = 0;
     int first_line_indent = 2;      // Full-width character cells.
-    int paragraph_spacing = 0;      // Half-line units: 0, 1 (0.5), 2 (1.0).
+    int paragraph_spacing = 0;      // Tenths of a line: 0..20 means 0.0..2.0 lines.
 };
 
 void reader_style_init();

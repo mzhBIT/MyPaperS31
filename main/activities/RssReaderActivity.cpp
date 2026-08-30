@@ -1,5 +1,7 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "activities/ReaderOverlay.h"
+#include "activities/SettingActivity.h"
 #include "reader_font.h"
 #include "reader_style.h"
 #include "renderer/DocumentLayout.h"
@@ -32,10 +34,7 @@
 #include <vector>
 
 static const char *TAG = "RSS";
-static const char *WIFI_CONFIG_PATH = "/sdcard/wifi.txt";
 static const char *RSS_CONFIG_PATH = "/sdcard/rss.txt";
-static const char *DEFAULT_STA_SSID = "TP-LINK_A027";
-static const char *DEFAULT_STA_PASSWORD = "18557530408";
 static const int TOP_H = 50;
 static const int FEED_ROW_H = 78;
 static const int NEWS_ROW_H = 150;
@@ -84,7 +83,7 @@ static std::vector<ArticleImage> g_article_images;
 static document_layout::Pages g_article_pages;
 static std::string g_status;
 
-extern void launch_reader_settings();
+extern void launch_reader_font_picker();
 
 static epd_mode_t reader_epd_mode()
 {
@@ -901,30 +900,6 @@ static bool parse_bing_wallpaper_items(const std::string &json, std::vector<RssI
     return !items->empty();
 }
 
-static bool load_wifi_config(std::string *ssid, std::string *password)
-{
-    if (!ssid || !password) return false;
-    FILE *fp = std::fopen(WIFI_CONFIG_PATH, "rb");
-    if (!fp) return false;
-    char line[256];
-    while (std::fgets(line, sizeof(line), fp)) {
-        std::string s = trim_copy(line);
-        if (s.empty() || s[0] == '#') continue;
-        size_t eq = s.find('=');
-        if (eq == std::string::npos) {
-            if (ssid->empty()) *ssid = s;
-            else if (password->empty()) *password = s;
-            continue;
-        }
-        std::string key = trim_copy(s.substr(0, eq));
-        std::string val = trim_copy(s.substr(eq + 1));
-        if (key == "ssid") *ssid = val;
-        else if (key == "password" || key == "pass") *password = val;
-    }
-    std::fclose(fp);
-    return !ssid->empty();
-}
-
 static void load_feeds()
 {
     g_feeds.clear();
@@ -962,18 +937,16 @@ class RssReaderActivity : public Activity {
 public:
     ~RssReaderActivity() override
     {
-        restore_display_rotation();
         stop_wifi();
     }
 
     void on_create() override
     {
-        _base_rotation = M5.Display.getRotation();
-        _rotation_changed = false;
+        _reader_overlay.set_chapters_enabled(false);
         load_feeds();
         draw_status("RSS", "Loading WiFi...");
         _wifi_ok = connect_wifi();
-        if (!_wifi_ok) g_status = "Create /sdcard/wifi.txt";
+        if (!_wifi_ok) g_status = "Configure WiFi in Settings";
         _view = View::Feeds;
         draw_feeds();
     }
@@ -986,6 +959,7 @@ public:
         }
         if (_view == View::Article) {
             rebuild_article_lines(false);
+            _reader_overlay.clear_settings_dirty();
             draw_article();
         } else {
             redraw_list();
@@ -1024,8 +998,23 @@ public:
 
     bool on_touch(const TouchEvent &event) override
     {
+        if (_view == View::Article && _reader_overlay.visible()) {
+            handle_reader_overlay_action(_reader_overlay.on_touch(event));
+            return true;
+        }
+
         if (event.type == TouchEventType::Back) {
-            on_key(APP_KEY_BACK);
+            if (_confirm_wallpaper_save) cancel_wallpaper_save();
+            else on_key(APP_KEY_BACK);
+            return true;
+        }
+
+        if (_view == View::Article && _confirm_wallpaper_save) {
+            if (event.type == TouchEventType::Tap) {
+                int choice = wallpaper_save_choice_at(event.x, event.y);
+                if (choice == 0) cancel_wallpaper_save();
+                else if (choice == 1) confirm_wallpaper_save();
+            }
             return true;
         }
 
@@ -1035,6 +1024,22 @@ public:
         }
 
         if (_view == View::Article) {
+            if (bing_wallpaper_mode()) {
+                if (event.type == TouchEventType::SwipeLeft) {
+                    switch_bing_wallpaper(1);
+                    return true;
+                }
+                if (event.type == TouchEventType::SwipeRight) {
+                    switch_bing_wallpaper(-1);
+                    return true;
+                }
+                if (event.type != TouchEventType::Tap) return false;
+                int w = M5.Display.width();
+                if (event.x < w / 3) switch_bing_wallpaper(-1);
+                else if (event.x > (w * 2) / 3) switch_bing_wallpaper(1);
+                else begin_wallpaper_save();
+                return true;
+            }
             if (event.type == TouchEventType::SwipeLeft) {
                 next_article_page();
                 return true;
@@ -1046,7 +1051,8 @@ public:
             if (event.type != TouchEventType::Tap) return false;
             int w = M5.Display.width();
             if (event.x >= w / 3 && event.x <= (w * 2) / 3) {
-                launch_reader_settings();
+                _reader_overlay.open(ReaderOverlay::Tab::Settings);
+                _reader_overlay.redraw();
             } else if (event.x > w / 2) {
                 next_article_page();
             } else {
@@ -1082,22 +1088,32 @@ private:
     bool _seen_show = false;
     bool _wifi_ok = false;
     bool _current_feed_is_bing = false;
-    bool _rotation_changed = false;
-    uint8_t _base_rotation = 0;
+    bool _confirm_wallpaper_save = false;
+    int _wallpaper_save_choice = 0;
     int _feed_focus = 0;
     int _feed_scroll = 0;
+    ReaderOverlay _reader_overlay;
+
+    void handle_reader_overlay_action(ReaderOverlay::Action action)
+    {
+        if (action == ReaderOverlay::Action::None) return;
+        if (action == ReaderOverlay::Action::OpenFont) {
+            launch_reader_font_picker();
+            return;
+        }
+
+        bool apply_layout = _reader_overlay.settings_dirty();
+        _reader_overlay.close();
+        if (apply_layout) {
+            rebuild_article_lines(false);
+            _reader_overlay.clear_settings_dirty();
+        }
+        draw_article();
+    }
 
     bool connect_wifi()
     {
-        std::string ssid = DEFAULT_STA_SSID;
-        std::string pass = DEFAULT_STA_PASSWORD;
-        load_wifi_config(&ssid, &pass);
-        if (ssid.empty()) {
-            ESP_LOGW(TAG, "Wi-Fi SSID is empty");
-            return false;
-        }
-
-        esp_err_t err = wifi_setting_connect(ssid.c_str(), pass.c_str(), CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS);
+        esp_err_t err = wifi_setting_connect_saved(CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Wi-Fi connect failed: %s", esp_err_to_name(err));
             return false;
@@ -1373,7 +1389,6 @@ private:
 
     void draw_status(const char *title, const char *msg)
     {
-        restore_display_rotation();
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_quality);
         M5.Display.fillScreen(TFT_WHITE);
@@ -1386,10 +1401,11 @@ private:
 
     void draw_topbar(const char *title)
     {
-        M5.Display.fillRect(0, 0, M5.Display.width(), TOP_H, TFT_BLACK);
-        M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-        system_font::draw_left(M5.Display, "<", 12, 3, TFT_WHITE);
-        system_font::draw_center(M5.Display, title, M5.Display.width() / 2, 3, TFT_WHITE);
+        M5.Display.fillRect(0, 0, M5.Display.width(), TOP_H, TFT_WHITE);
+        M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+        system_font::draw_left(M5.Display, "<", 12, 3, TFT_BLACK);
+        system_font::draw_center(M5.Display, title, M5.Display.width() / 2, 3, TFT_BLACK);
+        M5.Display.drawFastHLine(0, TOP_H - 1, M5.Display.width(), TFT_BLACK);
     }
 
     int item_count() const
@@ -1565,7 +1581,6 @@ private:
 
     void redraw_list()
     {
-        restore_display_rotation();
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
@@ -1618,7 +1633,7 @@ private:
         _feed_focus = g_focus;
         _feed_scroll = g_scroll;
         if (!_wifi_ok) {
-            draw_status("RSS WiFi", "Create /sdcard/wifi.txt");
+            draw_status("RSS WiFi", "Configure WiFi in Settings");
             vTaskDelay(pdMS_TO_TICKS(1200));
             redraw_list();
             return;
@@ -1791,7 +1806,7 @@ private:
         options.line_height = line_height;
         int fullwidth_advance = reader_text_renderer().measureFullwidthCellForLayout();
         options.first_line_indent = fullwidth_advance * rs.first_line_indent;
-        options.paragraph_spacing_percent = rs.paragraph_spacing * 50;
+        options.paragraph_spacing_percent = rs.paragraph_spacing * 10;
         options.layout_paragraph = [](void *context, const std::string &text, int width, int indent) {
             return static_cast<TextRenderer *>(context)->layoutUtf8Paragraph(text, width, indent);
         };
@@ -1822,46 +1837,27 @@ private:
         return _current_feed_is_bing && reader_style_get().show_images && !g_article_images.empty();
     }
 
-    void restore_display_rotation()
-    {
-        if (_rotation_changed) {
-            M5.Display.setRotation(_base_rotation);
-            _rotation_changed = false;
-        }
-    }
-
-    void apply_wallpaper_rotation(const ArticleImage &image)
-    {
-        restore_display_rotation();
-        int screen_w = M5.Display.width();
-        int screen_h = M5.Display.height();
-        bool image_landscape = image.width >= image.height;
-        bool screen_landscape = screen_w >= screen_h;
-        if (image_landscape != screen_landscape) {
-            M5.Display.setRotation((_base_rotation + 1) & 3);
-            _rotation_changed = true;
-        }
-    }
-
     bool draw_bing_wallpaper()
     {
         if (!bing_wallpaper_mode()) return false;
         const ArticleImage &image = g_article_images[0];
         if (image.path.empty() || image.width <= 0 || image.height <= 0) return false;
-        apply_wallpaper_rotation(image);
 
         M5.Display.startWrite();
-        M5.Display.setEpdMode(reader_epd_mode());
+        M5.Display.setEpdMode(epd_mode_t::epd_quality);
         M5.Display.fillScreen(TFT_WHITE);
 
         int screen_w = M5.Display.width();
         int screen_h = M5.Display.height();
-        float scale = std::max((float)screen_w / (float)image.width, (float)screen_h / (float)image.height);
+        // Match the file-manager image viewer: fit the complete wallpaper
+        // inside the current logical screen instead of filling and cropping.
+        float scale = std::min((float)screen_w / (float)image.width,
+                               (float)screen_h / (float)image.height);
         if (scale <= 0.0f) scale = 1.0f;
         int draw_w = std::max(1, (int)((float)image.width * scale + 0.5f));
         int draw_h = std::max(1, (int)((float)image.height * scale + 0.5f));
-        int x = (screen_w - draw_w) / 2;
-        int y = (screen_h - draw_h) / 2;
+        int x = std::max(0, (screen_w - draw_w) / 2);
+        int y = std::max(0, (screen_h - draw_h) / 2);
 
         bool ok = false;
         if (image.ext == ".jpg" && !image.progressive) {
@@ -1871,6 +1867,9 @@ private:
         } else if (image.ext == ".bmp") {
             ok = M5.Display.drawBmpFile(image.path.c_str(), x, y, draw_w, draw_h, 0, 0, scale, scale);
         }
+        ESP_LOGI(TAG, "Bing wallpaper draw src=%dx%d screen=%dx%d draw=%dx%d scale=%.3f ok=%d",
+                 image.width, image.height, screen_w, screen_h, draw_w, draw_h,
+                 (double)scale, ok ? 1 : 0);
         if (!ok) {
             M5.Display.fillScreen(TFT_WHITE);
             M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
@@ -1879,9 +1878,94 @@ private:
                                      screen_w / 2,
                                      screen_h / 2 - 18);
         }
+        if (_confirm_wallpaper_save) draw_wallpaper_save_dialog();
         M5.Display.display();
         M5.Display.endWrite();
         return true;
+    }
+
+    void draw_wallpaper_save_dialog()
+    {
+        int screen_w = M5.Display.width();
+        int screen_h = M5.Display.height();
+        int box_w = std::min(screen_w - 48, 620);
+        int box_h = 230;
+        int x = (screen_w - box_w) / 2;
+        int y = (screen_h - box_h) / 2;
+        int btn_h = 62;
+        int gap = 18;
+        int btn_w = (box_w - 48 - gap) / 2;
+        int by = y + box_h - btn_h - 22;
+        int bx0 = x + 24;
+        int bx1 = bx0 + btn_w + gap;
+
+        M5.Display.fillRoundRect(x, y, box_w, box_h, 6, TFT_WHITE);
+        M5.Display.drawRoundRect(x, y, box_w, box_h, 6, TFT_BLACK);
+        system_font::draw_center(M5.Display, "Save wallpaper?", screen_w / 2, y + 18, TFT_BLACK);
+        system_font::draw_center(M5.Display, "Save to /sdcard/images", screen_w / 2, y + 72, TFT_BLACK);
+
+        M5.Display.fillRoundRect(bx0, by, btn_w, btn_h, 6,
+                                 _wallpaper_save_choice == 0 ? TFT_BLACK : TFT_WHITE);
+        M5.Display.drawRoundRect(bx0, by, btn_w, btn_h, 6, TFT_BLACK);
+        system_font::draw_center(M5.Display, "Cancel", bx0 + btn_w / 2, by + 9,
+                                 _wallpaper_save_choice == 0 ? TFT_WHITE : TFT_BLACK);
+
+        M5.Display.fillRoundRect(bx1, by, btn_w, btn_h, 6,
+                                 _wallpaper_save_choice == 1 ? TFT_BLACK : TFT_WHITE);
+        M5.Display.drawRoundRect(bx1, by, btn_w, btn_h, 6, TFT_BLACK);
+        system_font::draw_center(M5.Display, "Save", bx1 + btn_w / 2, by + 9,
+                                 _wallpaper_save_choice == 1 ? TFT_WHITE : TFT_BLACK);
+    }
+
+    int wallpaper_save_choice_at(int tx, int ty) const
+    {
+        int screen_w = M5.Display.width();
+        int screen_h = M5.Display.height();
+        int box_w = std::min(screen_w - 48, 620);
+        int box_h = 230;
+        int x = (screen_w - box_w) / 2;
+        int y = (screen_h - box_h) / 2;
+        int btn_h = 62;
+        int gap = 18;
+        int btn_w = (box_w - 48 - gap) / 2;
+        int by = y + box_h - btn_h - 22;
+        int bx0 = x + 24;
+        int bx1 = bx0 + btn_w + gap;
+        if (ty < by || ty > by + btn_h) return -1;
+        if (tx >= bx0 && tx <= bx0 + btn_w) return 0;
+        if (tx >= bx1 && tx <= bx1 + btn_w) return 1;
+        return -1;
+    }
+
+    void begin_wallpaper_save()
+    {
+        if (!bing_wallpaper_mode()) return;
+        _confirm_wallpaper_save = true;
+        _wallpaper_save_choice = 0;
+        draw_article();
+    }
+
+    void cancel_wallpaper_save()
+    {
+        _confirm_wallpaper_save = false;
+        _wallpaper_save_choice = 0;
+        draw_article();
+    }
+
+    void confirm_wallpaper_save()
+    {
+        _confirm_wallpaper_save = false;
+        _wallpaper_save_choice = 0;
+        save_bing_wallpaper();
+    }
+
+    void switch_bing_wallpaper(int delta)
+    {
+        if (!_current_feed_is_bing || g_items.empty() || delta == 0) return;
+        int count = (int)g_items.size();
+        g_focus = (g_focus + (delta > 0 ? 1 : count - 1)) % count;
+        ensure_focus_visible();
+        open_item();
     }
 
     std::string bing_wallpaper_save_path(const ArticleImage &image) const
@@ -1955,7 +2039,6 @@ private:
     void draw_article()
     {
         if (draw_bing_wallpaper()) return;
-        restore_display_rotation();
         M5.Display.startWrite();
         M5.Display.setEpdMode(reader_epd_mode());
         M5.Display.fillScreen(TFT_WHITE);
@@ -2052,6 +2135,7 @@ private:
         if (g_page + 1 >= pages) {
             system_font::draw_center(M5.Display, "Last page", M5.Display.width() / 2, M5.Display.height() - 50);
         }
+        if (_reader_overlay.visible()) _reader_overlay.draw();
         M5.Display.display();
         M5.Display.endWrite();
     }
@@ -2075,23 +2159,54 @@ private:
 
     bool article_key(int key)
     {
+        if (_reader_overlay.visible()) {
+            handle_reader_overlay_action(_reader_overlay.on_key(key));
+            return true;
+        }
+
+        if (_confirm_wallpaper_save) {
+            if (key == APP_KEY_BACK || key == APP_KEY_EXTRA) {
+                cancel_wallpaper_save();
+                return true;
+            }
+            if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
+                _wallpaper_save_choice = 1 - _wallpaper_save_choice;
+                draw_article();
+                return true;
+            }
+            if (key == APP_KEY_OK) {
+                if (_wallpaper_save_choice == 1) confirm_wallpaper_save();
+                else cancel_wallpaper_save();
+                return true;
+            }
+            return true;
+        }
         if (key == APP_KEY_BACK) {
-            restore_display_rotation();
             _view = View::Items;
             redraw_list();
             return true;
         }
+        if (bing_wallpaper_mode()) {
+            if (key == APP_KEY_UP) {
+                switch_bing_wallpaper(-1);
+                return true;
+            }
+            if (key == APP_KEY_DOWN) {
+                switch_bing_wallpaper(1);
+                return true;
+            }
+            if (key == APP_KEY_OK || key == APP_KEY_EXTRA) {
+                begin_wallpaper_save();
+                return true;
+            }
+        }
         if (key == APP_KEY_EXTRA) {
-            restore_display_rotation();
-            launch_reader_settings();
+            _reader_overlay.open(ReaderOverlay::Tab::Settings);
+            _reader_overlay.redraw();
             return true;
         }
         if (key == APP_KEY_UP) {
             prev_article_page();
-            return true;
-        }
-        if (key == APP_KEY_OK && bing_wallpaper_mode()) {
-            save_bing_wallpaper();
             return true;
         }
         if (key == APP_KEY_DOWN || key == APP_KEY_OK) {
@@ -2104,5 +2219,6 @@ private:
 
 void launch_rss_reader()
 {
+    if (!ensure_wifi_configured_or_show_guide()) return;
     ActivityManager::instance().push(new RssReaderActivity());
 }

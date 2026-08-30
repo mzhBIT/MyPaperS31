@@ -365,7 +365,7 @@ TxtPage TxtBook::read_page(uint32_t offset)
     int fullwidth_advance = reader_text_renderer().measureFullwidthCellForLayout();
     const int indent_width = std::min(max_w - 1,
                                       fullwidth_advance * style.first_line_indent);
-    const int paragraph_gap = line_h * style.paragraph_spacing / 2;
+    const int paragraph_gap = line_h * style.paragraph_spacing / 10;
     int used_height = 0;
     int text_line_count = 0;
     bool reading_explicit_indent = first_line_of_paragraph;

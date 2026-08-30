@@ -1,5 +1,6 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "activities/ReaderOverlay.h"
 #include "parser/txt_parser.h"
 #include "recent_books.h"
 #include "reader_style.h"
@@ -21,7 +22,7 @@ static TxtPage g_page;
 static uint32_t g_offset = 0;
 static std::vector<uint32_t> g_history;
 
-extern void launch_reader_settings();
+extern void launch_reader_font_picker();
 
 static epd_mode_t reader_epd_mode() {
     switch (reader_style_get().refresh_mode) {
@@ -120,6 +121,7 @@ static void draw_content(int w, int h) {
 
 class ReaderActivity : public Activity {
     bool m_seen_show = false;
+    ReaderOverlay m_overlay;
 public:
     ReaderActivity(const char *path) {
         if (g_book.open(path)) recent_book_save(path, "txt", g_book.title.c_str());
@@ -138,6 +140,7 @@ public:
         int w = M5.Display.width(), h = M5.Display.height();
         g_book.refresh_layout_settings();
         g_page = g_book.read_page(g_page.start_offset);
+        m_overlay.clear_settings_dirty();
         redraw_all(w, h, epd_mode_t::epd_quality);
     }
 
@@ -156,6 +159,11 @@ public:
     bool on_touch(const TouchEvent &event) override {
         int w = M5.Display.width(), h = M5.Display.height();
 
+        if (m_overlay.visible()) {
+            handle_overlay_action(m_overlay.on_touch(event), w, h);
+            return true;
+        }
+
         if (event.type == TouchEventType::Back) {
             ActivityManager::instance().pop();
             return true;
@@ -168,6 +176,11 @@ public:
             prev_page(w, h);
             return true;
         }
+        if (event.type == TouchEventType::LongPress) {
+            m_overlay.open(ReaderOverlay::Tab::Chapters);
+            m_overlay.redraw();
+            return true;
+        }
         if (event.type != TouchEventType::Tap) return false;
 
         if (event.y < TOP_H + 10 && event.x < 120) {
@@ -175,7 +188,8 @@ public:
             return true;
         }
         if (event.x >= w / 3 && event.x <= (w * 2) / 3) {
-            launch_reader_settings();
+            m_overlay.open(ReaderOverlay::Tab::Settings);
+            m_overlay.redraw();
         } else if (event.x > w / 2) {
             next_page(w, h);
         } else {
@@ -187,12 +201,18 @@ public:
     bool on_key(int key) override {
         int w = M5.Display.width(), h = M5.Display.height();
 
+        if (m_overlay.visible()) {
+            handle_overlay_action(m_overlay.on_key(key), w, h);
+            return true;
+        }
+
         if (key == APP_KEY_BACK) {
             ActivityManager::instance().pop();
             return true;
         }
         if (key == APP_KEY_EXTRA) {
-            launch_reader_settings();
+            m_overlay.open(ReaderOverlay::Tab::Settings);
+            m_overlay.redraw();
             return true;
         }
         if (key == APP_KEY_UP) {
@@ -241,6 +261,7 @@ public:
         draw_page_number(w);
         int64_t t2 = esp_timer_get_time();
         draw_content(w, h);
+        if (m_overlay.visible()) m_overlay.draw();
         int64_t t3 = esp_timer_get_time();
         M5.Display.display();
         int64_t t4 = esp_timer_get_time();
@@ -257,6 +278,7 @@ public:
         M5.Display.fillScreen(TFT_WHITE);
         draw_topbar(w);
         draw_content(w, h);
+        if (m_overlay.visible()) m_overlay.draw();
         M5.Display.display();
         M5.Display.endWrite();
         epd_mode_t default_mode = reader_epd_mode();
@@ -265,6 +287,25 @@ public:
         }
         ESP_LOGI(TAG, "redraw_all: total=%lld ms", (esp_timer_get_time() - t0) / 1000);
         vTaskDelay(1);
+    }
+
+private:
+    void handle_overlay_action(ReaderOverlay::Action action, int w, int h)
+    {
+        if (action == ReaderOverlay::Action::None) return;
+        if (action == ReaderOverlay::Action::OpenFont) {
+            launch_reader_font_picker();
+            return;
+        }
+
+        bool apply_layout = m_overlay.settings_dirty();
+        m_overlay.close();
+        if (apply_layout) {
+            g_book.refresh_layout_settings();
+            g_page = g_book.read_page(g_page.start_offset);
+            m_overlay.clear_settings_dirty();
+        }
+        redraw_all(w, h, epd_mode_t::epd_quality);
     }
 };
 

@@ -1,6 +1,7 @@
 #include "activities/RadioActivity.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "activities/SettingActivity.h"
 #include "audio/audio_radio.h"
 #include "ui/SystemFont.h"
 #include "ui/icon_bitmap_1bpp.h"
@@ -22,7 +23,6 @@
 #include <string>
 
 static const char *TAG = "RADIO";
-static const char *WIFI_CONFIG_PATH = "/sdcard/wifi.txt";
 
 static constexpr int DESIGN_W = 684;
 static constexpr int DESIGN_H = 1216;
@@ -77,47 +77,6 @@ static const RadioStation STATIONS[] = {
 
 static const int STATION_COUNT = sizeof(STATIONS) / sizeof(STATIONS[0]);
 
-static std::string trim_copy(const std::string &s)
-{
-    size_t start = 0;
-    while (start < s.size() && (unsigned char)s[start] <= ' ') start++;
-    size_t end = s.size();
-    while (end > start && (unsigned char)s[end - 1] <= ' ') end--;
-    return s.substr(start, end - start);
-}
-
-static bool load_wifi_config(std::string *ssid, std::string *password)
-{
-    if (!ssid || !password) return false;
-
-    FILE *fp = std::fopen(WIFI_CONFIG_PATH, "rb");
-    if (!fp) return false;
-
-    char line[160] = {};
-    std::string first_line;
-    std::string second_line;
-    while (std::fgets(line, sizeof(line), fp)) {
-        std::string s = trim_copy(line);
-        if (s.empty() || s[0] == '#') continue;
-        size_t eq = s.find('=');
-        if (eq != std::string::npos) {
-            std::string key = trim_copy(s.substr(0, eq));
-            std::string val = trim_copy(s.substr(eq + 1));
-            if (key == "ssid") *ssid = val;
-            else if (key == "password" || key == "pass") *password = val;
-        } else if (first_line.empty()) {
-            first_line = s;
-        } else if (second_line.empty()) {
-            second_line = s;
-        }
-    }
-    std::fclose(fp);
-
-    if (ssid->empty() && !first_line.empty()) *ssid = first_line;
-    if (password->empty() && !second_line.empty()) *password = second_line;
-    return !ssid->empty();
-}
-
 class RadioActivity final : public Activity {
 public:
     ~RadioActivity() override
@@ -132,7 +91,7 @@ public:
         draw_message("Connecting WiFi...");
         _wifi_ok = connect_wifi();
         if (!_wifi_ok) {
-            _status = "Create /sdcard/wifi.txt";
+            _status = "Configure WiFi in Settings";
         }
         draw_all();
     }
@@ -336,15 +295,7 @@ private:
 
     bool connect_wifi()
     {
-        std::string ssid = CONFIG_WIFI_SETTING_STA_SSID;
-        std::string password = CONFIG_WIFI_SETTING_STA_PASSWORD;
-        load_wifi_config(&ssid, &password);
-        if (ssid.empty()) {
-            ESP_LOGW(TAG, "Wi-Fi SSID is empty");
-            return false;
-        }
-        esp_err_t ret = wifi_setting_connect(ssid.c_str(), password.c_str(),
-                                             CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS);
+        esp_err_t ret = wifi_setting_connect_saved(CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS);
         if (ret != ESP_OK) {
             ESP_LOGE(TAG, "Wi-Fi connect failed: %s", esp_err_to_name(ret));
             return false;
@@ -434,8 +385,7 @@ private:
         system_font::draw_center(M5.Display, status,
                                  center_x, design_y(PANEL_Y + PANEL_H / 2), TFT_BLACK);
         char details[64] = {};
-        snprintf(details, sizeof(details), "%d / %d    Volume %d%%",
-                 index + 1, STATION_COUNT, audio_radio_get_volume());
+        snprintf(details, sizeof(details), "Volume %d%%", audio_radio_get_volume());
         system_font::draw_center(M5.Display, details, center_x,
                                  design_y(PANEL_Y + PANEL_H / 2 + 70), TFT_BLACK);
         M5.Display.display();
@@ -602,8 +552,7 @@ private:
 
         char details[64] = {};
         if (_current >= 0) {
-            snprintf(details, sizeof(details), "%d / %d    Volume %d%%",
-                     _current + 1, STATION_COUNT, audio_radio_get_volume());
+            snprintf(details, sizeof(details), "Volume %d%%", audio_radio_get_volume());
         } else {
             snprintf(details, sizeof(details), "%d stations", STATION_COUNT);
         }
@@ -654,5 +603,6 @@ private:
 
 void launch_radio()
 {
+    if (!ensure_wifi_configured_or_show_guide()) return;
     ActivityManager::instance().push(new RadioActivity());
 }

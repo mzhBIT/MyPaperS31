@@ -33,6 +33,7 @@
 #include "lgfx/v1/platforms/esp32p4/Panel_ST7123.hpp"
 #include "lgfx/v1/platforms/esp32p4/Touch_ST7123.hpp"
 #include <lgfx/v1/platforms/esp32/Panel_EPD.hpp>
+#include <lgfx/v1/platforms/esp32/Panel_EPD_2D.hpp>
 #include "lgfx/v1/platforms/esp32/Bus_EPD_V7.hpp"
 #include "lgfx/v1/platforms/esp32/MyPaper_EPD_Config.hpp"
 
@@ -2796,7 +2797,11 @@ The usage of each pin is as follows.
         ESP_LOGI(LIBRARY_NAME, "[Autodetect] MyPaperP4 EPD panel: %s", MYPAPER_EPD_PANEL_NAME);
 
         _bus_last.reset(bus_epd);
+#if MYPAPER_EPD_USE_2D_ENGINE
+        auto p = new lgfx::Panel_EPD_2D();
+#else
         auto p = new lgfx::Panel_EPD();
+#endif
         _panel_last.reset(p);
 
         {

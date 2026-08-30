@@ -12,7 +12,7 @@ MyPaperP4 是一套面向自定义 **ESP32-P4 单色墨水屏设备**的阅读�
 - TXT 支持 UTF-8、UTF-16LE、GBK 和 Latin-1 回退。
 - EPUB2/EPUB3 目录、封面、正文图片和阅读进度。
 - EPUB ZIP 索引与元数据持久化缓存，加快再次打开速度。
-- 最近阅读书架，支持 EPUB 封面缩略图缓存。
+- 书架按最近打开顺序展示书籍，并支持 EPUB 封面缩略图缓存。
 - 共用分页与排版框架：
   - 字号与行距
   - 首行缩进字符数
@@ -26,8 +26,11 @@ MyPaperP4 是一套面向自定义 **ESP32-P4 单色墨水屏设备**的阅读�
 ### 音频
 
 - 从 SD 卡递归扫描并播放 MP3、FLAC、WAV、M4A、AAC、Ogg Vorbis 和 Opus。
-- 顺序播放、随机播放、上一首、下一首、暂停与音量调节。
+- 顺序播放、随机播放、单曲循环、上一首、下一首、暂停与音量调节。
+- 雪花省电模式可冻结歌词与进度条的周期刷新，不影响播放控制和界面交互。
 - 播放进度、已播放时间和总时长显示。
+- 封面、滚动歌词和歌曲列表三视图，可在内容区左右滑动切换。
+- 支持 FLAC PICTURE、ID3 APIC/PIC、M4A `covr` 内嵌封面，以及同目录封面图片；封面会生成适合硬解显示的方形缩略图。
 - 44.1 kHz、48 kHz 音频按原采样率输出；高于 48 kHz 时转换到设备支持范围。
 - 相邻歌曲采样率相同时避免重复配置 I²S/Codec。
 - 支持 ID3 `SYLT`、`USLT`/`TXXX`、Vorbis Comment 和 M4A `©lyr` 中的同步歌词。
@@ -55,13 +58,14 @@ MyPaperP4 是一套面向自定义 **ESP32-P4 单色墨水屏设备**的阅读�
 
 | 入口 | 状态 |
 | --- | --- |
-| Book | 最近阅读书架与阅读器 |
+| Book | 按最近打开顺序展示的书架与阅读器 |
 | Files / Images | SD 卡文件与图片浏览 |
 | Music | 本地音乐、歌词与播放控制 |
 | Radio | 网络收音机 |
 | News | RSS 与 Bing 壁纸 |
 | Transfer | Wi-Fi 网页传输 |
-| Clock / Setting | 当前仍为占位界面 |
+| Setting | Wi-Fi 扫描、密码输入、连接验证与默认网络管理 |
+| Clock | 当前仍为占位界面 |
 
 ## 硬件与构建配置
 
@@ -133,7 +137,6 @@ idf.py -p /dev/ttyUSB0 flash monitor
 /images/                JPG、JPEG、PNG、BMP
 /fonts/                 TTF、OTF、EDCBook BIN 字体
 /music/                 MP3、FLAC、WAV、M4A、AAC、OGG、OPUS
-/wifi.txt               Wi-Fi 凭据
 /rss.txt                自定义 RSS 源
 /.reader/               自动生成的应用数据与缓存
 ```
@@ -147,16 +150,9 @@ idf.py -p /dev/ttyUSB0 flash monitor
 
 ### Wi-Fi 配置
 
-`/sdcard/wifi.txt` 支持键值格式：
+在主页进入 `Setting > WiFi`，设备会扫描附近网络。选择网络后可通过屏幕虚拟键盘输入密码；只有连接验证成功，SSID 和密码才会写入 NVS，并成为 Radio、RSS 与 Transfer 的默认网络。
 
-```ini
-ssid=YourWiFiName
-password=YourWiFiPassword
-```
-
-也支持第一行 SSID、第二行密码的简单格式。
-
-> 不要把真实 Wi-Fi 密码提交到公开仓库。发布固件前，请检查 `sdkconfig.defaults`、`WifiTransferActivity.cpp` 和 `RssReaderActivity.cpp` 中的构建期默认值。
+扫描、验证以及网络功能退出后会停止 Wi-Fi 并关闭 ESP32-C6，避免设置页面或阅读场景持续耗电。Wi-Fi 密码存放在 NVS；如产品需要更高安全等级，应同时启用 Flash Encryption 与 NVS Encryption。
 
 ### RSS 配置
 
@@ -193,7 +189,7 @@ Bing Wallpaper|https://rsshub.app/bing
 应用数据保存在 `/sdcard/.reader/`：
 
 ```text
-recent_books             最近阅读列表
+recent_books             书架记录（按最近打开顺序）
 reader_style             阅读排版设置
 reader_font              当前字体
 txtprogress/             TXT 阅读进度
@@ -201,6 +197,7 @@ epubprogress/            EPUB 阅读进度
 epub_tmp/                EPUB 图片按需解压缓存
 epub_meta/               EPUB ZIP 索引与元数据缓存
 rss_img/                 RSS 图片缓存
+music_cover/             音频封面与方形缩略图缓存
 ```
 
 缓存文件可以删除，应用会在下次使用时重新生成；删除进度文件会丢失对应阅读位置。

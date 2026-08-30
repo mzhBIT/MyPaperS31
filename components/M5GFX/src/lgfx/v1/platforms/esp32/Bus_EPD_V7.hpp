@@ -24,6 +24,12 @@ struct Bus_EPD_V7 : public Bus_EPD
   bool init(void) override;
   bool powerControl(bool flg_on) override;
   bool measureVCOM(uint32_t* vcom_mV, uint32_t timeout_ms = 500) override;
+  bool supports2DContinuousScan(void) const override;
+  bool write2DFrame(const uint8_t* data, size_t length,
+                    uint32_t timeout_ms, uint32_t* scan_time_us) override;
+  bool write2DStream(epd_2d_line_renderer_t renderer, void* context,
+                     uint32_t timeout_ms,
+                     epd_2d_stream_stats_t* stats) override;
 
   // ─── PCA9535 Key Input (Port 0: IO0_0 ~ IO0_7) ─────────────────
   // Call once after init() to enable key scanning via the INT pin.

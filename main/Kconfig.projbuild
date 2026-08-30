@@ -15,20 +15,7 @@ menu "Storage Configuration"
 
 endmenu
 
-menu "Wi-Fi Station Configuration"
-
-    config WIFI_SETTING_STA_SSID
-        string "Wi-Fi SSID"
-        default ""
-        help
-            Wi-Fi network name used before starting the network radio.
-            Leave empty to only scan nearby APs.
-
-    config WIFI_SETTING_STA_PASSWORD
-        string "Wi-Fi password"
-        default ""
-        help
-            Wi-Fi password for the configured SSID.
+menu "Wi-Fi Configuration"
 
     config WIFI_SETTING_CONNECT_TIMEOUT_MS
         int "Wi-Fi connect timeout in milliseconds"

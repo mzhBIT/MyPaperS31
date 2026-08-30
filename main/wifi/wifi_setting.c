@@ -14,18 +14,22 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
+#include "nvs.h"
 #include "nvs_flash.h"
 
 #define WIFI_SETTING_C6_EN_GPIO        GPIO_NUM_54
 #define WIFI_SETTING_C6_BOOT_DELAY_MS  1000
 #define WIFI_SETTING_C6_OFF_SETTLE_MS  500
-#define WIFI_SETTING_MAX_AP_COUNT      16
+#define WIFI_SETTING_MAX_AP_COUNT      24
 #define WIFI_SETTING_CONNECTED_BIT     BIT0
 #define WIFI_SETTING_FAIL_BIT          BIT1
 #define WIFI_SETTING_STARTED_BIT       BIT2
 #define WIFI_SETTING_STOPPED_BIT       BIT3
 #define WIFI_SETTING_MAX_RETRY         5
 #define WIFI_SETTING_STATE_TIMEOUT_MS  2000
+#define WIFI_SETTING_NVS_NAMESPACE     "wifi_cfg"
+#define WIFI_SETTING_NVS_SSID_KEY      "ssid"
+#define WIFI_SETTING_NVS_PASSWORD_KEY  "password"
 
 static const char *TAG = "wifi_setting";
 
@@ -221,8 +225,14 @@ esp_err_t wifi_setting_init(void)
     return ESP_OK;
 }
 
-esp_err_t wifi_setting_scan(void)
+esp_err_t wifi_setting_scan(wifi_setting_ap_t *records,
+                            size_t capacity,
+                            size_t *out_count)
 {
+    ESP_RETURN_ON_FALSE(out_count != NULL, ESP_ERR_INVALID_ARG, TAG, "Missing scan count output");
+    ESP_RETURN_ON_FALSE(capacity == 0 || records != NULL, ESP_ERR_INVALID_ARG,
+                        TAG, "Missing scan record buffer");
+    *out_count = 0;
     ESP_RETURN_ON_ERROR(wifi_setting_init(), TAG, "Failed to initialize Wi-Fi");
 
     ESP_LOGI(TAG, "Starting Wi-Fi scan");
@@ -256,6 +266,15 @@ esp_err_t wifi_setting_scan(void)
                  ap_records[i].primary,
                  ap_records[i].authmode,
                  (const char *) ap_records[i].ssid);
+        if (*out_count < capacity && ap_records[i].ssid[0] != '\0') {
+            wifi_setting_ap_t *output = &records[*out_count];
+            memset(output, 0, sizeof(*output));
+            strlcpy(output->ssid, (const char *) ap_records[i].ssid, sizeof(output->ssid));
+            output->rssi = ap_records[i].rssi;
+            output->channel = ap_records[i].primary;
+            output->secured = ap_records[i].authmode != WIFI_AUTH_OPEN;
+            (*out_count)++;
+        }
     }
 
     return ESP_OK;
@@ -264,6 +283,10 @@ esp_err_t wifi_setting_scan(void)
 esp_err_t wifi_setting_connect(const char *ssid, const char *password, int timeout_ms)
 {
     ESP_RETURN_ON_FALSE(ssid != NULL && ssid[0] != '\0', ESP_ERR_INVALID_ARG, TAG, "Wi-Fi SSID is empty");
+    ESP_RETURN_ON_FALSE(strlen(ssid) <= WIFI_SETTING_SSID_MAX_LEN, ESP_ERR_INVALID_ARG,
+                        TAG, "Wi-Fi SSID is too long");
+    ESP_RETURN_ON_FALSE(password == NULL || strlen(password) <= WIFI_SETTING_PASSWORD_MAX_LEN,
+                        ESP_ERR_INVALID_ARG, TAG, "Wi-Fi password is too long");
     ESP_RETURN_ON_ERROR(wifi_setting_init(), TAG, "Failed to initialize Wi-Fi");
 
     esp_netif_ip_info_t ip_info = {0};
@@ -276,14 +299,19 @@ esp_err_t wifi_setting_connect(const char *ssid, const char *password, int timeo
     }
 
     wifi_config_t wifi_config = {0};
-    strlcpy((char *) wifi_config.sta.ssid, ssid, sizeof(wifi_config.sta.ssid));
+    size_t ssid_length = strlen(ssid);
+    memcpy(wifi_config.sta.ssid, ssid,
+           ssid_length < sizeof(wifi_config.sta.ssid)
+               ? ssid_length
+               : sizeof(wifi_config.sta.ssid));
     if (password != NULL) {
         strlcpy((char *) wifi_config.sta.password, password, sizeof(wifi_config.sta.password));
     }
-    wifi_config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
-    if (password == NULL || password[0] == '\0') {
-        wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
-    }
+    // Let the selected AP negotiate its advertised security mode. Requiring
+    // WPA2 here incorrectly rejects open, WPA and mixed-mode networks.
+    wifi_config.sta.threshold.authmode = WIFI_AUTH_OPEN;
+    wifi_config.sta.pmf_cfg.capable = true;
+    wifi_config.sta.pmf_cfg.required = false;
 
     xEventGroupClearBits(s_wifi_event_group, WIFI_SETTING_CONNECTED_BIT | WIFI_SETTING_FAIL_BIT);
     s_retry_num = 0;
@@ -310,6 +338,92 @@ esp_err_t wifi_setting_connect(const char *ssid, const char *password, int timeo
 
     ESP_LOGE(TAG, "Timed out connecting to Wi-Fi SSID: %s", ssid);
     return ESP_ERR_TIMEOUT;
+}
+
+bool wifi_setting_load_credentials(char *ssid,
+                                   size_t ssid_size,
+                                   char *password,
+                                   size_t password_size)
+{
+    if (ssid == NULL || ssid_size == 0 || password == NULL || password_size == 0) {
+        return false;
+    }
+    ssid[0] = '\0';
+    password[0] = '\0';
+    if (wifi_setting_init_nvs() != ESP_OK) return false;
+
+    nvs_handle_t handle = 0;
+    esp_err_t ret = nvs_open(WIFI_SETTING_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (ret != ESP_OK) return false;
+
+    size_t stored_ssid_size = ssid_size;
+    ret = nvs_get_str(handle, WIFI_SETTING_NVS_SSID_KEY, ssid, &stored_ssid_size);
+    if (ret == ESP_OK) {
+        size_t stored_password_size = password_size;
+        esp_err_t pass_ret = nvs_get_str(handle,
+                                         WIFI_SETTING_NVS_PASSWORD_KEY,
+                                         password,
+                                         &stored_password_size);
+        if (pass_ret == ESP_ERR_NVS_NOT_FOUND) {
+            password[0] = '\0';
+        } else if (pass_ret != ESP_OK) {
+            ret = pass_ret;
+        }
+    }
+    nvs_close(handle);
+
+    if (ret != ESP_OK || ssid[0] == '\0') {
+        ssid[0] = '\0';
+        password[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
+esp_err_t wifi_setting_save_credentials(const char *ssid, const char *password)
+{
+    ESP_RETURN_ON_FALSE(ssid != NULL && ssid[0] != '\0', ESP_ERR_INVALID_ARG,
+                        TAG, "Wi-Fi SSID is empty");
+    ESP_RETURN_ON_FALSE(strlen(ssid) <= WIFI_SETTING_SSID_MAX_LEN, ESP_ERR_INVALID_ARG,
+                        TAG, "Wi-Fi SSID is too long");
+    ESP_RETURN_ON_FALSE(password == NULL || strlen(password) <= WIFI_SETTING_PASSWORD_MAX_LEN,
+                        ESP_ERR_INVALID_ARG, TAG, "Wi-Fi password is too long");
+    ESP_RETURN_ON_ERROR(wifi_setting_init_nvs(), TAG, "Failed to initialize NVS");
+
+    nvs_handle_t handle = 0;
+    ESP_RETURN_ON_ERROR(nvs_open(WIFI_SETTING_NVS_NAMESPACE, NVS_READWRITE, &handle),
+                        TAG, "Failed to open Wi-Fi NVS namespace");
+    esp_err_t ret = nvs_set_str(handle, WIFI_SETTING_NVS_SSID_KEY, ssid);
+    if (ret == ESP_OK) {
+        ret = nvs_set_str(handle, WIFI_SETTING_NVS_PASSWORD_KEY,
+                          password != NULL ? password : "");
+    }
+    if (ret == ESP_OK) ret = nvs_commit(handle);
+    nvs_close(handle);
+    if (ret == ESP_OK) ESP_LOGI(TAG, "Saved default Wi-Fi SSID: %s", ssid);
+    return ret;
+}
+
+esp_err_t wifi_setting_clear_credentials(void)
+{
+    ESP_RETURN_ON_ERROR(wifi_setting_init_nvs(), TAG, "Failed to initialize NVS");
+    nvs_handle_t handle = 0;
+    ESP_RETURN_ON_ERROR(nvs_open(WIFI_SETTING_NVS_NAMESPACE, NVS_READWRITE, &handle),
+                        TAG, "Failed to open Wi-Fi NVS namespace");
+    esp_err_t ret = nvs_erase_all(handle);
+    if (ret == ESP_OK) ret = nvs_commit(handle);
+    nvs_close(handle);
+    return ret;
+}
+
+esp_err_t wifi_setting_connect_saved(int timeout_ms)
+{
+    char ssid[WIFI_SETTING_SSID_MAX_LEN + 1] = {0};
+    char password[WIFI_SETTING_PASSWORD_MAX_LEN + 1] = {0};
+    ESP_RETURN_ON_FALSE(wifi_setting_load_credentials(ssid, sizeof(ssid),
+                                                      password, sizeof(password)),
+                        ESP_ERR_NOT_FOUND, TAG, "No saved Wi-Fi credentials");
+    return wifi_setting_connect(ssid, password, timeout_ms);
 }
 
 esp_err_t wifi_setting_deinit(bool power_down_c6)

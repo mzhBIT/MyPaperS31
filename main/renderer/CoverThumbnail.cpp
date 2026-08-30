@@ -22,8 +22,10 @@ namespace {
 static const char *TAG = "COVER_THUMB";
 static constexpr int THUMB_WIDTH = 240;
 static constexpr int THUMB_HEIGHT = 336;
+static constexpr int SQUARE_THUMB_SIZE = 360;
 static constexpr int THUMB_QUALITY = 80;
 static constexpr const char *THUMB_NAME = "cover_thumb_v1.jpg";
+static constexpr const char *SQUARE_THUMB_NAME = "cover_square_v1.jpg";
 
 static uint16_t be16(const uint8_t *p)
 {
@@ -132,14 +134,14 @@ static bool probe_image(const std::string &path, const std::string &ext,
 
 static bool render_source(lgfx::LGFX_Sprite *sprite, const std::string &path,
                           const std::string &ext, int source_width, int source_height,
-                          bool progressive)
+                          bool progressive, int target_width, int target_height)
 {
-    float scale = std::min((float)THUMB_WIDTH / (float)source_width,
-                           (float)THUMB_HEIGHT / (float)source_height);
-    int draw_width = std::max(1, std::min(THUMB_WIDTH, (int)std::lround(source_width * scale)));
-    int draw_height = std::max(1, std::min(THUMB_HEIGHT, (int)std::lround(source_height * scale)));
-    int draw_x = (THUMB_WIDTH - draw_width) / 2;
-    int draw_y = (THUMB_HEIGHT - draw_height) / 2;
+    float scale = std::min((float)target_width / (float)source_width,
+                           (float)target_height / (float)source_height);
+    int draw_width = std::max(1, std::min(target_width, (int)std::lround(source_width * scale)));
+    int draw_height = std::max(1, std::min(target_height, (int)std::lround(source_height * scale)));
+    int draw_x = (target_width - draw_width) / 2;
+    int draw_y = (target_height - draw_height) / 2;
 
     if (ext == ".jpg") {
         if (progressive) {
@@ -160,9 +162,10 @@ static bool render_source(lgfx::LGFX_Sprite *sprite, const std::string &path,
     return false;
 }
 
-static bool encode_hardware_jpeg(lgfx::LGFX_Sprite *sprite, const std::string &output_path)
+static bool encode_hardware_jpeg(lgfx::LGFX_Sprite *sprite, const std::string &output_path,
+                                 int width, int height)
 {
-    const size_t raw_size = (size_t)THUMB_WIDTH * THUMB_HEIGHT * 3;
+    const size_t raw_size = (size_t)width * height * 3;
     jpeg_encode_memory_alloc_cfg_t input_cfg = {
         .buffer_direction = JPEG_ENC_ALLOC_INPUT_BUFFER,
     };
@@ -178,7 +181,7 @@ static bool encode_hardware_jpeg(lgfx::LGFX_Sprite *sprite, const std::string &o
         std::free(input);
         return false;
     }
-    sprite->readRectRGB(0, 0, THUMB_WIDTH, THUMB_HEIGHT, input);
+    sprite->readRectRGB(0, 0, width, height, input);
 
     jpeg_encoder_handle_t encoder = nullptr;
     jpeg_encode_engine_cfg_t engine_cfg = {
@@ -189,8 +192,8 @@ static bool encode_hardware_jpeg(lgfx::LGFX_Sprite *sprite, const std::string &o
     uint32_t encoded_size = 0;
     if (err == ESP_OK) {
         jpeg_encode_cfg_t encode_cfg = {
-            .height = THUMB_HEIGHT,
-            .width = THUMB_WIDTH,
+            .height = static_cast<uint32_t>(height),
+            .width = static_cast<uint32_t>(width),
             .src_type = JPEG_ENCODE_IN_FORMAT_RGB888,
             .sub_sample = JPEG_DOWN_SAMPLING_YUV420,
             .image_quality = THUMB_QUALITY,
@@ -234,7 +237,15 @@ std::string cache_path_for(const std::string &source_path)
     return source_path.substr(0, slash + 1) + THUMB_NAME;
 }
 
-bool ensure(const std::string &source_path, const std::string &thumbnail_path)
+std::string square_cache_path_for(const std::string &source_path)
+{
+    size_t slash = source_path.find_last_of('/');
+    if (slash == std::string::npos) return SQUARE_THUMB_NAME;
+    return source_path.substr(0, slash + 1) + SQUARE_THUMB_NAME;
+}
+
+static bool ensure_sized(const std::string &source_path, const std::string &thumbnail_path,
+                         int width, int height)
 {
     if (valid_jpeg_file(thumbnail_path)) return true;
     std::string ext = lower_ext(source_path);
@@ -247,23 +258,34 @@ bool ensure(const std::string &source_path, const std::string &thumbnail_path)
     lgfx::LGFX_Sprite sprite;
     sprite.setPsram(true);
     sprite.setColorDepth(16);
-    if (!sprite.createSprite(THUMB_WIDTH, THUMB_HEIGHT)) {
+    if (!sprite.createSprite(width, height)) {
         ESP_LOGW(TAG, "sprite allocation failed");
         return false;
     }
     sprite.fillScreen(TFT_WHITE);
-    if (!render_source(&sprite, source_path, ext, source_width, source_height, progressive)) {
+    if (!render_source(&sprite, source_path, ext, source_width, source_height,
+                       progressive, width, height)) {
         ESP_LOGW(TAG, "cover decode failed path=%s", source_path.c_str());
         return false;
     }
-    if (!encode_hardware_jpeg(&sprite, thumbnail_path)) return false;
+    if (!encode_hardware_jpeg(&sprite, thumbnail_path, width, height)) return false;
 
     struct stat st = {};
     stat(thumbnail_path.c_str(), &st);
     ESP_LOGI(TAG, "created %dx%d jpeg bytes=%ld elapsed=%lld ms source=%s",
-             THUMB_WIDTH, THUMB_HEIGHT, (long)st.st_size,
+             width, height, (long)st.st_size,
              (long long)((esp_timer_get_time() - started) / 1000), source_path.c_str());
     return true;
+}
+
+bool ensure(const std::string &source_path, const std::string &thumbnail_path)
+{
+    return ensure_sized(source_path, thumbnail_path, THUMB_WIDTH, THUMB_HEIGHT);
+}
+
+bool ensure_square(const std::string &source_path, const std::string &thumbnail_path)
+{
+    return ensure_sized(source_path, thumbnail_path, SQUARE_THUMB_SIZE, SQUARE_THUMB_SIZE);
 }
 
 } // namespace cover_thumbnail

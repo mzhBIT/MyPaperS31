@@ -41,6 +41,8 @@ public:
     const std::string &cover_image_href() const { return _cover_image_href; }
     int toc_count() const { return (int)_toc.size(); }
     const EpubTocItem &toc_item(int index) const { return _toc[(size_t)index]; }
+    static bool cached_progress_info(const char *path, uint32_t spine, uint64_t position,
+                                     int *percent, int *chapter, int *chapter_count);
     bool read_item_to_string(const std::string &href, std::string *out);
     bool extract_item_to_file(const std::string &href, const std::string &out_path);
 

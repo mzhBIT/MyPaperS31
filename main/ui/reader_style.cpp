@@ -9,7 +9,8 @@
 
 static const char *TAG = "READER_STYLE";
 static const char *NVS_NS = "reader_style";
-static const char *NVS_KEY = "style_v2";
+static const char *NVS_KEY = "style_v3";
+static const char *NVS_KEY_V2 = "style_v2";
 static const char *NVS_KEY_V1 = "style_v1";
 
 struct ReaderStyleV1 {
@@ -33,6 +34,7 @@ static bool load_style_from_sd(ReaderStyle *out)
     FILE *fp = fopen(app_paths::reader_style_file(), "r");
     if (!fp) return false;
 
+    bool has_legacy_paragraph_spacing = false;
     char key[48] = {};
     int val = 0;
     char line[128] = {};
@@ -47,17 +49,22 @@ static bool load_style_from_sd(ReaderStyle *out)
         else if (strcmp(key, "refresh_mode") == 0) style.refresh_mode = val;
         else if (strcmp(key, "show_images") == 0) style.show_images = val;
         else if (strcmp(key, "first_line_indent") == 0) style.first_line_indent = val;
-        else if (strcmp(key, "paragraph_spacing") == 0) style.paragraph_spacing = val;
+        else if (strcmp(key, "paragraph_spacing") == 0) {
+            style.paragraph_spacing = val;
+            has_legacy_paragraph_spacing = true;
+        }
     }
     fclose(fp);
 
+    if (has_legacy_paragraph_spacing) style.paragraph_spacing *= 5;
     *out = reader_style_clamp(style);
     return true;
 }
 
-static bool load_style_from_nvs(ReaderStyle *out)
+static bool load_style_from_nvs(ReaderStyle *out, bool *migrated)
 {
     if (!out) return false;
+    if (migrated) *migrated = false;
 
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NS, NVS_READONLY, &h);
@@ -68,6 +75,17 @@ static bool load_style_from_nvs(ReaderStyle *out)
     bool loaded = false;
     err = nvs_get_blob(h, NVS_KEY, &style, &len);
     loaded = err == ESP_OK && len == sizeof(style);
+    if (!loaded) {
+        ReaderStyle legacy_v2 = {};
+        len = sizeof(legacy_v2);
+        err = nvs_get_blob(h, NVS_KEY_V2, &legacy_v2, &len);
+        if (err == ESP_OK && len == sizeof(legacy_v2)) {
+            style = legacy_v2;
+            style.paragraph_spacing *= 5;
+            loaded = true;
+            if (migrated) *migrated = true;
+        }
+    }
     if (!loaded) {
         ReaderStyleV1 legacy = {};
         len = sizeof(legacy);
@@ -83,6 +101,7 @@ static bool load_style_from_nvs(ReaderStyle *out)
             style.refresh_mode = legacy.refresh_mode;
             style.show_images = legacy.show_images;
             loaded = true;
+            if (migrated) *migrated = true;
         }
     }
     nvs_close(h);
@@ -103,7 +122,7 @@ ReaderStyle reader_style_clamp(ReaderStyle style)
     style.refresh_mode = std::min(4, std::max(1, style.refresh_mode));
     style.show_images = style.show_images ? 1 : 0;
     style.first_line_indent = std::min(4, std::max(0, style.first_line_indent));
-    style.paragraph_spacing = std::min(2, std::max(0, style.paragraph_spacing));
+    style.paragraph_spacing = std::min(20, std::max(0, style.paragraph_spacing));
     return style;
 }
 
@@ -127,7 +146,8 @@ void reader_style_init()
 {
     s_style = reader_style_clamp(ReaderStyle());
 
-    if (load_style_from_nvs(&s_style)) {
+    bool migrated = false;
+    if (load_style_from_nvs(&s_style, &migrated)) {
         ESP_LOGI(TAG, "loaded style from NVS size=%d line=%d indent=%d paragraph=%d margins=%d,%d,%d,%d refresh=%s",
                  s_style.font_size,
                  s_style.line_spacing,
@@ -138,6 +158,10 @@ void reader_style_init()
                  s_style.margin_top,
                  s_style.margin_bottom,
                  reader_style_refresh_mode_name(s_style.refresh_mode));
+        if (migrated) {
+            ESP_LOGI(TAG, "migrating reader style to v3");
+            reader_style_save();
+        }
         return;
     }
 

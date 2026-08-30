@@ -19,7 +19,7 @@
 位于 `activities/`：
 
 - `HomeActivity`
-  - 主页面和最近阅读书架。
+  - 主页面和按最近打开顺序排列的书架。
   - EPUB 封面缩略图显示。
 - `FileBrowserActivity`
   - 浏览 SD 卡中的书籍、图片、字体和音频文件。
@@ -29,6 +29,8 @@
   - EPUB spine/TOC 导航、正文分页、图片按需提取、封面缓存和进度保存。
 - `ReaderSettingsActivity`
   - 字体、刷新模式、字号、行距、首行缩进、段间距、边距和图片开关。
+- `SettingActivity`
+  - Wi-Fi 扫描、虚拟键盘、连接验证与 NVS 默认凭据管理。
 - `MusicActivity`
   - 本地音乐扫描、列表、播放控制、进度、音量和同步歌词。
 - `RadioActivity`
@@ -40,6 +42,12 @@
 - `ImageViewerActivity`
   - JPG、PNG、BMP 浏览和同目录图片切换。
 
+## UI
+
+- `VirtualKeyboard.*`
+  - 可配置位置、输入长度、占位文字、密码显隐和提交文案的通用触摸键盘。
+  - 内置大小写、数字/符号、空格、退格与提交事件，页面通过动作枚举处理业务逻辑。
+
 ## Audio
 
 位于 `audio/`：
@@ -50,6 +58,9 @@
   - I²S/ES8311 输出格式切换、音量、播放状态和时间统计。
 - `audio_file_formats.*`
   - 应用统一支持的音频扩展名。
+- `embedded_cover.*`
+  - FLAC、ID3、MP4 内嵌封面和同目录封面查找。
+  - 按音频文件隔离封面缓存，交由 `CoverThumbnail` 生成方形硬解缩略图。
 - `embedded_lyrics.*`
   - ID3、Vorbis Comment、MP4 歌词和外置 LRC 解析。
 - `m5_i2c_codec_ctrl.*`

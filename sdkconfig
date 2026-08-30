@@ -640,12 +640,10 @@ CONFIG_STORAGE_SD_PWR_CTRL_LDO_IO_ID=4
 # end of Storage Configuration
 
 #
-# Wi-Fi Station Configuration
+# Wi-Fi Configuration
 #
-CONFIG_WIFI_SETTING_STA_SSID="TP-LINK_A027"
-CONFIG_WIFI_SETTING_STA_PASSWORD="18557530408"
 CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS=20000
-# end of Wi-Fi Station Configuration
+# end of Wi-Fi Configuration
 
 #
 # Audio Radio Configuration

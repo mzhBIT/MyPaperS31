@@ -13,6 +13,8 @@ static const char *EPUB_PROGRESS_DIR = "/sdcard/.reader/epubprogress";
 static const char *EPUB_CACHE_DIR = "/sdcard/.reader/epub_tmp";
 static const char *EPUB_METADATA_DIR = "/sdcard/.reader/epub_meta";
 static const char *RSS_IMAGE_CACHE_DIR = "/sdcard/.reader/rss_img";
+static const char *MUSIC_COVER_CACHE_DIR = "/sdcard/.reader/music_cover";
+static const char *DEEPSEEK_SESSIONS_DIR = "/sdcard/.reader/deepseek";
 
 const char *data_dir() { return APP_DATA_DIR; }
 const char *recent_books_file() { return RECENT_BOOKS_FILE; }
@@ -23,6 +25,8 @@ const char *epub_progress_dir() { return EPUB_PROGRESS_DIR; }
 const char *epub_cache_dir() { return EPUB_CACHE_DIR; }
 const char *epub_metadata_dir() { return EPUB_METADATA_DIR; }
 const char *rss_image_cache_dir() { return RSS_IMAGE_CACHE_DIR; }
+const char *music_cover_cache_dir() { return MUSIC_COVER_CACHE_DIR; }
+const char *deepseek_sessions_dir() { return DEEPSEEK_SESSIONS_DIR; }
 
 void ensure_data_dir()
 {

@@ -2,6 +2,8 @@
 #include "activities/ActivityManager.h"
 #include "activities/MusicActivity.h"
 #include "activities/PlaceholderActivity.h"
+#include "activities/TextInputActivity.h"
+#include "activities/recent_books.h"
 #include "audio/audio_file_formats.h"
 #include "reader_font.h"
 #include "ui/SystemFont.h"
@@ -15,6 +17,7 @@
 #include <algorithm>
 #include <cstring>
 #include <strings.h>
+#include <esp_timer.h>
 
 static const char *TAG = "FILES";
 static const int TOP_BAR_H = 50;
@@ -73,14 +76,15 @@ static bool is_image_file(const char *n) {
 // ─── Drawing ───────────────────────────────────────────────────────
 
 static void draw_topbar() {
-    M5.Display.fillRect(0, 0, M5.Display.width(), TOP_BAR_H, TFT_BLACK);
-    M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
+    M5.Display.fillRect(0, 0, M5.Display.width(), TOP_BAR_H, TFT_WHITE);
+    M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
 
     // Path (truncated)
     std::string show = g_path;
     if (system_font::measure(show) > M5.Display.width() - 40) show = "..." + show.substr(show.size() > 35 ? show.size() - 35 : 0);
     show = system_font::ellipsize(show, M5.Display.width() - 40);
-    system_font::draw_center(M5.Display, show, M5.Display.width() / 2, 3, TFT_WHITE);
+    system_font::draw_center(M5.Display, show, M5.Display.width() / 2, 3, TFT_BLACK);
+    M5.Display.drawFastHLine(0, TOP_BAR_H - 1, M5.Display.width(), TFT_BLACK);
 }
 
 static void draw_list() {
@@ -212,8 +216,11 @@ static bool hit_back(int tx, int ty) {
 // ─── Activity ──────────────────────────────────────────────────────
 
 class FileBrowserActivity : public Activity {
+    bool m_action_menu = false;
+    int m_action_choice = 0; // 0=rename, 1=delete, 2=cancel
     bool m_confirm_delete = false;
     int m_delete_choice = 0; // 0=cancel, 1=delete
+    std::string m_notice;
 
 public:
     void on_create() override {
@@ -322,6 +329,166 @@ public:
         return s.substr(0, head) + "..." + s.substr(s.size() - tail);
     }
 
+    void draw_action_dialog() {
+        int w = M5.Display.width();
+        int h = M5.Display.height();
+        int box_w = std::min(w - 36, 650);
+        int box_h = 250;
+        int x = (w - box_w) / 2;
+        int y = (h - box_h) / 2;
+        M5.Display.fillRoundRect(x, y, box_w, box_h, 7, TFT_WHITE);
+        M5.Display.drawRoundRect(x, y, box_w, box_h, 7, TFT_BLACK);
+        std::string name = g_focus >= 0 && g_focus < (int)g_entries.size() ? g_entries[g_focus].name : "";
+        system_font::draw_center(M5.Display, system_font::ellipsize(name, box_w - 40), w / 2, y + 28, TFT_BLACK);
+
+        const char *labels[] = {"Rename", "Delete", "Cancel"};
+        int gap = 12;
+        int btn_w = (box_w - 40 - gap * 2) / 3;
+        int btn_h = 66;
+        int bx = x + 20;
+        int by = y + box_h - btn_h - 24;
+        for (int i = 0; i < 3; ++i) {
+            bool selected = i == m_action_choice;
+            M5.Display.fillRoundRect(bx, by, btn_w, btn_h, 6, selected ? TFT_BLACK : TFT_WHITE);
+            M5.Display.drawRoundRect(bx, by, btn_w, btn_h, 6, TFT_BLACK);
+            system_font::draw_center(M5.Display, labels[i], bx + btn_w / 2, by + 11,
+                                     selected ? TFT_WHITE : TFT_BLACK);
+            bx += btn_w + gap;
+        }
+    }
+
+    int action_choice_at(int tx, int ty) const {
+        int w = M5.Display.width();
+        int h = M5.Display.height();
+        int box_w = std::min(w - 36, 650);
+        int box_h = 250;
+        int x = (w - box_w) / 2;
+        int y = (h - box_h) / 2;
+        int gap = 12;
+        int btn_w = (box_w - 40 - gap * 2) / 3;
+        int btn_h = 66;
+        int bx = x + 20;
+        int by = y + box_h - btn_h - 24;
+        if (ty < by || ty >= by + btn_h) return -1;
+        for (int i = 0; i < 3; ++i) {
+            if (tx >= bx && tx < bx + btn_w) return i;
+            bx += btn_w + gap;
+        }
+        return -1;
+    }
+
+    void begin_action_menu() {
+        if (g_focus < 0 || g_focus >= (int)g_entries.size()) return;
+        m_action_menu = true;
+        m_action_choice = 0;
+        m_notice.clear();
+        redraw_all();
+    }
+
+    static bool valid_file_name(const std::string &name) {
+        if (name.empty() || name == "." || name == ".." || name.size() > 255) return false;
+        if (name.back() == ' ' || name.back() == '.') return false;
+        for (unsigned char c : name) {
+            if (c < 0x20 || c == '/' || c == '\\' || c == ':' || c == '*' ||
+                c == '?' || c == '"' || c == '<' || c == '>' || c == '|') return false;
+        }
+        return true;
+    }
+
+    void rename_entry(const std::string &old_path, const std::string &new_name) {
+        m_notice.clear();
+        if (!valid_file_name(new_name)) {
+            m_notice = "Invalid file name";
+            return;
+        }
+        std::string new_path = g_path + "/" + new_name;
+        if (new_path == old_path) return;
+        struct stat st = {};
+        bool case_only = strcasecmp(old_path.c_str(), new_path.c_str()) == 0;
+        if (!case_only && stat(new_path.c_str(), &st) == 0) {
+            m_notice = "A file with that name already exists";
+            return;
+        }
+
+        int result = -1;
+        if (case_only) {
+            char temp_name[64];
+            std::snprintf(temp_name, sizeof(temp_name), ".rename_%lld.tmp", (long long)esp_timer_get_time());
+            std::string temp_path = g_path + "/" + temp_name;
+            if (std::rename(old_path.c_str(), temp_path.c_str()) == 0) {
+                result = std::rename(temp_path.c_str(), new_path.c_str());
+                if (result != 0) std::rename(temp_path.c_str(), old_path.c_str());
+            }
+        } else {
+            result = std::rename(old_path.c_str(), new_path.c_str());
+        }
+        if (result != 0) {
+            ESP_LOGW(TAG, "rename failed old=%s new=%s errno=%d", old_path.c_str(), new_path.c_str(), errno);
+            m_notice = "Rename failed";
+            return;
+        }
+
+        recent_books_rename_path(old_path.c_str(), new_path.c_str());
+        ESP_LOGI(TAG, "renamed: %s -> %s", old_path.c_str(), new_path.c_str());
+        load_dir(g_path);
+        for (size_t i = 0; i < g_entries.size(); ++i) {
+            if (g_entries[i].name == new_name) {
+                g_focus = (int)i;
+                break;
+            }
+        }
+    }
+
+    void begin_rename() {
+        if (g_focus < 0 || g_focus >= (int)g_entries.size()) return;
+        const FsEntry entry = g_entries[g_focus];
+        const std::string old_path = selected_path();
+        std::string stem = entry.name;
+        std::string suffix;
+        if (!entry.is_dir) {
+            size_t dot = stem.find_last_of('.');
+            if (dot != std::string::npos && dot > 0) {
+                suffix = stem.substr(dot);
+                stem.erase(dot);
+            }
+        }
+        TextInputOptions options;
+        options.title = "Rename";
+        options.initial_text = stem;
+        options.fixed_suffix = suffix;
+        options.submit_label = "Rename";
+        options.max_bytes = 255;
+        options.start_in_chinese = true;
+        launch_text_input(options, [this, old_path](const std::string &name) {
+            rename_entry(old_path, name);
+        });
+    }
+
+    void handle_action(int choice) {
+        m_action_menu = false;
+        m_action_choice = 0;
+        if (choice == 0) begin_rename();
+        else if (choice == 1) {
+            if (g_focus >= 0 && g_focus < (int)g_entries.size() && g_entries[g_focus].is_dir) {
+                m_notice = "Folder deletion is not supported";
+                redraw_all();
+            } else begin_delete_confirm();
+        }
+        else redraw_all();
+    }
+
+    void draw_notice() {
+        if (m_notice.empty()) return;
+        int w = M5.Display.width();
+        int box_w = std::min(w - 48, 600);
+        int x = (w - box_w) / 2;
+        int y = M5.Display.height() / 2 - 70;
+        M5.Display.fillRoundRect(x, y, box_w, 140, 7, TFT_WHITE);
+        M5.Display.drawRoundRect(x, y, box_w, 140, 7, TFT_BLACK);
+        system_font::draw_center(M5.Display, system_font::ellipsize(m_notice, box_w - 30), w / 2, y + 24, TFT_BLACK);
+        system_font::draw_center(M5.Display, "Tap to close", w / 2, y + 78, TFT_BLACK);
+    }
+
     void draw_delete_dialog() {
         int w = M5.Display.width();
         int h = M5.Display.height();
@@ -418,8 +585,22 @@ public:
 
     bool on_touch(const TouchEvent &event) override {
         if (event.type == TouchEventType::Back) {
-            if (m_confirm_delete) cancel_delete_confirm();
+            if (!m_notice.empty()) { m_notice.clear(); redraw_all(); }
+            else if (m_action_menu) { m_action_menu = false; redraw_all(); }
+            else if (m_confirm_delete) cancel_delete_confirm();
             else go_back_or_up();
+            return true;
+        }
+
+        if (!m_notice.empty()) {
+            if (event.type == TouchEventType::Tap) { m_notice.clear(); redraw_all(); }
+            return true;
+        }
+
+        if (m_action_menu) {
+            if (event.type != TouchEventType::Tap) return true;
+            int choice = action_choice_at(event.x, event.y);
+            if (choice >= 0) handle_action(choice);
             return true;
         }
 
@@ -446,7 +627,7 @@ public:
             int idx = hit_row(event.y);
             if (idx < 0) return false;
             g_focus = idx;
-            begin_delete_confirm();
+            begin_action_menu();
             return true;
         }
         if (event.type == TouchEventType::Tap) {
@@ -485,6 +666,26 @@ public:
     }
 
     bool on_key(int key) override {
+        if (!m_notice.empty()) {
+            if (key != APP_KEY_NONE) { m_notice.clear(); redraw_all(); }
+            return true;
+        }
+
+        if (m_action_menu) {
+            if (key == APP_KEY_BACK || key == APP_KEY_EXTRA) {
+                m_action_menu = false;
+                redraw_all();
+            } else if (key == APP_KEY_UP) {
+                m_action_choice = (m_action_choice + 2) % 3;
+                redraw_all();
+            } else if (key == APP_KEY_DOWN) {
+                m_action_choice = (m_action_choice + 1) % 3;
+                redraw_all();
+            } else if (key == APP_KEY_OK) {
+                handle_action(m_action_choice);
+            }
+            return true;
+        }
         if (m_confirm_delete) {
             if (key == APP_KEY_BACK || key == APP_KEY_EXTRA) {
                 cancel_delete_confirm();
@@ -511,7 +712,7 @@ public:
         if (g_entries.empty()) return false;
 
         if (key == APP_KEY_EXTRA) {
-            begin_delete_confirm();
+            begin_action_menu();
             return true;
         }
 
@@ -549,7 +750,9 @@ public:
         M5.Display.fillScreen(TFT_WHITE);
         draw_topbar();
         draw_list();
+        if (m_action_menu) draw_action_dialog();
         if (m_confirm_delete) draw_delete_dialog();
+        if (!m_notice.empty()) draw_notice();
         M5.Display.display();
         M5.Display.endWrite();
     }

@@ -36,9 +36,10 @@ static bool is_font_file(const char *name)
 static void draw_header(const char *title)
 {
     int w = M5.Display.width();
-    M5.Display.fillRect(0, 0, w, TOP_H, TFT_BLACK);
-    M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-    system_font::draw_center(M5.Display, title, w / 2, 6, TFT_WHITE);
+    M5.Display.fillRect(0, 0, w, TOP_H, TFT_WHITE);
+    M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+    system_font::draw_center(M5.Display, title, w / 2, 6, TFT_BLACK);
+    M5.Display.drawFastHLine(0, TOP_H - 1, w, TFT_BLACK);
 }
 
 class FontPickerActivity : public Activity {
@@ -243,7 +244,7 @@ class ReaderSettingsActivity : public Activity {
             if (style.refresh_mode > 4) style.refresh_mode = 1;
             break;
         case 2:
-            style.font_size += delta * 4;
+            style.font_size += delta * 2;
             break;
         case 3:
             style.line_spacing += delta * 2;
@@ -287,11 +288,10 @@ class ReaderSettingsActivity : public Activity {
             snprintf(buf, len, "Line spacing: %d", style.line_spacing);
             break;
         case 4:
-            snprintf(buf, len, "First-line indent: %d chars", style.first_line_indent);
+            snprintf(buf, len, "First-line indent: %d", style.first_line_indent);
             break;
         case 5:
-            if (style.paragraph_spacing == 0) snprintf(buf, len, "Paragraph gap: Off");
-            else snprintf(buf, len, "Paragraph gap: %.1f line", style.paragraph_spacing * 0.5);
+            snprintf(buf, len, "Paragraph gap: %.1f", style.paragraph_spacing * 0.1);
             break;
         case 6:
             snprintf(buf, len, "Left margin: %d", style.margin_left);
@@ -441,4 +441,9 @@ public:
 void launch_reader_settings()
 {
     ActivityManager::instance().push(new ReaderSettingsActivity());
+}
+
+void launch_reader_font_picker()
+{
+    ActivityManager::instance().push(new FontPickerActivity());
 }

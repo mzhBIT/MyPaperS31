@@ -669,6 +669,47 @@ std::string EpubBook::metadata_cache_path(const char *source_path)
     return std::string(app_paths::epub_metadata_dir()) + name;
 }
 
+bool EpubBook::cached_progress_info(const char *path, uint32_t spine, uint64_t position,
+                                    int *percent, int *chapter, int *chapter_count)
+{
+    if (percent) *percent = 0;
+    if (chapter) *chapter = 0;
+    if (chapter_count) *chapter_count = 0;
+    EpubBook cached;
+    if (!cached.load_metadata_cache(path) || spine >= cached._spine.size()) return false;
+
+    uint64_t total = 0;
+    uint64_t before = 0;
+    uint64_t current_size = 1;
+    for (size_t i = 0; i < cached._spine.size(); ++i) {
+        uint64_t size = std::max<uint64_t>(1, cached._spine[i].uncompressed_size);
+        if (i < spine) before += size;
+        if (i == spine) current_size = size;
+        total += size;
+    }
+    if (total == 0) return false;
+
+    // page_position is based on parsed content bytes while the metadata size
+    // also includes markup. It is still a useful bounded estimate within the
+    // current spine and is more accurate than spine index alone.
+    uint64_t within = std::min<uint64_t>(position, current_size);
+    uint64_t completed = std::min<uint64_t>(total, before + within);
+    if (percent) {
+        *percent = (int)std::min<uint64_t>(100, (completed * 100 + total / 2) / total);
+    }
+
+    if (!cached._toc.empty()) {
+        int current_chapter = 0;
+        for (size_t i = 0; i < cached._toc.size(); ++i) {
+            if (cached._toc[i].spine_index <= (int)spine) current_chapter = (int)i + 1;
+        }
+        if (current_chapter == 0) current_chapter = 1;
+        if (chapter) *chapter = current_chapter;
+        if (chapter_count) *chapter_count = (int)cached._toc.size();
+    }
+    return true;
+}
+
 bool EpubBook::load_metadata_cache(const char *source_path)
 {
     if (!source_path || !source_path[0]) return false;

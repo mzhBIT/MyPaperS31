@@ -1,5 +1,6 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "activities/ReaderOverlay.h"
 #include "parser/epub_html.h"
 #include "parser/epub_parser.h"
 #include "recent_books.h"
@@ -34,10 +35,9 @@ static const uint32_t EPUB_PROGRESS_VERSION = 2;
 static const uint32_t EPUB_LAYOUT_VERSION = 5;
 static EpubBook g_epub;
 
-extern void launch_reader_settings();
+extern void launch_reader_font_picker();
 
 class EpubReaderActivity;
-static void launch_epub_toc(EpubReaderActivity *reader);
 
 static epd_mode_t epub_reader_epd_mode()
 {
@@ -219,6 +219,15 @@ class EpubReaderActivity : public Activity {
 public:
     explicit EpubReaderActivity(const char *path)
     {
+        ReaderOverlayChapters chapters;
+        chapters.context = this;
+        chapters.count = overlay_chapter_count;
+        chapters.current = overlay_current_chapter;
+        chapters.title = overlay_chapter_title;
+        chapters.depth = overlay_chapter_depth;
+        chapters.activate = overlay_activate_chapter;
+        _overlay.set_chapters(chapters);
+
         _ok = g_epub.open(path);
         if (_ok) {
             std::string key = progress_cache_key(path);
@@ -263,6 +272,7 @@ public:
             refresh_text_renderer();
             repaginate_current_spine();
         }
+        _overlay.clear_settings_dirty();
         redraw_all(epd_mode_t::epd_quality);
     }
 
@@ -271,12 +281,18 @@ public:
         int w = M5.Display.width();
         int h = M5.Display.height();
 
+        if (_overlay.visible()) {
+            handle_overlay_action(_overlay.on_key(key));
+            return true;
+        }
+
         if (key == APP_KEY_BACK) {
             ActivityManager::instance().pop();
             return true;
         }
         if (key == APP_KEY_EXTRA) {
-            launch_epub_toc(this);
+            _overlay.open(ReaderOverlay::Tab::Chapters);
+            _overlay.redraw();
             return true;
         }
         if (key == APP_KEY_UP) {
@@ -313,12 +329,18 @@ public:
         int w = M5.Display.width();
         int h = M5.Display.height();
 
+        if (_overlay.visible()) {
+            handle_overlay_action(_overlay.on_touch(event));
+            return true;
+        }
+
         if (event.type == TouchEventType::Back) {
             ActivityManager::instance().pop();
             return true;
         }
         if (event.type == TouchEventType::LongPress) {
-            launch_epub_toc(this);
+            _overlay.open(ReaderOverlay::Tab::Chapters);
+            _overlay.redraw();
             return true;
         }
         if (!_ok) return false;
@@ -341,7 +363,8 @@ public:
             return true;
         }
         if (event.x >= w / 3 && event.x <= (w * 2) / 3) {
-            launch_reader_settings();
+            _overlay.open(ReaderOverlay::Tab::Settings);
+            _overlay.redraw();
             return true;
         } else if (event.x > w / 2) {
             next_page();
@@ -354,6 +377,59 @@ public:
     }
 
 private:
+    static int overlay_chapter_count(void *)
+    {
+        return g_epub.toc_count();
+    }
+
+    static int overlay_current_chapter(void *context)
+    {
+        EpubReaderActivity *reader = static_cast<EpubReaderActivity *>(context);
+        int current_spine = reader ? reader->current_spine_index() : 0;
+        int count = g_epub.toc_count();
+        for (int i = 0; i < count; ++i) {
+            if (g_epub.toc_item(i).spine_index >= current_spine) return i;
+        }
+        return std::max(0, count - 1);
+    }
+
+    static std::string overlay_chapter_title(void *, int index)
+    {
+        if (index < 0 || index >= g_epub.toc_count()) return std::string();
+        return g_epub.toc_item(index).title;
+    }
+
+    static int overlay_chapter_depth(void *, int index)
+    {
+        if (index < 0 || index >= g_epub.toc_count()) return 0;
+        return g_epub.toc_item(index).depth;
+    }
+
+    static bool overlay_activate_chapter(void *context, int index)
+    {
+        EpubReaderActivity *reader = static_cast<EpubReaderActivity *>(context);
+        if (!reader || index < 0 || index >= g_epub.toc_count()) return false;
+        return reader->jump_to_spine(g_epub.toc_item(index).spine_index);
+    }
+
+    void handle_overlay_action(ReaderOverlay::Action action)
+    {
+        if (action == ReaderOverlay::Action::None) return;
+        if (action == ReaderOverlay::Action::OpenFont) {
+            launch_reader_font_picker();
+            return;
+        }
+
+        bool apply_layout = _overlay.settings_dirty();
+        _overlay.close();
+        if (apply_layout && _ok) {
+            refresh_text_renderer();
+            repaginate_current_spine();
+            _overlay.clear_settings_dirty();
+        }
+        redraw_all(epd_mode_t::epd_quality);
+    }
+
     using PageItemType = document_layout::PageItemType;
     using PageItem = document_layout::PageItem;
 
@@ -910,7 +986,7 @@ private:
         ReaderStyle reader_style = reader_style_get();
         int fullwidth_advance = renderer.measureFullwidthCellForLayout();
         options.first_line_indent = fullwidth_advance * reader_style.first_line_indent;
-        options.paragraph_spacing_percent = reader_style.paragraph_spacing * 50;
+        options.paragraph_spacing_percent = reader_style.paragraph_spacing * 10;
         options.layout_paragraph = [](void *context, const std::string &text, int width, int indent) {
             return static_cast<TextRenderer *>(context)->layoutUtf8Paragraph(text, width, indent);
         };
@@ -1210,6 +1286,7 @@ private:
         M5.Display.fillRect(0, TOP_H, w, h - TOP_H, TFT_WHITE);
         draw_topbar(w);
         draw_content(w, h);
+        if (_overlay.visible()) _overlay.draw();
         M5.Display.display();
         M5.Display.endWrite();
         ESP_LOGI(TAG, "redraw spine=%d page=%d/%d total=%lld ms",
@@ -1230,6 +1307,7 @@ private:
         M5.Display.fillScreen(TFT_WHITE);
         draw_topbar(w);
         draw_content(w, h);
+        if (_overlay.visible()) _overlay.draw();
         M5.Display.display();
         M5.Display.endWrite();
         epd_mode_t default_mode = epub_reader_epd_mode();
@@ -1241,198 +1319,9 @@ private:
                  (esp_timer_get_time() - t0) / 1000);
         prefetch_next_image();
     }
+
+    ReaderOverlay _overlay;
 };
-
-class EpubTocActivity : public Activity {
-public:
-    explicit EpubTocActivity(EpubReaderActivity *reader) : _reader(reader)
-    {
-        int current = reader ? reader->current_spine_index() : 0;
-        for (int i = 0; i < g_epub.toc_count(); ++i) {
-            if (g_epub.toc_item(i).spine_index >= current) {
-                _focus = i;
-                break;
-            }
-        }
-        _scroll = _focus;
-    }
-
-    void on_create() override
-    {
-        redraw();
-    }
-
-    void on_show() override
-    {
-        redraw();
-    }
-
-    bool on_key(int key) override
-    {
-        int rows = visible_rows();
-        if (key == APP_KEY_BACK) {
-            ActivityManager::instance().pop();
-            return true;
-        }
-        if (key == APP_KEY_EXTRA) {
-            launch_reader_settings();
-            return true;
-        }
-        if (g_epub.toc_count() <= 0) return true;
-
-        if (key == APP_KEY_UP) {
-            if (_focus > 0) _focus--;
-            if (_focus < _scroll) _scroll = _focus;
-            redraw();
-            return true;
-        }
-        if (key == APP_KEY_DOWN) {
-            if (_focus + 1 < g_epub.toc_count()) _focus++;
-            if (_focus >= _scroll + rows) _scroll = _focus - rows + 1;
-            redraw();
-            return true;
-        }
-        if (key == APP_KEY_OK) {
-            const EpubTocItem &item = g_epub.toc_item(_focus);
-            if (_reader && _reader->jump_to_spine(item.spine_index)) {
-                ActivityManager::instance().pop();
-            }
-            return true;
-        }
-        return true;
-    }
-
-    bool on_touch(const TouchEvent &event) override
-    {
-        int rows = visible_rows();
-        if (event.type == TouchEventType::Back) {
-            ActivityManager::instance().pop();
-            return true;
-        }
-        if (event.type == TouchEventType::LongPress) {
-            launch_reader_settings();
-            return true;
-        }
-        if (event.type == TouchEventType::SwipeUp) {
-            if (g_epub.toc_count() <= 0) return true;
-            _focus = std::min(g_epub.toc_count() - 1, _focus + rows);
-            _scroll = std::min(g_epub.toc_count() - 1, _scroll + rows);
-            redraw();
-            return true;
-        }
-        if (event.type == TouchEventType::SwipeDown) {
-            if (g_epub.toc_count() <= 0) return true;
-            _focus = std::max(0, _focus - rows);
-            _scroll = std::max(0, _scroll - rows);
-            redraw();
-            return true;
-        }
-        if (event.type != TouchEventType::Tap) return false;
-        if (event.y < MENU_TOP_H && event.x < 120) {
-            ActivityManager::instance().pop();
-            return true;
-        }
-        if (g_epub.toc_count() <= 0) return true;
-
-        int y0 = MENU_TOP_H + 8;
-        if (event.y < y0) return false;
-        int idx = _scroll + (event.y - y0) / ROW_H;
-        if (idx < 0 || idx >= g_epub.toc_count()) return false;
-        if (idx != _focus) {
-            _focus = idx;
-            redraw();
-            return true;
-        }
-        const EpubTocItem &item = g_epub.toc_item(_focus);
-        if (_reader && _reader->jump_to_spine(item.spine_index)) {
-            ActivityManager::instance().pop();
-        }
-        return true;
-    }
-
-private:
-    static const int MENU_TOP_H = 56;
-    static const int ROW_H = 72;
-    static const int PAD = 18;
-
-    EpubReaderActivity *_reader = nullptr;
-    int _focus = 0;
-    int _scroll = 0;
-
-    int visible_rows() const
-    {
-        int h = M5.Display.height();
-        return std::max(1, (h - MENU_TOP_H - 20) / ROW_H);
-    }
-
-    void clamp_scroll()
-    {
-        int rows = visible_rows();
-        int max_scroll = std::max(0, g_epub.toc_count() - rows);
-        _scroll = std::min(std::max(0, _scroll), max_scroll);
-        if (_focus < _scroll) _scroll = _focus;
-        if (_focus >= _scroll + rows) _scroll = _focus - rows + 1;
-    }
-
-    void draw_header()
-    {
-        int w = M5.Display.width();
-        M5.Display.fillRect(0, 0, w, MENU_TOP_H, TFT_BLACK);
-        M5.Display.setTextColor(TFT_WHITE, TFT_BLACK);
-        system_font::draw_left(M5.Display, "<", 8, 6, TFT_WHITE);
-        system_font::draw_center(M5.Display, "Contents", w / 2, 6, TFT_WHITE);
-    }
-
-    void redraw()
-    {
-        int w = M5.Display.width();
-        int y0 = MENU_TOP_H + 8;
-        int rows = visible_rows();
-        clamp_scroll();
-
-        M5.Display.startWrite();
-        M5.Display.setEpdMode(epd_mode_t::epd_fast);
-        M5.Display.fillScreen(TFT_WHITE);
-        draw_header();
-
-        if (g_epub.toc_count() <= 0) {
-            M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-            system_font::draw_center(M5.Display, "No TOC in this EPUB", w / 2, y0 + 80);
-            M5.Display.display();
-            M5.Display.endWrite();
-            return;
-        }
-
-        for (int i = 0; i < rows; ++i) {
-            int idx = _scroll + i;
-            if (idx >= g_epub.toc_count()) break;
-            const EpubTocItem &item = g_epub.toc_item(idx);
-            int y = y0 + i * ROW_H;
-            bool sel = idx == _focus;
-            M5.Display.fillRoundRect(PAD, y, w - PAD * 2, ROW_H - 6, 6, sel ? TFT_BLACK : TFT_WHITE);
-            M5.Display.drawRoundRect(PAD, y, w - PAD * 2, ROW_H - 6, 6, TFT_BLACK);
-            M5.Display.setTextColor(sel ? TFT_WHITE : TFT_BLACK, sel ? TFT_BLACK : TFT_WHITE);
-
-            int indent = std::min(item.depth, 4) * 20;
-            std::string label = short_title(item.title);
-            uint16_t text_color = sel ? TFT_WHITE : TFT_BLACK;
-            system_font::draw_left(M5.Display, label, PAD + 14 + indent, y + 12, text_color);
-        }
-
-        char cnt[32];
-        snprintf(cnt, sizeof(cnt), "%d/%d", _focus + 1, g_epub.toc_count());
-        M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-        system_font::draw_right(M5.Display, cnt, w - 16, M5.Display.height() - 52);
-
-        M5.Display.display();
-        M5.Display.endWrite();
-    }
-};
-
-static void launch_epub_toc(EpubReaderActivity *reader)
-{
-    ActivityManager::instance().push(new EpubTocActivity(reader));
-}
 
 void launch_epub_reader(const char *path)
 {
