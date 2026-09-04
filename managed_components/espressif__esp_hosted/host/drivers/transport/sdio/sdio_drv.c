@@ -668,7 +668,13 @@ static int is_valid_sdio_rx_packet(uint8_t *rxbuff_a, uint16_t *len_a, uint16_t 
 }
 
 // pushes received packet data on to rx queue
-static esp_err_t sdio_push_pkt_to_queue(uint8_t * rxbuff, uint16_t len, uint16_t offset)
+static void sdio_rx_packet_free(void *buf)
+{
+	g_h.funcs->_h_free(buf);
+}
+
+static esp_err_t sdio_push_pkt_to_queue(uint8_t * rxbuff, uint16_t len, uint16_t offset,
+	void (*free_func)(void *))
 {
 	uint8_t pkt_prio = PRIO_Q_OTHERS;
 	struct esp_payload_header *h= NULL;
@@ -679,7 +685,7 @@ static esp_err_t sdio_push_pkt_to_queue(uint8_t * rxbuff, uint16_t len, uint16_t
 	memset(&buf_handle, 0, sizeof(interface_buffer_handle_t));
 
 	buf_handle.priv_buffer_handle = rxbuff;
-	buf_handle.free_buf_handle    = sdio_buffer_free;
+	buf_handle.free_buf_handle    = free_func;
 	buf_handle.payload_len        = len;
 	buf_handle.if_type            = h->if_type;
 	buf_handle.if_num             = h->if_num;
@@ -742,7 +748,7 @@ static esp_err_t sdio_push_data_to_queue(uint8_t * buf, uint32_t buf_len)
 		return ESP_FAIL;
 	}
 
-	if (sdio_push_pkt_to_queue(buf, len, offset)) {
+	if (sdio_push_pkt_to_queue(buf, len, offset, sdio_buffer_free)) {
 		ESP_LOGE(TAG, "Failed to push Rx packet to queue");
 		return ESP_FAIL;
 	}
@@ -807,19 +813,32 @@ static esp_err_t sdio_push_data_to_queue(uint8_t * buf, uint32_t buf_len)
 			ESP_LOGE(TAG, "Dropping packet(s) from stream");
 			return ESP_FAIL;
 		}
-		/* Allocate rx buffer */
-		pkt_rxbuff = sdio_buffer_alloc(MEMSET_REQUIRED);
-		assert(pkt_rxbuff);
-
 		packet_size = len + offset;
 		if (packet_size > buf_len) {
 			ESP_LOGE(TAG, "packet size too big for remaining stream data");
 			return ESP_FAIL;
 		}
+
+		/* This is only a software queue copy. It is never submitted to the
+		 * SDMMC peripheral, so keeping it in the internal DMA mempool wastes
+		 * the memory needed by the actual SDIO streaming buffers. */
+		pkt_rxbuff = heap_caps_aligned_alloc(64, packet_size,
+			MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+		if (!pkt_rxbuff) {
+			ESP_LOGE(TAG,
+				"stream RX packet alloc failed size=%lu free_psram=%u free_dma=%u largest_dma=%u; dropping stream",
+				(unsigned long)packet_size,
+				(unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+				(unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA),
+				(unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_DMA));
+			return ESP_ERR_NO_MEM;
+		}
 		memcpy(pkt_rxbuff, buf, packet_size);
 
-		if (sdio_push_pkt_to_queue(pkt_rxbuff, len, offset)) {
+		if (sdio_push_pkt_to_queue(pkt_rxbuff, len, offset, sdio_rx_packet_free)) {
 			ESP_LOGI(TAG, "Failed to push a packet to queue from stream");
+			sdio_rx_packet_free(pkt_rxbuff);
+			return ESP_FAIL;
 		}
 
 		// move to the next packet in the stream

@@ -27,6 +27,9 @@ namespace lgfx
     bool displayBusy(void) override;
     void display(uint_fast16_t x, uint_fast16_t y,
                  uint_fast16_t w, uint_fast16_t h) override;
+    bool writeNativeGrayscale4(const uint8_t* logical_frame,
+                               uint16_t logical_width,
+                               uint16_t logical_height) override;
 
     void waveform(const EpdWaveform* value) { _waveform = value; }
     const EpdWaveform* waveform(void) const { return _waveform; }
@@ -60,6 +63,12 @@ namespace lgfx
     uint8_t* _dma_bufs_2d[2] = { nullptr, nullptr };
     uint8_t* _scan_frame_2d = nullptr;
     size_t _scan_frame_bytes_2d = 0;
+    uint8_t* _du4_phase_frames_2d = nullptr;
+    size_t _du4_phase_frame_capacity_2d = 0;
+    uint8_t* _du4_pair_lut_2d = nullptr;
+    uint8_t* _gc16_pair_lut_2d = nullptr;
+    uint16_t* _du4_active_groups_2d = nullptr;
+    size_t _du4_active_group_capacity_2d = 0;
     uint8_t* _physical_buf = nullptr;
     uint8_t* _target_buf = nullptr;
     const EpdWaveform* _waveform = nullptr;

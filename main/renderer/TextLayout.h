@@ -7,7 +7,7 @@
 
 namespace text_layout {
 
-static constexpr uint32_t ALGORITHM_VERSION = 3;
+static constexpr uint32_t ALGORITHM_VERSION = 4;
 
 // The layout engine deliberately knows nothing about EPUB/TXT/RSS or the
 // concrete font backend. Format readers provide normalized UTF-8 paragraphs;

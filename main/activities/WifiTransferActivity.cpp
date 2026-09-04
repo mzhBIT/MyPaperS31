@@ -55,7 +55,7 @@ static const char INDEX_HTML[] =
     "<div class='box'>"
     "<div class='muted'>Choose any supported files. They will be sorted into books, images, fonts, or music automatically.</div>"
     "<label>Files</label><input id='files' type='file' multiple "
-    "accept='.txt,.epub,.bmp,.png,.jpg,.jpeg,.ttf,.otf,.bin," AUDIO_FILE_ACCEPT_EXTENSIONS "'>"
+    "accept='.txt,.epub,.mobi,.prc,.bmp,.png,.jpg,.jpeg,.ttf,.otf,.bin," AUDIO_FILE_ACCEPT_EXTENSIONS "'>"
     "<button onclick='upload()'>Upload</button>"
     "<p><progress id='bar' value='0' max='100'></progress></p>"
     "<pre id='log'>Ready.</pre>"
@@ -308,7 +308,8 @@ static const char *upload_dir_for_name(const std::string &name)
     if (strcasecmp(name.c_str(), "pinyin.bin") == 0) {
         return "/sdcard/system/ime";
     }
-    if (has_ext_ci(name, ".txt") || has_ext_ci(name, ".epub")) {
+    if (has_ext_ci(name, ".txt") || has_ext_ci(name, ".epub") ||
+        has_ext_ci(name, ".mobi") || has_ext_ci(name, ".prc")) {
         return "/sdcard/books";
     }
     if (has_ext_ci(name, ".bmp") || has_ext_ci(name, ".png") ||
@@ -596,6 +597,7 @@ private:
         http_cfg.server_port = 80;
         http_cfg.max_uri_handlers = 8;
         http_cfg.stack_size = 8192;
+        http_cfg.task_caps = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
         http_cfg.recv_wait_timeout = 10;
         esp_err_t err = httpd_start(&_server, &http_cfg);
         if (err != ESP_OK) {

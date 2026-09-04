@@ -8,7 +8,7 @@
 
 namespace document_layout {
 
-static constexpr uint32_t ALGORITHM_VERSION = 3;
+static constexpr uint32_t ALGORITHM_VERSION = 4;
 
 enum class BlockType {
     Paragraph,
@@ -88,6 +88,9 @@ struct Options {
     int heading_following_lines = 2;
     int image_fit_remaining_percent = 50;
     bool allow_image_upscale = false;
+    // Legacy MOBI markup may contain dimensions expressed in old device or
+    // non-pixel units. Ignore a tiny declared box for a large page image.
+    bool ignore_tiny_declared_image_size = false;
     const char *image_fallback_text = "[image]";
 
     LayoutParagraphFn layout_paragraph = nullptr;

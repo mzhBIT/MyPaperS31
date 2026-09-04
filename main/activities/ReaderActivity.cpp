@@ -1,11 +1,13 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "activities/ReaderBackgroundPickerActivity.h"
 #include "activities/ReaderOverlay.h"
 #include "parser/txt_parser.h"
 #include "recent_books.h"
 #include "reader_style.h"
 #include "renderer/TextRenderer.h"
 #include "ui/SystemFont.h"
+#include "ui/reader_background.h"
 #include <M5Unified.h>
 #include <esp_log.h>
 #include <esp_timer.h>
@@ -41,7 +43,18 @@ static epd_mode_t reader_epd_mode() {
 
 // ─── Drawing ───────────────────────────────────────────────────────
 
+static bool reader_header_visible()
+{
+    return reader_style_get().hide_header == 0;
+}
+
+static int reader_header_height()
+{
+    return reader_header_visible() ? TOP_H : 0;
+}
+
 static void draw_page_number(int w) {
+    if (!reader_header_visible()) return;
     // Clear old page number area then draw new one
     M5.Display.fillRect(w - 170, 0, 170, TOP_H, TFT_WHITE);
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
@@ -53,10 +66,27 @@ static void draw_page_number(int w) {
 }
 
 static void draw_topbar(int w) {
+    if (!reader_header_visible()) return;
     M5.Display.fillRect(0, 0, w, TOP_H, TFT_WHITE);
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
     system_font::draw_center(M5.Display, system_font::ellipsize(g_book.title, w - 180), w / 2, 3);
     draw_page_number(w);
+}
+
+static void draw_text_underline(lgfx::LGFXBase &gfx, int x, int y, int width, int line_h)
+{
+    ReaderStyle style = reader_style_get();
+    if (style.underline_type <= 0 || width <= 0) return;
+    int underline_y = y + std::max(1, line_h - 5);
+    if (style.underline_type == 1) {
+        gfx.drawFastHLine(x, underline_y, width, TFT_BLACK);
+    } else {
+        constexpr int dash = 12;
+        constexpr int gap = 8;
+        for (int dx = 0; dx < width; dx += dash + gap) {
+            gfx.drawFastHLine(x + dx, underline_y, std::min(dash, width - dx), TFT_BLACK);
+        }
+    }
 }
 
 static void draw_content(int w, int h) {
@@ -65,7 +95,7 @@ static void draw_content(int w, int h) {
     ReaderStyle style = reader_style_get();
 
     int x = style.margin_left;
-    int y = TOP_H + style.margin_top;
+    int y = reader_header_height() + style.margin_top;
     int max_y = h - style.margin_bottom;
     int line_h = renderer.lineHeight();
     if (line_h <= 0) line_h = 48;
@@ -96,10 +126,16 @@ static void draw_content(int w, int h) {
 
         if (!line.empty()) {
             char_count += line.size();
+            int text_x = x + page_line.x_offset;
+            int underline_w = page_line.justify
+                            ? std::max(1, justify_width - (int)page_line.x_offset)
+                            : renderer.measureUtf8(line);
             renderer.drawUtf8Line(M5.Display, line, x + page_line.x_offset, y, TFT_BLACK,
                                   page_line.justify
                                       ? std::max(1, justify_width - (int)page_line.x_offset)
                                       : 0);
+            draw_text_underline(M5.Display, text_x, y, underline_w,
+                                page_line.height > 0 ? page_line.height : line_h);
         }
         y += page_line.height > 0 ? page_line.height : line_h;
     }
@@ -122,6 +158,7 @@ static void draw_content(int w, int h) {
 class ReaderActivity : public Activity {
     bool m_seen_show = false;
     ReaderOverlay m_overlay;
+    int m_non_quality_refresh_count = 0;
 public:
     ReaderActivity(const char *path) {
         if (g_book.open(path)) recent_book_save(path, "txt", g_book.title.c_str());
@@ -146,14 +183,19 @@ public:
 
     void on_create() override {
         int w = M5.Display.width(), h = M5.Display.height();
+        epd_mode_t mode = select_page_refresh_mode();
+        epd_mode_t default_mode = reader_epd_mode();
         M5.Display.startWrite();
-        M5.Display.setEpdMode(reader_epd_mode());
-        M5.Display.fillScreen(TFT_WHITE);
+        M5.Display.setEpdMode(mode);
+        reader_background_draw(M5.Display, w, h);
 
-        draw_topbar(w);
+        if (reader_header_visible()) draw_topbar(w);
         draw_content(w, h);
         M5.Display.display();
         M5.Display.endWrite();
+        if (mode != default_mode) {
+            M5.Display.setEpdMode(default_mode);
+        }
     }
 
     bool on_touch(const TouchEvent &event) override {
@@ -253,12 +295,23 @@ public:
 
     void redraw(int w, int h) {
         int64_t t0 = esp_timer_get_time();
+        epd_mode_t mode = select_page_refresh_mode();
+        epd_mode_t default_mode = reader_epd_mode();
         M5.Display.startWrite();
-        M5.Display.setEpdMode(reader_epd_mode());
-        // Only clear content area, topbar stays unchanged
-        M5.Display.fillRect(0, TOP_H, w, h - TOP_H, TFT_WHITE);
+        M5.Display.setEpdMode(mode);
+        if (reader_background_enabled()) {
+            reader_background_draw(M5.Display, w, h);
+            if (reader_header_visible()) draw_topbar(w);
+        } else if (mode == epd_mode_t::epd_quality) {
+            M5.Display.fillScreen(TFT_WHITE);
+            if (reader_header_visible()) draw_topbar(w);
+        } else {
+            // Only clear content area, topbar stays unchanged
+            int clear_y = reader_header_height();
+            M5.Display.fillRect(0, clear_y, w, h - clear_y, TFT_WHITE);
+        }
         int64_t t1 = esp_timer_get_time();
-        draw_page_number(w);
+        if (mode != epd_mode_t::epd_quality) draw_page_number(w);
         int64_t t2 = esp_timer_get_time();
         draw_content(w, h);
         if (m_overlay.visible()) m_overlay.draw();
@@ -266,17 +319,21 @@ public:
         M5.Display.display();
         int64_t t4 = esp_timer_get_time();
         M5.Display.endWrite();
-        ESP_LOGI(TAG, "redraw: clear=%lld pagenum=%lld content=%lld display=%lld total=%lld ms",
-                 (t1-t0)/1000, (t2-t1)/1000, (t3-t2)/1000, (t4-t3)/1000, (t4-t0)/1000);
+        if (mode != default_mode) {
+            M5.Display.setEpdMode(default_mode);
+        }
+        ESP_LOGI(TAG, "redraw: mode=%d clear=%lld pagenum=%lld content=%lld display=%lld total=%lld ms",
+                 (int)mode, (t1-t0)/1000, (t2-t1)/1000, (t3-t2)/1000, (t4-t3)/1000, (t4-t0)/1000);
         vTaskDelay(1);
     }
 
     void redraw_all(int w, int h, epd_mode_t mode = reader_epd_mode()) {
         int64_t t0 = esp_timer_get_time();
+        note_page_refresh_mode(mode);
         M5.Display.startWrite();
         M5.Display.setEpdMode(mode);
-        M5.Display.fillScreen(TFT_WHITE);
-        draw_topbar(w);
+        reader_background_draw(M5.Display, w, h);
+        if (reader_header_visible()) draw_topbar(w);
         draw_content(w, h);
         if (m_overlay.visible()) m_overlay.draw();
         M5.Display.display();
@@ -285,16 +342,51 @@ public:
         if (mode != default_mode) {
             M5.Display.setEpdMode(default_mode);
         }
-        ESP_LOGI(TAG, "redraw_all: total=%lld ms", (esp_timer_get_time() - t0) / 1000);
+        ESP_LOGI(TAG, "redraw_all: mode=%d total=%lld ms", (int)mode, (esp_timer_get_time() - t0) / 1000);
         vTaskDelay(1);
     }
 
 private:
+    epd_mode_t select_page_refresh_mode()
+    {
+        ReaderStyle style = reader_style_get();
+        epd_mode_t preferred = reader_epd_mode();
+        if (preferred == epd_mode_t::epd_quality) {
+            m_non_quality_refresh_count = 0;
+            return preferred;
+        }
+
+        int limit = std::min(60, std::max(1, style.full_refresh_pages));
+        if (m_non_quality_refresh_count + 1 >= limit) {
+            ESP_LOGI(TAG,
+                     "force quality refresh: interval=%d preferred=%s offset=%lu",
+                     limit,
+                     reader_style_refresh_mode_name(style.refresh_mode),
+                     (unsigned long)g_page.start_offset);
+            m_non_quality_refresh_count = 0;
+            return epd_mode_t::epd_quality;
+        }
+
+        ++m_non_quality_refresh_count;
+        return preferred;
+    }
+
+    void note_page_refresh_mode(epd_mode_t mode)
+    {
+        if (mode == epd_mode_t::epd_quality) {
+            m_non_quality_refresh_count = 0;
+        }
+    }
+
     void handle_overlay_action(ReaderOverlay::Action action, int w, int h)
     {
         if (action == ReaderOverlay::Action::None) return;
         if (action == ReaderOverlay::Action::OpenFont) {
             launch_reader_font_picker();
+            return;
+        }
+        if (action == ReaderOverlay::Action::OpenBackground) {
+            launch_reader_background_picker();
             return;
         }
 

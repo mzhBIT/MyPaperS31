@@ -20,9 +20,13 @@ CONFIG_SPIRAM_PRE_CONFIGURE_MEMORY_PROTECTION=y
 # CONFIG_SPIRAM_USE_MEMMAP is not set
 # CONFIG_SPIRAM_USE_CAPS_ALLOC is not set
 CONFIG_SPIRAM_USE_MALLOC=y
-CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
-CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+# Keep only very small generic allocations in internal RAM. Network packet
+# payloads and TLS bookkeeping above 1 KiB can safely live in PSRAM.
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=1024
+# Preserve a larger internal-only pool for SDMMC/GDMA descriptors and buffers.
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=65536
 CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
 CONFIG_SPIRAM_MEMTEST=y
 # Keep TLS session buffers and certificate working data out of scarce internal
 # DMA memory. ESP32-P4 PSRAM is DMA-capable, so hardware AES remains enabled.

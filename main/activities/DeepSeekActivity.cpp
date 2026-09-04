@@ -10,7 +10,9 @@
 #include "ui/SystemFont.h"
 
 #include <M5Unified.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_task.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
@@ -91,18 +93,24 @@ struct ChatTaskJob {
     std::vector<DeepSeekMessage> messages;
     QueueHandle_t result_queue = nullptr;
     const volatile bool *cancel_requested = nullptr;
+    bool external_stack = false;
 };
 
 void chat_task(void *argument)
 {
     std::unique_ptr<ChatTaskJob> job(static_cast<ChatTaskJob *>(argument));
+    const bool external_stack = job->external_stack;
     auto *result = new DeepSeekClientResult(
         DeepSeekClient::chat(job->config, job->model, job->thinking, job->messages,
                              job->cancel_requested));
     if (xQueueSend(job->result_queue, &result, pdMS_TO_TICKS(100)) != pdTRUE) {
         delete result;
     }
-    vTaskDelete(nullptr);
+    if (external_stack) {
+        vTaskDeleteWithCaps(nullptr);
+    } else {
+        vTaskDelete(nullptr);
+    }
 }
 
 class DeepSeekActivity final : public Activity {
@@ -517,7 +525,15 @@ private:
         job->messages = _messages;
         job->result_queue = _result_queue;
         job->cancel_requested = &_cancel_requested;
-        BaseType_t created = xTaskCreate(chat_task, "deepseek_api", 12288, job, 4, &_task);
+        job->external_stack = true;
+        BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
+            chat_task, "deepseek_api", 12288, job, 4, &_task,
+            tskNO_AFFINITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (created != pdPASS) {
+            ESP_LOGW(TAG, "PSRAM network task stack allocation failed; trying internal RAM");
+            job->external_stack = false;
+            created = xTaskCreate(chat_task, "deepseek_api", 12288, job, 4, &_task);
+        }
         if (created != pdPASS) {
             delete job;
             _busy = false;

@@ -1,5 +1,6 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "activities/ReaderBackgroundPickerActivity.h"
 #include "activities/ReaderOverlay.h"
 #include "activities/SettingActivity.h"
 #include "reader_font.h"
@@ -8,6 +9,7 @@
 #include "renderer/TextRenderer.h"
 #include "storage/app_paths.h"
 #include "ui/SystemFont.h"
+#include "ui/reader_background.h"
 #include "wifi/wifi_setting.h"
 
 #include <M5Unified.h>
@@ -18,8 +20,10 @@
 #include <esp_http_client.h>
 #include <esp_log.h>
 #include <esp_netif.h>
+#include <esp_task.h>
 #include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 #include <freertos/task.h>
 #include <nvs_flash.h>
 #include <sdkconfig.h>
@@ -27,8 +31,10 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <sys/stat.h>
 #include <vector>
@@ -47,6 +53,8 @@ static const char *RSS_IMAGE_SAVE_DIR = "/sdcard/images";
 struct RssImageRef {
     std::string url;
     std::string before_text;
+    int width = 0;
+    int height = 0;
 };
 
 struct RssFeed {
@@ -637,16 +645,33 @@ static std::string extract_image_url(const std::string &item_xml,
     return std::string();
 }
 
-static void add_image_ref(std::vector<RssImageRef> *refs, const std::string &url, const std::string &before_text)
+static int positive_dimension(const std::string &value)
+{
+    if (value.empty()) return 0;
+    char *end = nullptr;
+    long parsed = std::strtol(value.c_str(), &end, 10);
+    if (end == value.c_str() || parsed <= 0 || parsed > 32767) return 0;
+    return (int)parsed;
+}
+
+static void add_image_ref(std::vector<RssImageRef> *refs,
+                          const std::string &url,
+                          const std::string &before_text,
+                          int width = 0,
+                          int height = 0)
 {
     if (!refs) return;
     std::string u = normalize_image_url(url);
     if (u.empty() || image_ext_from_url(u).empty()) return;
-    for (const auto &ref : *refs) {
-        if (ref.url == u) return;
+    for (auto &ref : *refs) {
+        if (ref.url != u) continue;
+        if (ref.before_text.empty() && !before_text.empty()) ref.before_text = before_text;
+        if (ref.width <= 0 && width > 0) ref.width = width;
+        if (ref.height <= 0 && height > 0) ref.height = height;
+        return;
     }
     if ((int)refs->size() >= MAX_RSS_IMAGES_PER_ITEM) return;
-    refs->push_back({u, before_text});
+    refs->push_back({u, before_text, width, height});
 }
 
 static size_t first_img_tag_pos(const std::string &html)
@@ -675,8 +700,13 @@ static std::vector<RssImageRef> extract_image_refs(const std::string &item_xml, 
         if (!tag_name_match(body_html, lt, "img")) continue;
         size_t gt = body_html.find('>', lt);
         if (gt == std::string::npos) break;
-        std::string src = attr_value(body_html.substr(lt, gt - lt + 1), "src");
-        add_image_ref(&refs, src, strip_html(body_html.substr(0, lt)));
+        std::string tag = body_html.substr(lt, gt - lt + 1);
+        std::string src = attr_value(tag, "src");
+        int width = positive_dimension(attr_value(tag, "width"));
+        if (width <= 0) width = positive_dimension(attr_value(tag, "w"));
+        int height = positive_dimension(attr_value(tag, "height"));
+        if (height <= 0) height = positive_dimension(attr_value(tag, "h"));
+        add_image_ref(&refs, src, strip_html(body_html.substr(0, lt)), width, height);
     }
     return refs;
 }
@@ -892,7 +922,7 @@ static bool parse_bing_wallpaper_items(const std::string &json, std::vector<RssI
             item.text = copyright.empty() ? item.title : copyright;
             item.link = json_string_value_utf8(obj, "copyrightlink");
             item.image_url = full_url;
-            item.images.push_back({full_url, ""});
+            item.images.push_back({full_url, "", 1280, 720});
             items->push_back(item);
         }
         pos = json.find('{', end + 1);
@@ -937,12 +967,18 @@ class RssReaderActivity : public Activity {
 public:
     ~RssReaderActivity() override
     {
+        stop_article_image_loader();
+        if (_image_result_queue) {
+            vQueueDelete(_image_result_queue);
+            _image_result_queue = nullptr;
+        }
         stop_wifi();
     }
 
     void on_create() override
     {
         _reader_overlay.set_chapters_enabled(false);
+        _image_result_queue = xQueueCreate(1, sizeof(ArticleImageLoadResult *));
         load_feeds();
         draw_status("RSS", "Loading WiFi...");
         _wifi_ok = connect_wifi();
@@ -966,6 +1002,11 @@ public:
         }
     }
 
+    void loop() override
+    {
+        poll_article_image_loader();
+    }
+
     bool on_key(int key) override
     {
         if (_view == View::Article) return article_key(key);
@@ -975,6 +1016,11 @@ public:
                 g_focus = _feed_focus;
                 g_scroll = _feed_scroll;
                 redraw_list();
+                return true;
+            }
+            if (_image_load_busy) {
+                _cancel_image_load = true;
+                _exit_when_image_load_done = true;
                 return true;
             }
             ActivityManager::instance().pop();
@@ -1084,6 +1130,19 @@ public:
 private:
     enum class View { Feeds, Items, Article };
 
+    struct ArticleImageLoadResult {
+        uint32_t generation = 0;
+        std::vector<ArticleImage> images;
+    };
+
+    struct ArticleImageLoadJob {
+        uint32_t generation = 0;
+        std::vector<RssImageRef> refs;
+        QueueHandle_t result_queue = nullptr;
+        const volatile bool *cancel_requested = nullptr;
+        bool external_stack = false;
+    };
+
     View _view = View::Feeds;
     bool _seen_show = false;
     bool _wifi_ok = false;
@@ -1092,6 +1151,16 @@ private:
     int _wallpaper_save_choice = 0;
     int _feed_focus = 0;
     int _feed_scroll = 0;
+    int _non_quality_refresh_count = 0;
+    bool _post_image_quality_pending = false;
+    QueueHandle_t _image_result_queue = nullptr;
+    TaskHandle_t _image_load_task = nullptr;
+    bool _image_load_busy = false;
+    volatile bool _cancel_image_load = false;
+    bool _exit_when_image_load_done = false;
+    uint32_t _article_generation = 0;
+    uint32_t _image_load_generation = 0;
+    std::vector<RssImageRef> _pending_image_refs;
     ReaderOverlay _reader_overlay;
 
     void handle_reader_overlay_action(ReaderOverlay::Action action)
@@ -1101,14 +1170,30 @@ private:
             launch_reader_font_picker();
             return;
         }
+        if (action == ReaderOverlay::Action::OpenBackground) {
+            launch_reader_background_picker();
+            return;
+        }
 
         bool apply_layout = _reader_overlay.settings_dirty();
         _reader_overlay.close();
         if (apply_layout) {
+            if (g_focus >= 0 && g_focus < (int)g_items.size()) {
+                if (reader_style_get().show_images && g_article_images.empty()) {
+                    prepare_article_image_placeholders(g_items[g_focus]);
+                } else if (!reader_style_get().show_images) {
+                    clear_article_images();
+                    _pending_image_refs.clear();
+                }
+            }
             rebuild_article_lines(false);
             _reader_overlay.clear_settings_dirty();
         }
         draw_article();
+        if (apply_layout && !_pending_image_refs.empty()) {
+            M5.Display.waitDisplay();
+            start_article_image_loader();
+        }
     }
 
     bool connect_wifi()
@@ -1244,8 +1329,11 @@ private:
         return false;
     }
 
-    bool download_url_to_file_once(const std::string &url, const std::string &path)
+    static bool download_url_to_file_once(const std::string &url,
+                                          const std::string &path,
+                                          const volatile bool *cancel_requested)
     {
+        if (cancel_requested && *cancel_requested) return false;
         esp_http_client_config_t cfg = {};
         cfg.url = url.c_str();
         cfg.timeout_ms = 15000;
@@ -1297,6 +1385,10 @@ private:
         int total = 0;
         bool ok = true;
         while (total < MAX_IMAGE_BYTES) {
+            if (cancel_requested && *cancel_requested) {
+                ok = false;
+                break;
+            }
             if (esp_http_client_is_complete_data_received(client)) break;
             int want = 4096;
             if (!chunked && content_length >= 0) {
@@ -1330,33 +1422,42 @@ private:
         return true;
     }
 
-    bool download_url_to_file(const std::string &url, const std::string &path)
+    static bool download_url_to_file(const std::string &url,
+                                     const std::string &path,
+                                     const volatile bool *cancel_requested)
     {
+        if (cancel_requested && *cancel_requested) return false;
         const bool https = url.rfind("https://", 0) == 0;
         if (https) log_tls_heap("image-before");
-        const bool downloaded = download_url_to_file_once(url, path);
+        const bool downloaded = download_url_to_file_once(url, path, cancel_requested);
         if (https) log_tls_heap(downloaded ? "image-ok" : "image-failed");
         if (downloaded) return true;
+        if (cancel_requested && *cancel_requested) return false;
         if (url.rfind("https://", 0) == 0) {
             std::string http_url = "http://" + url.substr(8);
             ESP_LOGW(TAG, "retry image without TLS: %s", http_url.c_str());
-            return download_url_to_file_once(http_url, path);
+            return download_url_to_file_once(http_url, path, cancel_requested);
         }
         return false;
     }
 
-    bool load_single_article_image(const RssImageRef &ref, ArticleImage *image)
+    static bool load_single_article_image(const RssImageRef &ref,
+                                          ArticleImage *image,
+                                          const volatile bool *cancel_requested = nullptr)
     {
         if (!image) return false;
         if (ref.url.empty()) return false;
+        if (cancel_requested && *cancel_requested) return false;
         std::string ext = image_ext_from_url(ref.url);
         if (ext.empty()) return false;
         app_paths::ensure_dir(app_paths::rss_image_cache_dir());
         std::string path = cache_path_for_image_url(ref.url, ext);
-        if (!file_exists(path) && !download_url_to_file(ref.url, path)) {
+        if (!file_exists(path) &&
+            !download_url_to_file(ref.url, path, cancel_requested)) {
             ESP_LOGW(TAG, "image download failed url=%s", ref.url.c_str());
             return false;
         }
+        if (cancel_requested && *cancel_requested) return false;
         ArticleImage out;
         out.url = ref.url;
         out.before_text = ref.before_text;
@@ -1371,20 +1472,179 @@ private:
         return true;
     }
 
-    bool load_article_images(const RssItem &item)
+    std::vector<RssImageRef> article_image_refs(const RssItem &item) const
     {
-        g_article_images.clear();
         std::vector<RssImageRef> refs = item.images;
         if (refs.empty() && !item.image_url.empty()) {
-            refs.push_back({item.image_url, item.image_before_text});
+            refs.push_back({item.image_url, item.image_before_text, 0, 0});
         }
+        return refs;
+    }
+
+    void prepare_article_image_placeholders(const RssItem &item)
+    {
+        g_article_images.clear();
+        _pending_image_refs.clear();
+        std::vector<RssImageRef> refs = article_image_refs(item);
         for (const auto &ref : refs) {
             ArticleImage image;
-            if (load_single_article_image(ref, &image)) {
-                g_article_images.push_back(image);
+            image.url = ref.url;
+            image.before_text = ref.before_text;
+            image.ext = image_ext_from_url(ref.url);
+            image.width = ref.width;
+            image.height = ref.height;
+            image.path = cache_path_for_image_url(ref.url, image.ext);
+            bool cached = file_exists(image.path);
+            bool cache_valid = cached &&
+                               probe_image_size(image.path, image.ext,
+                                                &image.width, &image.height,
+                                                &image.progressive);
+            if (!cache_valid) {
+                if (cached) remove(image.path.c_str());
+                image.path.clear();
+                image.width = ref.width;
+                image.height = ref.height;
+                _pending_image_refs.push_back(ref);
+            }
+            g_article_images.push_back(std::move(image));
+        }
+    }
+
+    static void article_image_load_task(void *argument)
+    {
+        std::unique_ptr<ArticleImageLoadJob> job(
+            static_cast<ArticleImageLoadJob *>(argument));
+        const bool external_stack = job->external_stack;
+        auto *result = new ArticleImageLoadResult;
+        result->generation = job->generation;
+        result->images.reserve(job->refs.size());
+        for (const auto &ref : job->refs) {
+            if (job->cancel_requested && *job->cancel_requested) break;
+            ArticleImage image;
+            if (load_single_article_image(ref, &image, job->cancel_requested)) {
+                result->images.push_back(std::move(image));
             }
         }
-        return !g_article_images.empty();
+        if (xQueueSend(job->result_queue, &result, pdMS_TO_TICKS(100)) != pdTRUE) {
+            delete result;
+        }
+        if (external_stack) vTaskDeleteWithCaps(nullptr);
+        else vTaskDelete(nullptr);
+    }
+
+    void start_article_image_loader()
+    {
+        if (_image_load_busy || _pending_image_refs.empty() || !_image_result_queue) return;
+
+        auto *job = new ArticleImageLoadJob;
+        job->generation = _article_generation;
+        job->refs = _pending_image_refs;
+        job->result_queue = _image_result_queue;
+        job->cancel_requested = &_cancel_image_load;
+        job->external_stack = true;
+        _cancel_image_load = false;
+        _image_load_generation = job->generation;
+
+        BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
+            article_image_load_task, "rss_images", 8192, job, 3,
+            &_image_load_task, tskNO_AFFINITY,
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (created != pdPASS) {
+            ESP_LOGW(TAG, "PSRAM image task stack allocation failed; trying internal RAM");
+            job->external_stack = false;
+            created = xTaskCreate(article_image_load_task, "rss_images", 8192,
+                                  job, 3, &_image_load_task);
+        }
+        if (created != pdPASS) {
+            ESP_LOGE(TAG, "image task creation failed pending=%u",
+                     (unsigned)_pending_image_refs.size());
+            delete job;
+            _image_load_task = nullptr;
+            return;
+        }
+        _image_load_busy = true;
+        ESP_LOGI(TAG, "image task started generation=%lu pending=%u",
+                 (unsigned long)_image_load_generation,
+                 (unsigned)_pending_image_refs.size());
+    }
+
+    bool current_page_references_image(const std::string &url) const
+    {
+        if (g_page < 0 || g_page >= (int)g_article_pages.size()) return false;
+        for (const auto &item : g_article_pages[(size_t)g_page]) {
+            if (item.type == document_layout::PageItemType::Image &&
+                item.resource == url) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    void poll_article_image_loader()
+    {
+        if (!_image_load_busy || !_image_result_queue) return;
+        ArticleImageLoadResult *raw = nullptr;
+        if (xQueueReceive(_image_result_queue, &raw, 0) != pdTRUE) return;
+
+        std::unique_ptr<ArticleImageLoadResult> result(raw);
+        _image_load_busy = false;
+        _image_load_task = nullptr;
+        _cancel_image_load = false;
+
+        if (_exit_when_image_load_done) {
+            _exit_when_image_load_done = false;
+            ActivityManager::instance().pop();
+            return;
+        }
+
+        if (result && result->generation == _article_generation) {
+            bool current_page_changed = false;
+            bool layout_changed = false;
+            for (const auto &loaded : result->images) {
+                current_page_changed = current_page_changed ||
+                                       current_page_references_image(loaded.url);
+                for (auto &candidate : g_article_images) {
+                    if (candidate.url != loaded.url) continue;
+                    layout_changed = layout_changed ||
+                                     candidate.width != loaded.width ||
+                                     candidate.height != loaded.height;
+                    candidate = loaded;
+                    break;
+                }
+            }
+            _pending_image_refs.clear();
+            if (layout_changed) rebuild_article_lines(false);
+            ESP_LOGI(TAG,
+                     "image task complete generation=%lu loaded=%u layout_changed=%d current_page=%d",
+                     (unsigned long)result->generation,
+                     (unsigned)result->images.size(),
+                     layout_changed ? 1 : 0,
+                     current_page_changed ? 1 : 0);
+            if (_view == View::Article &&
+                (current_page_changed || layout_changed || bing_wallpaper_mode())) {
+                draw_article();
+            }
+        } else if (result) {
+            ESP_LOGI(TAG, "discard stale image result generation=%lu current=%lu",
+                     (unsigned long)result->generation,
+                     (unsigned long)_article_generation);
+        }
+
+        // A fast Bing/article switch may have replaced the pending generation
+        // while the previous task was finishing.
+        start_article_image_loader();
+    }
+
+    void stop_article_image_loader()
+    {
+        if (!_image_load_busy || !_image_result_queue) return;
+        _cancel_image_load = true;
+        ArticleImageLoadResult *raw = nullptr;
+        if (xQueueReceive(_image_result_queue, &raw, portMAX_DELAY) == pdTRUE) {
+            delete raw;
+        }
+        _image_load_busy = false;
+        _image_load_task = nullptr;
     }
 
     void draw_status(const char *title, const char *msg)
@@ -1406,6 +1666,16 @@ private:
         system_font::draw_left(M5.Display, "<", 12, 3, TFT_BLACK);
         system_font::draw_center(M5.Display, title, M5.Display.width() / 2, 3, TFT_BLACK);
         M5.Display.drawFastHLine(0, TOP_H - 1, M5.Display.width(), TFT_BLACK);
+    }
+
+    bool article_header_visible() const
+    {
+        return reader_style_get().hide_header == 0;
+    }
+
+    int article_header_height() const
+    {
+        return article_header_visible() ? TOP_H : 0;
     }
 
     int item_count() const
@@ -1596,8 +1866,9 @@ private:
                 M5.Display.fillRect(0, y, w, rh, TFT_WHITE);
                 continue;
             }
-            M5.Display.fillRoundRect(PAD, y, w - PAD * 2, rh - 3, 6, TFT_WHITE);
-            M5.Display.drawRoundRect(PAD, y, w - PAD * 2, rh - 3, 6, TFT_BLACK);
+            // Keep the full row as the touch target, but use a light-weight
+            // horizontal divider instead of boxing every feed/news title.
+            M5.Display.drawFastHLine(PAD, y + rh - 2, w - PAD * 2, TFT_BLACK);
             M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
             std::string label = row_label(idx);
             std::string date;
@@ -1668,15 +1939,21 @@ private:
     void open_item()
     {
         if (g_focus < 0 || g_focus >= (int)g_items.size()) return;
-        draw_status("RSS", "Loading article...");
+        if (_image_load_busy) _cancel_image_load = true;
+        ++_article_generation;
         if (reader_style_get().show_images) {
-            load_article_images(g_items[g_focus]);
+            prepare_article_image_placeholders(g_items[g_focus]);
         } else {
             clear_article_images();
+            _pending_image_refs.clear();
         }
         rebuild_article_lines(true);
         _view = View::Article;
         draw_article();
+        // Avoid overlapping TLS/SD traffic with the EPD power-on and scan.
+        // The text page is already queued and visible before downloads begin.
+        M5.Display.waitDisplay();
+        start_article_image_loader();
     }
 
     void clear_article_images()
@@ -1688,10 +1965,9 @@ private:
     {
         if (g_focus < 0 || g_focus >= (int)g_items.size()) return;
         const RssItem &item = g_items[g_focus];
-        if (reader_style_get().show_images) {
-            if (g_article_images.empty()) load_article_images(item);
-        } else {
+        if (!reader_style_get().show_images) {
             clear_article_images();
+            _pending_image_refs.clear();
         }
         ReaderTextStyle ts;
         ts.font_path = reader_font_path();
@@ -1705,26 +1981,26 @@ private:
                                      int final_gap, bool allow_indent) {
             const size_t first_block = blocks.size();
             size_t start = 0;
-            bool pending_gap = false;
             while (start <= text.size()) {
                 size_t end = text.find('\n', start);
                 if (end == std::string::npos) end = text.size();
                 std::string paragraph = trim_copy(text.substr(start, end - start));
-                if (paragraph.empty()) {
-                    if (!blocks.empty()) pending_gap = true;
-                } else {
+                if (!paragraph.empty()) {
                     document_layout::Block block;
                     block.type = document_layout::BlockType::Paragraph;
                     block.text = std::move(paragraph);
                     block.content_position = content_position + start;
-                    block.blank_before = pending_gap ? 1 : 0;
+                    // strip_html() emits a blank separator between adjacent
+                    // HTML <p> elements.  It marks a paragraph boundary, not
+                    // an extra visual line; spacing is controlled exclusively
+                    // by ReaderStyle::paragraph_spacing below.
+                    block.blank_before = 0;
                     block.blank_after = 0;
                     block.heading = heading;
                     block.heading_level = heading ? 1 : 0;
                     block.allow_first_line_indent = !heading && allow_indent;
                     block.paragraph_spacing_after = !heading && allow_indent;
                     blocks.push_back(std::move(block));
-                    pending_gap = false;
                 }
                 if (end == text.size()) break;
                 start = end + 1;
@@ -1782,7 +2058,10 @@ private:
             }
             document_layout::Block image_block;
             image_block.type = document_layout::BlockType::Image;
-            image_block.resource = positioned.image->path;
+            // The URL is stable before and after an asynchronous download;
+            // using it keeps placeholder pagination and completed images tied
+            // to the same content block.
+            image_block.resource = positioned.image->url;
             image_block.content_position = body_position + image_position;
             image_block.image_height = std::min(320, std::max(120, (int)M5.Display.height() / 3));
             image_block.blank_after = 0;
@@ -1801,7 +2080,7 @@ private:
         const int footer_height = 50;
         options.content_height = std::max(
             line_height,
-            (int)M5.Display.height() - TOP_H - rs.margin_top -
+            (int)M5.Display.height() - article_header_height() - rs.margin_top -
                 std::max(rs.margin_bottom, footer_height));
         options.line_height = line_height;
         int fullwidth_advance = reader_text_renderer().measureFullwidthCellForLayout();
@@ -1815,7 +2094,7 @@ private:
                                    document_layout::ImageInfo *info) {
             if (!info) return false;
             for (const auto &image : g_article_images) {
-                if (image.path == resource && image.width > 0 && image.height > 0) {
+                if (image.url == resource && image.width > 0 && image.height > 0) {
                     info->width = image.width;
                     info->height = image.height;
                     return true;
@@ -2036,18 +2315,101 @@ private:
         return std::max(1, (int)g_article_pages.size());
     }
 
+    bool current_article_page_has_visible_image() const
+    {
+        if (!reader_style_get().show_images) return false;
+        if (g_page < 0 || g_page >= (int)g_article_pages.size()) return false;
+        const auto &page = g_article_pages[(size_t)g_page];
+        for (const auto &item : page) {
+            if (item.type != document_layout::PageItemType::Image) continue;
+            for (const auto &image : g_article_images) {
+                if (image.url == item.resource && !image.path.empty()) return true;
+            }
+        }
+        return false;
+    }
+
+    epd_mode_t select_article_refresh_mode()
+    {
+        ReaderStyle style = reader_style_get();
+        epd_mode_t preferred = reader_epd_mode();
+        if (preferred == epd_mode_t::epd_quality) {
+            _non_quality_refresh_count = 0;
+            _post_image_quality_pending = false;
+            return preferred;
+        }
+
+        bool image_page = current_article_page_has_visible_image();
+        if (image_page) {
+            ESP_LOGI(TAG,
+                     "force quality refresh: RSS image page=%d/%d reset_count=%d",
+                     g_page + 1,
+                     article_page_count(),
+                     _non_quality_refresh_count);
+            _non_quality_refresh_count = 0;
+            _post_image_quality_pending = true;
+            return epd_mode_t::epd_quality;
+        }
+
+        if (_post_image_quality_pending) {
+            ESP_LOGI(TAG,
+                     "force quality refresh: RSS post-image cleanup page=%d/%d",
+                     g_page + 1,
+                     article_page_count());
+            _non_quality_refresh_count = 0;
+            _post_image_quality_pending = false;
+            return epd_mode_t::epd_quality;
+        }
+
+        int limit = std::min(60, std::max(1, style.full_refresh_pages));
+        if (_non_quality_refresh_count + 1 >= limit) {
+            ESP_LOGI(TAG,
+                     "force quality refresh: RSS interval=%d preferred=%s page=%d/%d",
+                     limit,
+                     reader_style_refresh_mode_name(style.refresh_mode),
+                     g_page + 1,
+                     article_page_count());
+            _non_quality_refresh_count = 0;
+            return epd_mode_t::epd_quality;
+        }
+
+        ++_non_quality_refresh_count;
+        return preferred;
+    }
+
     void draw_article()
     {
-        if (draw_bing_wallpaper()) return;
+        if (draw_bing_wallpaper()) {
+            _non_quality_refresh_count = 0;
+            _post_image_quality_pending = false;
+            return;
+        }
+        epd_mode_t mode = select_article_refresh_mode();
+        epd_mode_t default_mode = reader_epd_mode();
         M5.Display.startWrite();
-        M5.Display.setEpdMode(reader_epd_mode());
-        M5.Display.fillScreen(TFT_WHITE);
-        draw_topbar("RSS");
+        M5.Display.setEpdMode(mode);
+        reader_background_draw(M5.Display, M5.Display.width(), M5.Display.height());
+        if (article_header_visible()) draw_topbar("RSS");
         ReaderStyle rs = reader_style_get();
         int lh = reader_text_renderer().lineHeight();
         if (lh <= 0) lh = 48;
-        int y = TOP_H + rs.margin_top;
+        int y = article_header_height() + rs.margin_top;
         const int content_width = std::max(100, (int)M5.Display.width() - rs.margin_left - rs.margin_right);
+        auto draw_underline = [&](int ux, int uy, int uw) {
+            ReaderStyle style = reader_style_get();
+            if (style.underline_type <= 0 || uw <= 0) return;
+            int underline_y = uy + std::max(1, lh - 5);
+            if (style.underline_type == 1) {
+                M5.Display.drawFastHLine(ux, underline_y, uw, TFT_BLACK);
+            } else {
+                constexpr int dash = 12;
+                constexpr int gap = 8;
+                for (int dx = 0; dx < uw; dx += dash + gap) {
+                    M5.Display.drawFastHLine(ux + dx, underline_y,
+                                             std::min(dash, uw - dx), TFT_BLACK);
+                }
+            }
+        };
         const document_layout::Page *page = nullptr;
         if (g_page >= 0 && g_page < (int)g_article_pages.size()) {
             page = &g_article_pages[(size_t)g_page];
@@ -2075,9 +2437,13 @@ private:
                             int text_width = reader_text_renderer().measureUtf8(layout_item.text);
                             text_x = rs.margin_left + std::max(0, (content_width - text_width) / 2);
                         }
+                        int underline_w = layout_item.justify
+                                        ? layout_item.width
+                                        : reader_text_renderer().measureUtf8(layout_item.text);
                         reader_text_renderer().drawUtf8Line(
                             M5.Display, layout_item.text, text_x, y, TFT_BLACK,
                             layout_item.justify ? layout_item.width : 0);
+                        draw_underline(text_x, y, underline_w);
                     }
                     y += lh;
                 } else if (layout_item.type == document_layout::PageItemType::Space) {
@@ -2091,12 +2457,12 @@ private:
                 } else if (layout_item.type == document_layout::PageItemType::Image) {
                     const ArticleImage *image = nullptr;
                     for (const auto &candidate : g_article_images) {
-                        if (candidate.path == layout_item.resource) {
+                        if (candidate.url == layout_item.resource) {
                             image = &candidate;
                             break;
                         }
                     }
-                    if (!image) {
+                    if (!image || image->path.empty()) {
                         y += layout_item.height;
                         continue;
                     }
@@ -2138,6 +2504,7 @@ private:
         if (_reader_overlay.visible()) _reader_overlay.draw();
         M5.Display.display();
         M5.Display.endWrite();
+        if (mode != default_mode) M5.Display.setEpdMode(default_mode);
     }
 
     void next_article_page()

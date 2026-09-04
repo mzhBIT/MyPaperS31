@@ -1,5 +1,6 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "renderer/TurboJpegDecoder.h"
 #include "ui/SystemFont.h"
 
 #include <M5Unified.h>
@@ -269,7 +270,7 @@ private:
         int h = M5.Display.height();
 
         M5.Display.startWrite();
-        M5.Display.setEpdMode(epd_mode_t::epd_text);
+        M5.Display.setEpdMode(epd_mode_t::epd_quality);
         M5.Display.fillScreen(TFT_WHITE);
 
         int iw = 0;
@@ -278,9 +279,6 @@ private:
         if (!probe_image(_path, _ext, &iw, &ih, &progressive)) {
             draw_topbar();
             draw_message("Unsupported image");
-        } else if (_ext == ".jpg" && progressive) {
-            draw_topbar();
-            draw_message("Progressive JPEG unsupported");
         } else {
             bool exact_screen = iw == w && ih == h;
             bool full_screen = exact_screen || matches_screen_aspect(iw, ih, w, h);
@@ -296,12 +294,26 @@ private:
 
             int64_t td = esp_timer_get_time();
             bool ok = false;
-            if (_ext == ".jpg") ok = M5.Display.drawJpgFile(_path.c_str(), x, y, draw_w, draw_h, 0, 0, scale, scale);
+            turbo_jpeg::DrawStats software_stats;
+            const char *decoder = "file";
+            if (_ext == ".jpg" && progressive) {
+                decoder = "turbo-progressive";
+                ok = turbo_jpeg::draw_file(M5.Display, _path.c_str(), x, y,
+                                           draw_w, draw_h, &software_stats);
+            } else if (_ext == ".jpg") {
+                ok = M5.Display.drawJpgFile(_path.c_str(), x, y, draw_w, draw_h,
+                                             0, 0, scale, scale);
+                if (!ok) {
+                    decoder = "turbo-fallback";
+                    ok = turbo_jpeg::draw_file(M5.Display, _path.c_str(), x, y,
+                                               draw_w, draw_h, &software_stats);
+                }
+            }
             else if (_ext == ".png") ok = M5.Display.drawPngFile(_path.c_str(), x, y, draw_w, draw_h, 0, 0, scale, scale);
             else if (_ext == ".bmp") ok = M5.Display.drawBmpFile(_path.c_str(), x, y, draw_w, draw_h, 0, 0, scale, scale);
 
             ESP_LOGI(TAG,
-                     "draw path=%s ext=%s src=%dx%d draw=%dx%d scale=%.3f fullscreen=%d exact=%d draw=%lld ok=%d progressive=%d",
+                     "draw path=%s ext=%s src=%dx%d draw=%dx%d scale=%.3f fullscreen=%d exact=%d draw=%lld ok=%d progressive=%d decoder=%s sw_decode=%lld sw_push=%lld budget=%u",
                      _path.c_str(),
                      _ext.c_str(),
                      iw,
@@ -313,7 +325,11 @@ private:
                      exact_screen ? 1 : 0,
                      (esp_timer_get_time() - td) / 1000,
                      ok ? 1 : 0,
-                     progressive ? 1 : 0);
+                     progressive ? 1 : 0,
+                     decoder,
+                     software_stats.decode_ms,
+                     software_stats.push_ms,
+                     (unsigned)software_stats.memory_budget);
             if (!ok) draw_message("Image decode failed");
         }
 

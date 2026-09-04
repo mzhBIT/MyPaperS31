@@ -921,6 +921,14 @@ ESP32XX_SPI_HD_CLK_FREQ_RANGE_MAX := 40
 		config ESP_HOSTED_DFLT_TASK_STACK
 			int "Hosted default task size"
 			default 3072
+
+		config ESP_HOSTED_TASK_STACK_IN_SPIRAM
+			bool "Allocate Hosted task stacks in external RAM"
+			depends on SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY
+			default y
+			help
+				Place the non-ISR ESP-Hosted transport and RPC task stacks in
+				external RAM. DMA buffers remain in internal DMA-capable memory.
 	endmenu
 
 	config ESP_HOSTED_USE_MEMPOOL

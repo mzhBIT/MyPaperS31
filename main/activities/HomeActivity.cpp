@@ -26,6 +26,7 @@ extern void launch_file_browser(const char *start_path);
 extern void launch_rss_reader();
 extern void launch_reader(const char *path);
 extern void launch_epub_reader(const char *path);
+extern void launch_mobi_reader(const char *path);
 
 static const char *TAG = "HOME";
 
@@ -211,7 +212,8 @@ static bool probe_image(const std::string &path, const std::string &ext, int *w,
 }
 
 static bool draw_epub_cover_image(const RecentBook &recent, int x, int y, int w, int h) {
-    if (recent.type != "epub" || recent.cover_path.empty() || !file_exists(recent.cover_path)) return false;
+    if ((recent.type != "epub" && recent.type != "mobi") ||
+        recent.cover_path.empty() || !file_exists(recent.cover_path)) return false;
     std::string image_path = recent.cover_path;
     std::string thumbnail_path = cover_thumbnail::cache_path_for(image_path);
     if (image_path != thumbnail_path && cover_thumbnail::ensure(image_path, thumbnail_path)) {
@@ -398,6 +400,7 @@ private:
         const RecentBook &book = m_books[index];
         ESP_LOGI(TAG, "open bookshelf item: %s", book.path.c_str());
         if (book.type == "epub") launch_epub_reader(book.path.c_str());
+        else if (book.type == "mobi") launch_mobi_reader(book.path.c_str());
         else launch_reader(book.path.c_str());
     }
 
@@ -420,7 +423,7 @@ private:
         M5.Display.drawRoundRect(x, y, w, h, 3, TFT_BLACK);
         int spine_x = x + std::max(7, w / 7);
         M5.Display.drawLine(spine_x, y, spine_x, y + h, TFT_BLACK);
-        std::string type = book.type == "epub" ? "EPUB" : "TXT";
+        std::string type = book.type == "epub" ? "EPUB" : (book.type == "mobi" ? "MOBI" : "TXT");
         system_font::draw_center(M5.Display, type, x + w / 2 + 4,
                                  y + std::max(4, (h - system_font::line_height()) / 2), TFT_BLACK);
     }
@@ -508,7 +511,7 @@ private:
             int cy = M5.Display.height() / 2;
             system_font::draw_center(M5.Display, "Bookshelf is empty", M5.Display.width() / 2,
                                      cy - system_font::line_height(), TFT_BLACK);
-            system_font::draw_center(M5.Display, "Open a TXT or EPUB file from Files",
+            system_font::draw_center(M5.Display, "Open a TXT, EPUB or MOBI file from Files",
                                      M5.Display.width() / 2, cy + 12, TFT_BLACK);
         } else {
             int first = current_page() * RECENT_PAGE_SIZE;
@@ -552,7 +555,7 @@ static void draw_header() {
 
     // Cover card background (dark)
     M5.Display.fillRoundRect(SIDE_PAD, y, w, COVER_H, 10, TFT_BLACK);
-    bool drew_cover = has_recent && recent.type == "epub" &&
+    bool drew_cover = has_recent && (recent.type == "epub" || recent.type == "mobi") &&
                       draw_epub_cover_image(recent, SIDE_PAD + 18, y + 16, 154, COVER_H - 32);
 
     // Title + author in white text on black

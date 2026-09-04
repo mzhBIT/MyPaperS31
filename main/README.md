@@ -20,13 +20,14 @@
 
 - `HomeActivity`
   - 主页面和按最近打开顺序排列的书架。
-  - EPUB 封面缩略图显示。
+  - EPUB/MOBI 封面缩略图显示。
 - `FileBrowserActivity`
   - 浏览 SD 卡中的书籍、图片、字体和音频文件。
 - `ReaderActivity`
   - TXT 阅读、分页、进度保存和最近阅读更新。
 - `EpubReaderActivity`
-  - EPUB spine/TOC 导航、正文分页、图片按需提取、封面缓存和进度保存。
+  - EPUB/MOBI 通用流式阅读页面：章节导航、正文分页、图片按需提取、封面缓存和进度保存。
+  - MOBI6/KF7 支持无压缩、PalmDOC、HUFF/CDIC、EXTH 元数据与 DRM 检测。
 - `ReaderSettingsActivity`
   - 字体、刷新模式、字号、行距、首行缩进、段间距、边距和图片开关。
 - `SettingActivity`
@@ -86,7 +87,7 @@
 位于 `renderer/`：
 
 - `DocumentLayout.*`
-  - TXT、EPUB 和 RSS 共用的文档分页结构。
+  - TXT、EPUB、MOBI 和 RSS 共用的文档分页结构。
 - `TextLayout.*`
   - CJK 断行、段落缩进、段间距和页面规则。
 - `TextRenderer.*`

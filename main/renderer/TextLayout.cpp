@@ -61,6 +61,28 @@ static bool ascii_space(uint32_t cp)
     return cp == ' ' || cp == '\t';
 }
 
+static bool overflow_continues_ascii_word(const std::vector<Token> &tokens,
+                                          size_t last_space_index,
+                                          uint32_t overflow_cp)
+{
+    if (last_space_index == (size_t)-1 ||
+        last_space_index + 1 >= tokens.size() ||
+        overflow_cp >= 0x80 || ascii_space(overflow_cp)) {
+        return false;
+    }
+
+    // A remembered space is a useful word-break point only while the
+    // overflowing run after it is still ASCII.  In mixed text such as
+    // "《GTA 6》的在线模式...", a later CJK overflow must not rewind all
+    // the way to the space between GTA and 6 and leave most of the line empty.
+    for (size_t i = last_space_index + 1; i < tokens.size(); ++i) {
+        if (tokens[i].codepoint >= 0x80 || ascii_space(tokens[i].codepoint)) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static size_t skip_ascii_spaces(const std::string &text, size_t pos)
 {
     while (pos < text.size()) {
@@ -219,7 +241,12 @@ std::vector<Line> break_utf8(const std::string &text,
         size_t next_start = hard_break ? hard_break_next : pos;
         if (!hard_break && overflow_cp != 0) {
             next_start = overflow_start;
-            if (options.prefer_word_break && last_space_index != (size_t)-1 && last_space_index > 0) {
+            if (ascii_space(overflow_cp)) {
+                // The current line is already full. Consume the separator so
+                // the next line does not begin with visible ASCII whitespace.
+                next_start = skip_ascii_spaces(text, overflow_start);
+            } else if (options.prefer_word_break && last_space_index > 0 &&
+                       overflow_continues_ascii_word(tokens, last_space_index, overflow_cp)) {
                 take = last_space_index;
                 next_start = skip_ascii_spaces(text, tokens[last_space_index].start);
             } else if (options.apply_cjk_kinsoku) {

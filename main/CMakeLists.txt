@@ -8,6 +8,7 @@ set(srcs
     "deepseek/DeepSeekClient.cpp"
     "ui/reader_font.cpp"
     "ui/reader_style.cpp"
+    "ui/reader_background.cpp"
     "ui/SystemFont.cpp"
     "ui/Utf8Text.cpp"
     "ui/VirtualKeyboard.cpp"
@@ -29,7 +30,8 @@ set(srcs
     "activities/ReaderActivity.cpp"
     "activities/EpubReaderActivity.cpp"
     "activities/ReaderOverlay.cpp"
-    "activities/ReaderSettingsActivity.cpp"
+    "activities/ReaderFontPickerActivity.cpp"
+    "activities/ReaderBackgroundPickerActivity.cpp"
     "activities/MusicActivity.cpp"
     "activities/RadioActivity.cpp"
     "activities/SettingActivity.cpp"
@@ -49,7 +51,9 @@ set(srcs
     "parser/gbk_decode.cpp"
     "parser/epub_zip.cpp"
     "parser/epub_parser.cpp"
-    "parser/epub_html.cpp")
+    "parser/epub_html.cpp"
+    "parser/mobi_parser.cpp"
+    "parser/reflow_book.cpp")
 
 idf_component_register(SRCS ${srcs}
                        INCLUDE_DIRS "." "activities" "input" "parser" "renderer" "storage" "ui" "wifi"

@@ -102,13 +102,29 @@ struct Builder {
             return;
         }
 
+        int declared_width = block.image_width;
+        int declared_height = block.image_height;
+        if (options.ignore_tiny_declared_image_size) {
+            const bool large_page_image =
+                source.width >= std::max(300, options.content_width / 2) &&
+                source.height >= source.width;
+            const bool tiny_width = declared_width > 0 &&
+                                    declared_width < std::max(48, options.content_width / 6);
+            const bool tiny_height = declared_height > 0 &&
+                                     declared_height < std::max(48, options.content_height / 8);
+            if (large_page_image && (tiny_width || tiny_height)) {
+                declared_width = 0;
+                declared_height = 0;
+            }
+        }
+
         int preferred_width = options.content_width;
         int preferred_height = options.content_height;
-        if (block.image_width > 0) {
-            preferred_width = std::min(preferred_width, block.image_width);
+        if (declared_width > 0) {
+            preferred_width = std::min(preferred_width, declared_width);
         }
-        if (block.image_height > 0) {
-            preferred_height = std::min(preferred_height, block.image_height);
+        if (declared_height > 0) {
+            preferred_height = std::min(preferred_height, declared_height);
         }
 
         PageItem item;
@@ -145,6 +161,34 @@ struct Builder {
 
 } // namespace
 
+static void relax_decorative_heading_breaks(std::vector<Block> *blocks)
+{
+    if (!blocks) return;
+
+    bool text_seen_since_boundary = false;
+    for (auto &block : *blocks) {
+        if (block.type == BlockType::PageBreak) {
+            text_seen_since_boundary = false;
+            continue;
+        }
+
+        if (block.type == BlockType::Paragraph) {
+            if (block.heading && block.page_break_before &&
+                !text_seen_since_boundary) {
+                block.page_break_before = false;
+            }
+            if (!block.text.empty()) {
+                text_seen_since_boundary = true;
+            }
+            continue;
+        }
+
+        // Images and horizontal rules before the first text block are treated
+        // as chapter ornaments.  They should not force the following heading
+        // to start on a fresh page by themselves.
+    }
+}
+
 void fit_image_box(int source_width, int source_height,
                    int max_width, int max_height,
                    bool allow_upscale,
@@ -173,6 +217,9 @@ void fit_image_box(int source_width, int source_height,
 
 Pages paginate(const std::vector<Block> &blocks, const Options &options)
 {
+    std::vector<Block> normalized_blocks = blocks;
+    relax_decorative_heading_breaks(&normalized_blocks);
+
     Builder builder(options);
     if (options.content_width <= 0 || options.content_height <= 0 ||
         options.line_height <= 0 || !options.layout_paragraph) {
@@ -182,8 +229,8 @@ Pages paginate(const std::vector<Block> &blocks, const Options &options)
 
     int pending_blank_lines = 0;
     int pending_paragraph_spacing = 0;
-    for (size_t block_index = 0; block_index < blocks.size(); ++block_index) {
-        const Block &block = blocks[block_index];
+    for (size_t block_index = 0; block_index < normalized_blocks.size(); ++block_index) {
+        const Block &block = normalized_blocks[block_index];
         int gap_lines = std::max(pending_blank_lines, block.blank_before);
         int gap_height = std::max(gap_lines * options.line_height,
                                   pending_paragraph_spacing);
@@ -212,10 +259,10 @@ Pages paginate(const std::vector<Block> &blocks, const Options &options)
             if (block.heading) {
                 int following_gap = block.blank_after;
                 bool followed_by_text = false;
-                if (block_index + 1 < blocks.size()) {
+                if (block_index + 1 < normalized_blocks.size()) {
                     following_gap = std::max(following_gap,
-                                             blocks[block_index + 1].blank_before);
-                    followed_by_text = blocks[block_index + 1].type == BlockType::Paragraph;
+                                             normalized_blocks[block_index + 1].blank_before);
+                    followed_by_text = normalized_blocks[block_index + 1].type == BlockType::Paragraph;
                 }
                 protected_lines = (int)wrapped.size();
                 if (followed_by_text) {

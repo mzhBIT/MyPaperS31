@@ -169,7 +169,15 @@ void *hosted_thread_create(char *tname, uint32_t tprio, uint32_t tstack_size, vo
 			CTRL_PATH_TASK_STACK_SIZE);
 	*thread_handle = osThreadCreate(osThread(Ctrl_port_tsk), arg);
 #endif
-	task_created = xTaskCreate((void (*)(void *))start_routine, tname, tstack_size, sr_arg, tprio, thread_handle);
+#if CONFIG_ESP_HOSTED_TASK_STACK_IN_SPIRAM
+	task_created = xTaskCreatePinnedToCoreWithCaps(
+			(void (*)(void *))start_routine, tname, tstack_size, sr_arg,
+			tprio, thread_handle, tskNO_AFFINITY,
+			MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+#else
+	task_created = xTaskCreate((void (*)(void *))start_routine, tname,
+			tstack_size, sr_arg, tprio, thread_handle);
+#endif
 	if (!(*thread_handle)) {
 		ESP_LOGE(TAG, "Failed to create thread: %s\n", tname);
 		HOSTED_FREE(thread_handle);
@@ -181,6 +189,11 @@ void *hosted_thread_create(char *tname, uint32_t tprio, uint32_t tstack_size, vo
 		HOSTED_FREE(thread_handle);
 		return NULL;
 	}
+
+#if CONFIG_ESP_HOSTED_TASK_STACK_IN_SPIRAM
+	ESP_LOGI(TAG, "Created thread %s with %u-byte PSRAM stack",
+			tname, (unsigned)tstack_size);
+#endif
 
 	return thread_handle;
 }
@@ -203,7 +216,11 @@ int hosted_thread_cancel(void *thread_handle)
 	//	HOSTED_FREE(thread_handle);
 	//	return RET_INVALID;
 	//}
+#if CONFIG_ESP_HOSTED_TASK_STACK_IN_SPIRAM
+	vTaskDeleteWithCaps(*thread_hdl);
+#else
 	vTaskDelete(*thread_hdl);
+#endif
 
 	HOSTED_FREE(thread_handle);
 	return RET_OK;

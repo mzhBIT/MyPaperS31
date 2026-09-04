@@ -7,6 +7,7 @@
 #include "audio/audio_file_formats.h"
 #include "reader_font.h"
 #include "ui/SystemFont.h"
+#include "ui/reader_background.h"
 #include <M5Unified.h>
 #include <string>
 #include <vector>
@@ -49,6 +50,7 @@ static bool is_supported(const char *n, bool is_dir) {
     const char *ext = strrchr(n, '.');
     if (!ext) return false;
     return (strcasecmp(ext, ".txt") == 0 || strcasecmp(ext, ".epub") == 0 ||
+            strcasecmp(ext, ".mobi") == 0 || strcasecmp(ext, ".prc") == 0 ||
             strcasecmp(ext, ".bmp") == 0 || strcasecmp(ext, ".png") == 0 ||
             strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0 ||
             strcasecmp(ext, ".ttf") == 0 ||
@@ -65,6 +67,11 @@ static bool is_font_file(const char *n) {
 static bool is_epub_file(const char *n) {
     const char *ext = strrchr(n, '.');
     return ext && strcasecmp(ext, ".epub") == 0;
+}
+
+static bool is_mobi_file(const char *n) {
+    const char *ext = strrchr(n, '.');
+    return ext && (strcasecmp(ext, ".mobi") == 0 || strcasecmp(ext, ".prc") == 0);
 }
 
 static bool is_image_file(const char *n) {
@@ -112,9 +119,10 @@ static void draw_list() {
         bool sel = (idx == g_focus);
         const auto &e = g_entries[idx];
 
-        M5.Display.fillRoundRect(PAD, ry, w - PAD - 12, ROW_H - 2, 6,
-                                 sel ? TFT_BLACK : TFT_WHITE);
-        M5.Display.drawRoundRect(PAD, ry, w - PAD - 12, ROW_H - 2, 6, TFT_BLACK);
+        M5.Display.fillRect(PAD, ry, w - PAD - 12, ROW_H - 2,
+                            sel ? TFT_BLACK : TFT_WHITE);
+        M5.Display.drawFastHLine(PAD, ry + ROW_H - 2,
+                                 w - PAD - 12, TFT_BLACK);
         M5.Display.setTextColor(sel ? TFT_WHITE : TFT_BLACK,
                                 sel ? TFT_BLACK : TFT_WHITE);
 
@@ -217,7 +225,7 @@ static bool hit_back(int tx, int ty) {
 
 class FileBrowserActivity : public Activity {
     bool m_action_menu = false;
-    int m_action_choice = 0; // 0=rename, 1=delete, 2=cancel
+    int m_action_choice = 0;
     bool m_confirm_delete = false;
     int m_delete_choice = 0; // 0=cancel, 1=delete
     std::string m_notice;
@@ -308,6 +316,9 @@ public:
         } else if (is_epub_file(full.c_str())) {
             extern void launch_epub_reader(const char*);
             launch_epub_reader(full.c_str());
+        } else if (is_mobi_file(full.c_str())) {
+            extern void launch_mobi_reader(const char*);
+            launch_mobi_reader(full.c_str());
         } else if (is_image_file(full.c_str())) {
             extern void launch_image_viewer(const char*);
             launch_image_viewer(full.c_str());
@@ -329,11 +340,19 @@ public:
         return s.substr(0, head) + "..." + s.substr(s.size() - tail);
     }
 
+    bool action_has_background() const {
+        return g_focus >= 0 && g_focus < (int)g_entries.size() &&
+               !g_entries[g_focus].is_dir && is_image_file(g_entries[g_focus].name.c_str());
+    }
+
+    int action_count() const { return action_has_background() ? 4 : 3; }
+
     void draw_action_dialog() {
         int w = M5.Display.width();
         int h = M5.Display.height();
-        int box_w = std::min(w - 36, 650);
-        int box_h = 250;
+        bool background_action = action_has_background();
+        int box_w = std::min(w - 36, background_action ? 760 : 650);
+        int box_h = background_action ? 350 : 250;
         int x = (w - box_w) / 2;
         int y = (h - box_h) / 2;
         M5.Display.fillRoundRect(x, y, box_w, box_h, 7, TFT_WHITE);
@@ -341,38 +360,49 @@ public:
         std::string name = g_focus >= 0 && g_focus < (int)g_entries.size() ? g_entries[g_focus].name : "";
         system_font::draw_center(M5.Display, system_font::ellipsize(name, box_w - 40), w / 2, y + 28, TFT_BLACK);
 
-        const char *labels[] = {"Rename", "Delete", "Cancel"};
+        const char *normal_labels[] = {"Rename", "Delete", "Cancel"};
+        const char *image_labels[] = {"Rename", "Background", "Delete", "Cancel"};
+        const char **labels = background_action ? image_labels : normal_labels;
+        int count = action_count();
         int gap = 12;
-        int btn_w = (box_w - 40 - gap * 2) / 3;
+        int columns = background_action ? 2 : 3;
+        int btn_w = (box_w - 40 - gap * (columns - 1)) / columns;
         int btn_h = 66;
-        int bx = x + 20;
-        int by = y + box_h - btn_h - 24;
-        for (int i = 0; i < 3; ++i) {
+        int first_y = background_action ? y + 150 : y + box_h - btn_h - 24;
+        for (int i = 0; i < count; ++i) {
+            int column = i % columns;
+            int row = i / columns;
+            int bx = x + 20 + column * (btn_w + gap);
+            int by = first_y + row * (btn_h + gap);
             bool selected = i == m_action_choice;
             M5.Display.fillRoundRect(bx, by, btn_w, btn_h, 6, selected ? TFT_BLACK : TFT_WHITE);
             M5.Display.drawRoundRect(bx, by, btn_w, btn_h, 6, TFT_BLACK);
             system_font::draw_center(M5.Display, labels[i], bx + btn_w / 2, by + 11,
                                      selected ? TFT_WHITE : TFT_BLACK);
-            bx += btn_w + gap;
         }
     }
 
     int action_choice_at(int tx, int ty) const {
         int w = M5.Display.width();
         int h = M5.Display.height();
-        int box_w = std::min(w - 36, 650);
-        int box_h = 250;
+        bool background_action = action_has_background();
+        int box_w = std::min(w - 36, background_action ? 760 : 650);
+        int box_h = background_action ? 350 : 250;
         int x = (w - box_w) / 2;
         int y = (h - box_h) / 2;
         int gap = 12;
-        int btn_w = (box_w - 40 - gap * 2) / 3;
+        int columns = background_action ? 2 : 3;
+        int count = action_count();
+        int btn_w = (box_w - 40 - gap * (columns - 1)) / columns;
         int btn_h = 66;
-        int bx = x + 20;
-        int by = y + box_h - btn_h - 24;
-        if (ty < by || ty >= by + btn_h) return -1;
-        for (int i = 0; i < 3; ++i) {
+        int first_y = background_action ? y + 150 : y + box_h - btn_h - 24;
+        for (int i = 0; i < count; ++i) {
+            int column = i % columns;
+            int row = i / columns;
+            int bx = x + 20 + column * (btn_w + gap);
+            int by = first_y + row * (btn_h + gap);
+            if (ty < by || ty >= by + btn_h) continue;
             if (tx >= bx && tx < bx + btn_w) return i;
-            bx += btn_w + gap;
         }
         return -1;
     }
@@ -429,6 +459,7 @@ public:
         }
 
         recent_books_rename_path(old_path.c_str(), new_path.c_str());
+        reader_background_file_renamed(old_path.c_str(), new_path.c_str());
         ESP_LOGI(TAG, "renamed: %s -> %s", old_path.c_str(), new_path.c_str());
         load_dir(g_path);
         for (size_t i = 0; i < g_entries.size(); ++i) {
@@ -465,10 +496,20 @@ public:
     }
 
     void handle_action(int choice) {
+        bool background_action = action_has_background();
         m_action_menu = false;
         m_action_choice = 0;
         if (choice == 0) begin_rename();
-        else if (choice == 1) {
+        else if (background_action && choice == 1) {
+            std::string message;
+            ReaderBackgroundResult result = reader_background_set(
+                selected_path().c_str(), M5.Display.width(), M5.Display.height(), &message);
+            m_notice = message;
+            ESP_LOGI(TAG, "set reading background path=%s result=%d",
+                     selected_path().c_str(), (int)result);
+            redraw_all();
+        }
+        else if (choice == (background_action ? 2 : 1)) {
             if (g_focus >= 0 && g_focus < (int)g_entries.size() && g_entries[g_focus].is_dir) {
                 m_notice = "Folder deletion is not supported";
                 redraw_all();
@@ -567,6 +608,7 @@ public:
         std::string path = selected_path();
         int old_focus = g_focus;
         if (unlink(path.c_str()) == 0) {
+            reader_background_file_deleted(path.c_str());
             ESP_LOGI(TAG, "deleted: %s", path.c_str());
             load_dir(g_path);
             if (!g_entries.empty()) {
@@ -676,10 +718,11 @@ public:
                 m_action_menu = false;
                 redraw_all();
             } else if (key == APP_KEY_UP) {
-                m_action_choice = (m_action_choice + 2) % 3;
+                int count = action_count();
+                m_action_choice = (m_action_choice + count - 1) % count;
                 redraw_all();
             } else if (key == APP_KEY_DOWN) {
-                m_action_choice = (m_action_choice + 1) % 3;
+                m_action_choice = (m_action_choice + 1) % action_count();
                 redraw_all();
             } else if (key == APP_KEY_OK) {
                 handle_action(m_action_choice);

@@ -1,0 +1,929 @@
+#include "parser/mobi_parser.h"
+#include "storage/app_paths.h"
+
+#include <algorithm>
+#include <cctype>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <esp_heap_caps.h>
+#include <esp_log.h>
+#include <esp_timer.h>
+#include <sys/stat.h>
+
+namespace {
+
+static const char *TAG = "MOBI";
+static constexpr uint64_t TARGET_SECTION_BYTES = 96 * 1024;
+static constexpr uint64_t MIN_SECTION_BYTES = 4 * 1024;
+static constexpr size_t MAX_RECORD_BYTES = 2 * 1024 * 1024;
+static constexpr uint32_t META_MAGIC = 0x4d424331; // MBC1
+static constexpr uint32_t META_VERSION = 1;
+
+uint16_t read_be16(const uint8_t *p)
+{
+    return static_cast<uint16_t>((static_cast<uint16_t>(p[0]) << 8) | p[1]);
+}
+
+uint32_t read_be32(const uint8_t *p)
+{
+    return (static_cast<uint32_t>(p[0]) << 24) |
+           (static_cast<uint32_t>(p[1]) << 16) |
+           (static_cast<uint32_t>(p[2]) << 8) |
+           static_cast<uint32_t>(p[3]);
+}
+
+std::string lower_ascii(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+        return c < 0x80 ? static_cast<char>(std::tolower(c)) : static_cast<char>(c);
+    });
+    return value;
+}
+
+void append_utf8(uint32_t cp, std::string *out)
+{
+    if (cp < 0x80) {
+        out->push_back(static_cast<char>(cp));
+    } else if (cp < 0x800) {
+        out->push_back(static_cast<char>(0xc0 | (cp >> 6)));
+        out->push_back(static_cast<char>(0x80 | (cp & 0x3f)));
+    } else {
+        out->push_back(static_cast<char>(0xe0 | (cp >> 12)));
+        out->push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3f)));
+        out->push_back(static_cast<char>(0x80 | (cp & 0x3f)));
+    }
+}
+
+std::string cp1252_to_utf8(const uint8_t *data, size_t size)
+{
+    static const uint16_t high[32] = {
+        0x20ac, 0x0081, 0x201a, 0x0192, 0x201e, 0x2026, 0x2020, 0x2021,
+        0x02c6, 0x2030, 0x0160, 0x2039, 0x0152, 0x008d, 0x017d, 0x008f,
+        0x0090, 0x2018, 0x2019, 0x201c, 0x201d, 0x2022, 0x2013, 0x2014,
+        0x02dc, 0x2122, 0x0161, 0x203a, 0x0153, 0x009d, 0x017e, 0x0178,
+    };
+    std::string out;
+    out.reserve(size + size / 4);
+    for (size_t i = 0; i < size; ++i) {
+        uint32_t cp = data[i];
+        if (cp >= 0x80 && cp <= 0x9f) cp = high[cp - 0x80];
+        append_utf8(cp, &out);
+    }
+    return out;
+}
+
+bool palmdoc_decompress(const uint8_t *input, size_t input_size, std::string *output)
+{
+    if (!output) return false;
+    output->clear();
+    output->reserve(4096 + 32);
+    size_t pos = 0;
+    while (pos < input_size) {
+        uint8_t c = input[pos++];
+        if (c >= 1 && c <= 8) {
+            if (pos + c > input_size) return false;
+            output->append(reinterpret_cast<const char *>(input + pos), c);
+            pos += c;
+        } else if (c <= 0x7f) {
+            output->push_back(static_cast<char>(c));
+        } else if (c >= 0xc0) {
+            output->push_back(' ');
+            output->push_back(static_cast<char>(c ^ 0x80));
+        } else {
+            if (pos >= input_size) return false;
+            uint16_t pair = static_cast<uint16_t>((static_cast<uint16_t>(c) << 8) | input[pos++]);
+            size_t distance = (pair >> 3) & 0x7ff;
+            size_t length = (pair & 7) + 3;
+            if (distance == 0 || distance > output->size()) return false;
+            for (size_t i = 0; i < length; ++i) {
+                output->push_back((*output)[output->size() - distance]);
+            }
+        }
+        if (output->size() > MAX_RECORD_BYTES) return false;
+    }
+    return true;
+}
+
+size_t trailing_entry_size(const uint8_t *data, size_t size)
+{
+    uint32_t value = 0;
+    unsigned shift = 0;
+    for (size_t i = 0; i < 4 && i < size; ++i) {
+        uint8_t c = data[size - 1 - i];
+        value |= static_cast<uint32_t>(c & 0x7f) << shift;
+        if (c & 0x80) return value <= size ? value : 0;
+        shift += 7;
+    }
+    return 0;
+}
+
+size_t trailing_data_size(const uint8_t *data, size_t size, uint16_t flags)
+{
+    size_t trailing = 0;
+    uint16_t entries = flags >> 1;
+    while (entries) {
+        if (entries & 1) {
+            size_t available = size > trailing ? size - trailing : 0;
+            size_t entry = trailing_entry_size(data, available);
+            if (entry == 0 || entry > available) return trailing;
+            trailing += entry;
+        }
+        entries >>= 1;
+    }
+    if ((flags & 1) && size > trailing) {
+        size_t overlap = (data[size - trailing - 1] & 3) + 1;
+        if (overlap <= size - trailing) trailing += overlap;
+    }
+    return trailing;
+}
+
+std::string strip_tags(const std::string &input)
+{
+    std::string out;
+    bool in_tag = false;
+    bool space = false;
+    for (unsigned char c : input) {
+        if (c == '<') {
+            in_tag = true;
+            continue;
+        }
+        if (c == '>') {
+            in_tag = false;
+            space = true;
+            continue;
+        }
+        if (in_tag) continue;
+        if (std::isspace(c)) {
+            space = !out.empty();
+        } else {
+            if (space && !out.empty()) out.push_back(' ');
+            out.push_back(static_cast<char>(c));
+            space = false;
+        }
+    }
+    while (!out.empty() && out.back() == ' ') out.pop_back();
+    return out;
+}
+
+std::string first_heading(const std::string &html)
+{
+    std::string lower = lower_ascii(html);
+    for (int level = 1; level <= 3; ++level) {
+        std::string token = "<h" + std::to_string(level);
+        size_t start = lower.find(token);
+        if (start == std::string::npos) continue;
+        start = lower.find('>', start + token.size());
+        if (start == std::string::npos) continue;
+        size_t end = lower.find("</h", start + 1);
+        if (end == std::string::npos || end - start > 512) continue;
+        std::string heading = strip_tags(html.substr(start + 1, end - start - 1));
+        if (!heading.empty()) return heading;
+    }
+    return std::string();
+}
+
+bool parse_decimal_attr(const std::string &tag, const char *attribute, uint32_t *value)
+{
+    std::string lower = lower_ascii(tag);
+    size_t pos = lower.find(attribute);
+    if (pos == std::string::npos) return false;
+    pos += std::strlen(attribute);
+    while (pos < tag.size() && std::isspace(static_cast<unsigned char>(tag[pos]))) ++pos;
+    if (pos >= tag.size() || tag[pos] != '=') return false;
+    ++pos;
+    while (pos < tag.size() && std::isspace(static_cast<unsigned char>(tag[pos]))) ++pos;
+    char quote = pos < tag.size() && (tag[pos] == '\'' || tag[pos] == '"') ? tag[pos++] : 0;
+    size_t start = pos;
+    while (pos < tag.size() && std::isdigit(static_cast<unsigned char>(tag[pos]))) ++pos;
+    if (pos == start || (quote && (pos >= tag.size() || tag[pos] != quote))) return false;
+    *value = static_cast<uint32_t>(std::strtoul(tag.substr(start, pos - start).c_str(), nullptr, 10));
+    return true;
+}
+
+} // namespace
+
+struct MobiBook::HuffState {
+    struct Code {
+        uint8_t length = 0;
+        bool terminal = false;
+        uint32_t max_code = 0;
+    };
+    struct Phrase {
+        std::string bytes;
+        bool ready = false;
+        bool expanding = false;
+    };
+
+    Code first[256] = {};
+    uint32_t min_code[33] = {};
+    uint32_t max_code[33] = {};
+    std::vector<Phrase> phrases;
+
+    static uint32_t peek32(const uint8_t *data, size_t size, size_t bit_position)
+    {
+        size_t byte_position = bit_position / 8;
+        unsigned shift = static_cast<unsigned>(bit_position & 7);
+        uint64_t window = 0;
+        for (size_t i = 0; i < 8; ++i) {
+            window <<= 8;
+            if (byte_position + i < size) window |= data[byte_position + i];
+        }
+        window <<= shift;
+        return static_cast<uint32_t>(window >> 32);
+    }
+
+    bool expand_phrase(size_t index, std::string *out, unsigned depth)
+    {
+        if (!out || index >= phrases.size() || depth > 64) return false;
+        Phrase &phrase = phrases[index];
+        if (phrase.ready) {
+            out->append(phrase.bytes);
+            return out->size() <= MAX_RECORD_BYTES;
+        }
+        if (phrase.expanding) return false;
+        phrase.expanding = true;
+        std::string expanded;
+        bool ok = decode(reinterpret_cast<const uint8_t *>(phrase.bytes.data()), phrase.bytes.size(),
+                         &expanded, depth + 1);
+        phrase.expanding = false;
+        if (!ok) return false;
+        phrase.bytes = std::move(expanded);
+        phrase.ready = true;
+        out->append(phrase.bytes);
+        return out->size() <= MAX_RECORD_BYTES;
+    }
+
+    bool decode(const uint8_t *data, size_t size, std::string *out, unsigned depth = 0)
+    {
+        if (!data || !out || depth > 64) return false;
+        out->clear();
+        out->reserve(std::min<size_t>(MAX_RECORD_BYTES, size * 3 + 64));
+        const size_t bit_count = size * 8;
+        size_t bit_position = 0;
+        while (bit_position < bit_count) {
+            uint32_t bits = peek32(data, size, bit_position);
+            Code code = first[bits >> 24];
+            unsigned length = code.length;
+            uint32_t upper = code.max_code;
+            if (length == 0 || length > 32) return false;
+            if (!code.terminal) {
+                while (length <= 32 && bits < min_code[length]) ++length;
+                if (length > 32) return false;
+                upper = max_code[length];
+            }
+            if (bit_position + length > bit_count) break;
+            bit_position += length;
+            uint32_t phrase_index = length == 32 ? upper - bits : (upper - bits) >> (32 - length);
+            if (!expand_phrase(phrase_index, out, depth)) return false;
+        }
+        return true;
+    }
+};
+
+bool MobiBook::open(const char *path)
+{
+    int64_t started = esp_timer_get_time();
+    close();
+    _last_error.clear();
+    if (!path || !path[0]) return false;
+    _path = path;
+    _file = std::fopen(_path.c_str(), "rb");
+    if (!_file) {
+        _last_error = "Could not open MOBI file";
+        close();
+        return false;
+    }
+    // Text and resource records are usually adjacent. Keeping one buffered
+    // stream for the lifetime of the reader avoids thousands of FAT open/close
+    // operations while building the first metadata index.
+    setvbuf(_file, nullptr, _IOFBF, 32 * 1024);
+    if (!parse_container()) {
+        if (_last_error.empty()) _last_error = "Invalid MOBI container";
+        close();
+        return false;
+    }
+    bool metadata_cached = load_metadata_cache();
+    if (!metadata_cached && !build_text_index()) {
+        if (_last_error.empty()) _last_error = "Could not decode MOBI text";
+        std::string error = _last_error;
+        close();
+        _last_error = error;
+        return false;
+    }
+    if (!metadata_cached) save_metadata_cache();
+    ESP_LOGI(TAG, "opened title=%s records=%u text_records=%u sections=%u compression=%u version=%lu meta_cache=%d time=%lld ms spiram_free=%u",
+             title.c_str(), static_cast<unsigned>(_records.size()), _text_record_count,
+             static_cast<unsigned>(_sections.size()), _compression,
+             static_cast<unsigned long>(_mobi_version), metadata_cached ? 1 : 0,
+             (esp_timer_get_time() - started) / 1000,
+             static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+    return true;
+}
+
+std::string MobiBook::metadata_cache_path() const
+{
+    uint32_t hash = 2166136261u;
+    for (unsigned char c : _path) {
+        hash ^= c;
+        hash *= 16777619u;
+    }
+    char name[32];
+    std::snprintf(name, sizeof(name), "/%08lx.meta", static_cast<unsigned long>(hash));
+    return std::string(app_paths::mobi_metadata_dir()) + name;
+}
+
+bool MobiBook::load_metadata_cache()
+{
+    struct stat source = {};
+    if (stat(_path.c_str(), &source) != 0) return false;
+    FILE *fp = std::fopen(metadata_cache_path().c_str(), "rb");
+    if (!fp) return false;
+    auto read_value = [fp](auto *value) {
+        return std::fread(value, 1, sizeof(*value), fp) == sizeof(*value);
+    };
+    uint32_t magic = 0, version = 0, text_count = 0, section_count = 0;
+    uint64_t file_size = 0;
+    int64_t modified = 0;
+    uint64_t decoded_length = 0;
+    bool ok = read_value(&magic) && read_value(&version) && read_value(&file_size) &&
+              read_value(&modified) && read_value(&decoded_length) && read_value(&text_count) &&
+              magic == META_MAGIC && version == META_VERSION &&
+              file_size == static_cast<uint64_t>(source.st_size) &&
+              modified == static_cast<int64_t>(source.st_mtime) &&
+              text_count == _text_record_count;
+    std::vector<TextRecord> text_records;
+    if (ok) {
+        text_records.reserve(text_count);
+        for (uint32_t i = 0; i < text_count; ++i) {
+            TextRecord item;
+            if (!read_value(&item.record_index) || !read_value(&item.start) || !read_value(&item.length) ||
+                item.record_index == 0 || item.record_index >= _records.size()) {
+                ok = false;
+                break;
+            }
+            text_records.push_back(item);
+        }
+    }
+    if (ok) ok = read_value(&section_count) && section_count > 0 && section_count <= 100000;
+    std::vector<MobiSectionItem> sections;
+    std::vector<MobiTocItem> toc;
+    if (ok) {
+        sections.reserve(section_count);
+        toc.reserve(section_count);
+        for (uint32_t i = 0; i < section_count; ++i) {
+            uint64_t start = 0, end = 0;
+            uint32_t label_size = 0;
+            if (!read_value(&start) || !read_value(&end) || !read_value(&label_size) ||
+                start >= end || end > decoded_length || label_size > 4096) {
+                ok = false;
+                break;
+            }
+            std::string label(label_size, '\0');
+            if (label_size && std::fread(label.data(), 1, label_size, fp) != label_size) {
+                ok = false;
+                break;
+            }
+            MobiSectionItem section;
+            section.id = "section-" + std::to_string(i);
+            section.href = section.id + ".html";
+            section.start = start;
+            section.end = end;
+            section.uncompressed_size = static_cast<uint32_t>(
+                std::min<uint64_t>(0xffffffffu, end - start));
+            sections.push_back(section);
+            MobiTocItem entry;
+            entry.title = label.empty() ? "Section " + std::to_string(i + 1) : std::move(label);
+            entry.href = section.href;
+            entry.spine_index = static_cast<int>(i);
+            toc.push_back(std::move(entry));
+        }
+    }
+    std::fclose(fp);
+    if (!ok || text_records.size() != text_count || sections.size() != section_count) return false;
+    _decoded_text_length = decoded_length;
+    _text_records.swap(text_records);
+    _sections.swap(sections);
+    _toc.swap(toc);
+    ESP_LOGI(TAG, "metadata cache loaded text_records=%u sections=%u",
+             static_cast<unsigned>(_text_records.size()), static_cast<unsigned>(_sections.size()));
+    return true;
+}
+
+void MobiBook::save_metadata_cache() const
+{
+    if (_text_records.empty() || _sections.empty()) return;
+    struct stat source = {};
+    if (stat(_path.c_str(), &source) != 0) return;
+    app_paths::ensure_dir(app_paths::mobi_metadata_dir());
+    std::string path = metadata_cache_path();
+    std::string temporary = path + ".tmp";
+    FILE *fp = std::fopen(temporary.c_str(), "wb");
+    if (!fp) return;
+    auto write_value = [fp](const auto &value) {
+        return std::fwrite(&value, 1, sizeof(value), fp) == sizeof(value);
+    };
+    uint64_t file_size = static_cast<uint64_t>(source.st_size);
+    int64_t modified = static_cast<int64_t>(source.st_mtime);
+    uint32_t text_count = static_cast<uint32_t>(_text_records.size());
+    uint32_t section_count = static_cast<uint32_t>(_sections.size());
+    bool ok = write_value(META_MAGIC) && write_value(META_VERSION) && write_value(file_size) &&
+              write_value(modified) && write_value(_decoded_text_length) && write_value(text_count);
+    for (const auto &item : _text_records) {
+        if (!ok) break;
+        ok = write_value(item.record_index) && write_value(item.start) && write_value(item.length);
+    }
+    if (ok) ok = write_value(section_count);
+    for (size_t i = 0; ok && i < _sections.size(); ++i) {
+        uint32_t label_size = i < _toc.size() ? static_cast<uint32_t>(_toc[i].title.size()) : 0;
+        ok = write_value(_sections[i].start) && write_value(_sections[i].end) && write_value(label_size) &&
+             (label_size == 0 || std::fwrite(_toc[i].title.data(), 1, label_size, fp) == label_size);
+    }
+    if (std::fclose(fp) != 0) ok = false;
+    if (ok) {
+        std::remove(path.c_str());
+        if (std::rename(temporary.c_str(), path.c_str()) != 0) std::remove(temporary.c_str());
+    } else {
+        std::remove(temporary.c_str());
+    }
+}
+
+void MobiBook::close()
+{
+    if (_file) {
+        std::fclose(_file);
+        _file = nullptr;
+    }
+    title.clear();
+    author.clear();
+    _path.clear();
+    _cover_href.clear();
+    _records.clear();
+    _text_records.clear();
+    _sections.clear();
+    _toc.clear();
+    _compression = 0;
+    _encryption = 0;
+    _text_record_count = 0;
+    _extra_data_flags = 0;
+    _encoding = 65001;
+    _mobi_version = 0;
+    _first_image_record = 0xffffffffu;
+    _huff_record_index = 0xffffffffu;
+    _huff_record_count = 0;
+    _decoded_text_length = 0;
+    _huff.reset();
+}
+
+bool MobiBook::parse_container()
+{
+    FILE *fp = _file;
+    if (!fp) {
+        _last_error = "Could not open MOBI file";
+        return false;
+    }
+    if (std::fseek(fp, 0, SEEK_SET) != 0) {
+        _last_error = "Could not seek MOBI file";
+        return false;
+    }
+    struct stat st = {};
+    bool ok = stat(_path.c_str(), &st) == 0 && st.st_size >= 86;
+    uint8_t header[78] = {};
+    if (ok) ok = std::fread(header, 1, sizeof(header), fp) == sizeof(header);
+    if (!ok) {
+        _last_error = "Truncated Palm database header";
+        return false;
+    }
+    uint16_t count = read_be16(header + 76);
+    uint64_t file_size = static_cast<uint64_t>(st.st_size);
+    uint64_t table_end = 78u + static_cast<uint64_t>(count) * 8u;
+    if (count == 0 || table_end > file_size || file_size > 0xffffffffu) {
+        _last_error = "Invalid Palm database record table";
+        ESP_LOGE(TAG, "invalid record table count=%u table_end=%llu file_size=%llu",
+                 count, static_cast<unsigned long long>(table_end),
+                 static_cast<unsigned long long>(file_size));
+        return false;
+    }
+    std::vector<uint32_t> offsets(count);
+    uint8_t entry[8];
+    for (uint16_t i = 0; i < count; ++i) {
+        if (std::fread(entry, 1, sizeof(entry), fp) != sizeof(entry)) {
+            _last_error = "Truncated Palm database record table";
+            return false;
+        }
+        offsets[i] = read_be32(entry);
+        // Some MOBI generators retain empty records. They are represented by
+        // equal adjacent offsets, and an empty final record may point exactly
+        // at EOF. Both are valid PDB layouts; only a decreasing or past-EOF
+        // offset is structurally invalid.
+        if (offsets[i] > file_size || (i && offsets[i] < offsets[i - 1])) {
+            _last_error = "Invalid Palm database record offset";
+            ESP_LOGE(TAG,
+                     "invalid record offset index=%u offset=%lu previous=%lu file_size=%llu count=%u",
+                     i, static_cast<unsigned long>(offsets[i]),
+                     static_cast<unsigned long>(i ? offsets[i - 1] : 0),
+                     static_cast<unsigned long long>(file_size), count);
+            return false;
+        }
+    }
+    _records.resize(count);
+    for (uint16_t i = 0; i < count; ++i) {
+        uint32_t end = i + 1 < count ? offsets[i + 1] : static_cast<uint32_t>(file_size);
+        _records[i] = {offsets[i], end - offsets[i]};
+    }
+    std::vector<uint8_t> record_zero;
+    return read_record(0, &record_zero) && parse_record_zero(record_zero);
+}
+
+bool MobiBook::parse_record_zero(const std::vector<uint8_t> &record)
+{
+    if (record.size() < 132 || std::memcmp(record.data() + 16, "MOBI", 4) != 0) {
+        _last_error = "Palm database is not a MOBI book";
+        return false;
+    }
+    _compression = read_be16(record.data());
+    _text_record_count = read_be16(record.data() + 8);
+    _encryption = read_be16(record.data() + 12);
+    uint32_t header_length = read_be32(record.data() + 20);
+    _encoding = read_be32(record.data() + 28);
+    _mobi_version = record.size() >= 108 ? read_be32(record.data() + 104) : 0;
+    _first_image_record = record.size() >= 112 ? read_be32(record.data() + 108) : 0xffffffffu;
+    _huff_record_index = record.size() >= 116 ? read_be32(record.data() + 112) : 0xffffffffu;
+    _huff_record_count = record.size() >= 120 ? read_be32(record.data() + 116) : 0;
+    if (record.size() >= 244 && header_length >= 228) _extra_data_flags = read_be16(record.data() + 242);
+
+    if (_encryption != 0) {
+        _last_error = "DRM-protected MOBI is not supported";
+        return false;
+    }
+    if (_compression != 1 && _compression != 2 && _compression != 17480) {
+        _last_error = "Unsupported MOBI compression";
+        return false;
+    }
+    if (_mobi_version >= 8) {
+        _last_error = "Pure KF8 reconstruction is not enabled yet";
+        return false;
+    }
+    if (_text_record_count == 0 || static_cast<size_t>(_text_record_count) >= _records.size()) {
+        _last_error = "Invalid MOBI text record count";
+        return false;
+    }
+
+    uint32_t name_offset = read_be32(record.data() + 84);
+    uint32_t name_length = read_be32(record.data() + 88);
+    if (name_length && name_offset <= record.size() && name_length <= record.size() - name_offset) {
+        const uint8_t *name = record.data() + name_offset;
+        title = _encoding == 1252 ? cp1252_to_utf8(name, name_length)
+                                  : std::string(reinterpret_cast<const char *>(name), name_length);
+    }
+
+    uint32_t cover_offset = 0xffffffffu;
+    bool has_exth = (read_be32(record.data() + 128) & 0x40u) != 0;
+    size_t exth = 16u + header_length;
+    if (has_exth && exth + 12 <= record.size() && std::memcmp(record.data() + exth, "EXTH", 4) == 0) {
+        uint32_t exth_length = read_be32(record.data() + exth + 4);
+        uint32_t exth_count = read_be32(record.data() + exth + 8);
+        size_t pos = exth + 12;
+        size_t limit = std::min(record.size(), exth + static_cast<size_t>(exth_length));
+        for (uint32_t i = 0; i < exth_count && pos + 8 <= limit; ++i) {
+            uint32_t type = read_be32(record.data() + pos);
+            uint32_t length = read_be32(record.data() + pos + 4);
+            if (length < 8 || length > limit - pos) break;
+            const uint8_t *data = record.data() + pos + 8;
+            size_t data_size = length - 8;
+            if (type == 100 && author.empty()) {
+                author = _encoding == 1252 ? cp1252_to_utf8(data, data_size)
+                                           : std::string(reinterpret_cast<const char *>(data), data_size);
+            } else if (type == 503 && data_size) {
+                title = _encoding == 1252 ? cp1252_to_utf8(data, data_size)
+                                          : std::string(reinterpret_cast<const char *>(data), data_size);
+            } else if (type == 201 && data_size == 4) {
+                cover_offset = read_be32(data);
+            }
+            pos += length;
+        }
+    }
+    while (!title.empty() && (title.back() == '\0' || title.back() == ' ')) title.pop_back();
+    if (title.empty()) title = "MOBI Book";
+    if (cover_offset != 0xffffffffu && _first_image_record != 0xffffffffu) {
+        _cover_href = resource_href(cover_offset + 1);
+    }
+    if (_compression == 17480 && !load_huff_dictionary()) return false;
+    return true;
+}
+
+bool MobiBook::load_huff_dictionary()
+{
+    if (_huff_record_index == 0xffffffffu || _huff_record_count < 2 ||
+        static_cast<uint64_t>(_huff_record_index) + _huff_record_count > _records.size()) {
+        _last_error = "Invalid HUFF/CDIC record range";
+        return false;
+    }
+    auto state = std::make_shared<HuffState>();
+    std::vector<uint8_t> huff;
+    if (!read_record(_huff_record_index, &huff) || huff.size() < 24 ||
+        std::memcmp(huff.data(), "HUFF\0\0\0\x18", 8) != 0) {
+        _last_error = "Invalid HUFF table";
+        return false;
+    }
+    uint32_t first_offset = read_be32(huff.data() + 8);
+    uint32_t second_offset = read_be32(huff.data() + 12);
+    if (first_offset > huff.size() || 1024 > huff.size() - first_offset ||
+        second_offset > huff.size() || 256 > huff.size() - second_offset) {
+        _last_error = "Truncated HUFF table";
+        return false;
+    }
+    for (unsigned i = 0; i < 256; ++i) {
+        uint32_t value = read_be32(huff.data() + first_offset + i * 4);
+        unsigned length = value & 0x1f;
+        bool terminal = (value & 0x80) != 0;
+        uint32_t upper = value >> 8;
+        if (length == 0 || length > 32 || (length <= 8 && !terminal)) {
+            _last_error = "Corrupt HUFF lookup entry";
+            return false;
+        }
+        if (length < 32) upper = static_cast<uint32_t>(
+            ((static_cast<uint64_t>(upper) + 1u) << (32 - length)) - 1u);
+        state->first[i] = {static_cast<uint8_t>(length), terminal, upper};
+    }
+    for (unsigned length = 1; length <= 32; ++length) {
+        uint32_t low = read_be32(huff.data() + second_offset + (length - 1) * 8);
+        uint32_t high = read_be32(huff.data() + second_offset + (length - 1) * 8 + 4);
+        state->min_code[length] = length == 32 ? low : low << (32 - length);
+        state->max_code[length] = length == 32 ? high : static_cast<uint32_t>(
+            ((static_cast<uint64_t>(high) + 1u) << (32 - length)) - 1u);
+    }
+
+    uint32_t total_phrases = 0;
+    for (uint32_t record_number = 1; record_number < _huff_record_count; ++record_number) {
+        std::vector<uint8_t> cdic;
+        if (!read_record(_huff_record_index + record_number, &cdic) || cdic.size() < 16 ||
+            std::memcmp(cdic.data(), "CDIC\0\0\0\x10", 8) != 0) {
+            _last_error = "Invalid CDIC table";
+            return false;
+        }
+        uint32_t phrases = read_be32(cdic.data() + 8);
+        uint32_t bits = read_be32(cdic.data() + 12);
+        if (bits > 16 || phrases == 0 || phrases > 1000000) {
+            _last_error = "Invalid CDIC phrase count";
+            return false;
+        }
+        if (total_phrases == 0) total_phrases = phrases;
+        uint32_t remaining = total_phrases > state->phrases.size()
+                                 ? total_phrases - static_cast<uint32_t>(state->phrases.size())
+                                 : 0;
+        uint32_t count = std::min<uint32_t>(1u << bits, remaining);
+        if (16u + count * 2u > cdic.size()) {
+            _last_error = "Truncated CDIC offsets";
+            return false;
+        }
+        for (uint32_t i = 0; i < count; ++i) {
+            uint16_t offset = read_be16(cdic.data() + 16 + i * 2);
+            size_t length_position = 16u + offset;
+            if (length_position + 2 > cdic.size()) {
+                _last_error = "Invalid CDIC phrase offset";
+                return false;
+            }
+            uint16_t encoded_length = read_be16(cdic.data() + length_position);
+            size_t length = encoded_length & 0x7fff;
+            if (length_position + 2 + length > cdic.size()) {
+                _last_error = "Truncated CDIC phrase";
+                return false;
+            }
+            HuffState::Phrase phrase;
+            phrase.bytes.assign(reinterpret_cast<const char *>(cdic.data() + length_position + 2), length);
+            phrase.ready = (encoded_length & 0x8000) != 0;
+            state->phrases.push_back(std::move(phrase));
+        }
+    }
+    if (state->phrases.empty()) {
+        _last_error = "Empty CDIC dictionary";
+        return false;
+    }
+    _huff = std::move(state);
+    ESP_LOGI(TAG, "HUFF/CDIC loaded records=%lu phrases=%u",
+             static_cast<unsigned long>(_huff_record_count),
+             static_cast<unsigned>(_huff->phrases.size()));
+    return true;
+}
+
+bool MobiBook::read_record(size_t index, std::vector<uint8_t> *out) const
+{
+    if (!out || !_file || index >= _records.size()) return false;
+    const Record &record = _records[index];
+    if (record.size == 0 || record.size > MAX_RECORD_BYTES) return false;
+    bool ok = std::fseek(_file, static_cast<long>(record.offset), SEEK_SET) == 0;
+    if (ok) {
+        out->resize(record.size);
+        ok = std::fread(out->data(), 1, out->size(), _file) == out->size();
+    }
+    if (!ok) out->clear();
+    return ok;
+}
+
+bool MobiBook::decode_text_record(size_t index, std::string *out) const
+{
+    std::vector<uint8_t> data;
+    if (!read_record(index, &data) || data.empty()) return false;
+    size_t trailing = trailing_data_size(data.data(), data.size(), _extra_data_flags);
+    if (trailing > data.size()) return false;
+    size_t payload = data.size() - trailing;
+    std::string decoded;
+    bool ok = false;
+    if (_compression == 1) {
+        decoded.assign(reinterpret_cast<const char *>(data.data()), payload);
+        ok = true;
+    } else if (_compression == 2) {
+        ok = palmdoc_decompress(data.data(), payload, &decoded);
+    } else if (_compression == 17480 && _huff) {
+        ok = _huff->decode(data.data(), payload, &decoded);
+    }
+    if (!ok) return false;
+    *out = _encoding == 1252
+               ? cp1252_to_utf8(reinterpret_cast<const uint8_t *>(decoded.data()), decoded.size())
+               : std::move(decoded);
+    return true;
+}
+
+bool MobiBook::build_text_index()
+{
+    std::vector<uint64_t> boundaries{0};
+    uint64_t last_boundary = 0;
+    std::string tail;
+    for (uint16_t i = 1; i <= _text_record_count; ++i) {
+        std::string decoded;
+        if (!decode_text_record(i, &decoded)) {
+            _last_error = "Failed to decompress MOBI text record " + std::to_string(i);
+            return false;
+        }
+        uint64_t start = _decoded_text_length;
+        _text_records.push_back({i, start, static_cast<uint32_t>(decoded.size())});
+
+        std::string scan = tail + decoded;
+        std::string lower = lower_ascii(scan);
+        size_t pos = 0;
+        while ((pos = lower.find("<mbp:pagebreak", pos)) != std::string::npos) {
+            uint64_t absolute = start >= tail.size() ? start - tail.size() + pos : pos;
+            if (absolute > last_boundary + MIN_SECTION_BYTES) {
+                boundaries.push_back(absolute);
+                last_boundary = absolute;
+            }
+            pos += 14;
+        }
+        if (start > last_boundary + TARGET_SECTION_BYTES) {
+            size_t split = 0;
+            size_t paragraph_end = lower.find("</p>", tail.size());
+            size_t division_end = lower.find("</div>", tail.size());
+            if (paragraph_end != std::string::npos) split = paragraph_end + 4 - tail.size();
+            else if (division_end != std::string::npos) split = division_end + 6 - tail.size();
+            uint64_t boundary = start + std::min(split, decoded.size());
+            if (boundary > last_boundary + MIN_SECTION_BYTES) {
+                boundaries.push_back(boundary);
+                last_boundary = boundary;
+            }
+        }
+        _decoded_text_length += decoded.size();
+        tail = scan.size() > 64 ? scan.substr(scan.size() - 64) : scan;
+    }
+    if (_decoded_text_length == 0) {
+        _last_error = "MOBI document has no text";
+        return false;
+    }
+    if (boundaries.back() != _decoded_text_length) boundaries.push_back(_decoded_text_length);
+    std::sort(boundaries.begin(), boundaries.end());
+    boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
+
+    for (size_t i = 0; i + 1 < boundaries.size(); ++i) {
+        if (boundaries[i + 1] <= boundaries[i]) continue;
+        MobiSectionItem section;
+        section.id = "section-" + std::to_string(_sections.size());
+        section.href = section.id + ".html";
+        section.start = boundaries[i];
+        section.end = boundaries[i + 1];
+        section.uncompressed_size = static_cast<uint32_t>(
+            std::min<uint64_t>(0xffffffffu, section.end - section.start));
+        _sections.push_back(std::move(section));
+    }
+
+    for (size_t i = 0; i < _sections.size(); ++i) {
+        std::string html;
+        std::string label;
+        // Chapter labels normally occur at the beginning of a section. Probe
+        // only a small prefix instead of decoding the complete book a second
+        // time while creating the first metadata cache.
+        uint64_t probe_end = std::min<uint64_t>(_sections[i].end, _sections[i].start + 8 * 1024);
+        if (read_text_range(_sections[i].start, probe_end, &html)) label = first_heading(html);
+        if (label.empty()) label = "Section " + std::to_string(i + 1);
+        MobiTocItem item;
+        item.title = std::move(label);
+        item.href = _sections[i].href;
+        item.spine_index = static_cast<int>(i);
+        _toc.push_back(std::move(item));
+    }
+    return !_sections.empty();
+}
+
+bool MobiBook::read_text_range(uint64_t start, uint64_t end, std::string *out) const
+{
+    if (!out || start >= end || end > _decoded_text_length) return false;
+    out->clear();
+    out->reserve(static_cast<size_t>(std::min<uint64_t>(end - start, TARGET_SECTION_BYTES + 65536)));
+    for (const TextRecord &record : _text_records) {
+        uint64_t record_end = record.start + record.length;
+        if (record_end <= start) continue;
+        if (record.start >= end) break;
+        std::string decoded;
+        if (!decode_text_record(record.record_index, &decoded)) return false;
+        uint64_t from = start > record.start ? start - record.start : 0;
+        uint64_t to = std::min<uint64_t>(decoded.size(), end - record.start);
+        if (from < to) out->append(decoded, static_cast<size_t>(from), static_cast<size_t>(to - from));
+    }
+    return !out->empty();
+}
+
+bool MobiBook::read_section_to_string(const std::string &href, std::string *out) const
+{
+    const MobiSectionItem *section = nullptr;
+    for (const auto &candidate : _sections) {
+        if (candidate.href == href) {
+            section = &candidate;
+            break;
+        }
+    }
+    if (!section || !read_text_range(section->start, section->end, out)) return false;
+
+    std::string normalized;
+    normalized.reserve(out->size() + 128);
+    size_t pos = 0;
+    while (pos < out->size()) {
+        size_t start = out->find('<', pos);
+        if (start == std::string::npos) {
+            normalized.append(*out, pos, std::string::npos);
+            break;
+        }
+        normalized.append(*out, pos, start - pos);
+        size_t end = out->find('>', start + 1);
+        if (end == std::string::npos) {
+            normalized.append(*out, start, std::string::npos);
+            break;
+        }
+        std::string tag = out->substr(start + 1, end - start - 1);
+        std::string lower = lower_ascii(tag);
+        if (lower.find("mbp:pagebreak") == 0) {
+            normalized += "<pagebreak/>";
+        } else if (lower.find("img") == 0 && lower.find("src=") == std::string::npos) {
+            uint32_t recindex = 0;
+            if (parse_decimal_attr(tag, "recindex", &recindex) && recindex > 0) {
+                while (!tag.empty() && std::isspace(static_cast<unsigned char>(tag.back()))) tag.pop_back();
+                bool self_closing = !tag.empty() && tag.back() == '/';
+                if (self_closing) tag.pop_back();
+                normalized += '<';
+                normalized += tag;
+                normalized += " src=\"" + resource_href(recindex) + "\"";
+                normalized += self_closing ? "/>" : ">";
+            } else {
+                normalized.append(*out, start, end - start + 1);
+            }
+        } else {
+            normalized.append(*out, start, end - start + 1);
+        }
+        pos = end + 1;
+    }
+    *out = std::move(normalized);
+    return true;
+}
+
+std::string MobiBook::resource_href(uint32_t resource_index) const
+{
+    if (_first_image_record == 0xffffffffu || resource_index == 0) return std::string();
+    size_t record_index = static_cast<size_t>(_first_image_record) + resource_index - 1;
+    std::vector<uint8_t> data;
+    std::string ext = ".img";
+    if (read_record(record_index, &data)) {
+        if (data.size() >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff) ext = ".jpg";
+        else if (data.size() >= 8 && std::memcmp(data.data(), "\x89PNG\r\n\x1a\n", 8) == 0) ext = ".png";
+        else if (data.size() >= 2 && data[0] == 'B' && data[1] == 'M') ext = ".bmp";
+        else if (data.size() >= 6 && std::memcmp(data.data(), "GIF8", 4) == 0) ext = ".gif";
+    }
+    char name[40];
+    std::snprintf(name, sizeof(name), "res/%05lu%s", static_cast<unsigned long>(resource_index), ext.c_str());
+    return name;
+}
+
+bool MobiBook::extract_resource_to_file(const std::string &href, const std::string &out_path) const
+{
+    size_t slash = href.find_last_of('/');
+    size_t start = slash == std::string::npos ? 0 : slash + 1;
+    char *end = nullptr;
+    unsigned long resource_index = std::strtoul(href.c_str() + start, &end, 10);
+    if (resource_index == 0 || end == href.c_str() + start || _first_image_record == 0xffffffffu) return false;
+    size_t record_index = static_cast<size_t>(_first_image_record) + resource_index - 1;
+    std::vector<uint8_t> data;
+    if (!read_record(record_index, &data)) return false;
+    FILE *fp = std::fopen(out_path.c_str(), "wb");
+    if (!fp) return false;
+    bool ok = std::fwrite(data.data(), 1, data.size(), fp) == data.size();
+    if (std::fclose(fp) != 0) ok = false;
+    if (!ok) std::remove(out_path.c_str());
+    return ok;
+}

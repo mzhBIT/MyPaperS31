@@ -1,8 +1,9 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "activities/ReaderBackgroundPickerActivity.h"
 #include "activities/ReaderOverlay.h"
 #include "parser/epub_html.h"
-#include "parser/epub_parser.h"
+#include "parser/reflow_book.h"
 #include "recent_books.h"
 #include "renderer/CoverThumbnail.h"
 #include "reader_font.h"
@@ -13,8 +14,10 @@
 #include "renderer/TurboJpegDecoder.h"
 #include "storage/app_paths.h"
 #include "ui/SystemFont.h"
+#include "ui/reader_background.h"
 
 #include <M5Unified.h>
+#include "lgfx/v1/platforms/esp32/MyPaper_EPD_Config.hpp"
 #include <algorithm>
 #include <cstdio>
 #include <cstdint>
@@ -28,12 +31,20 @@
 #include <unordered_map>
 #include <vector>
 
-static const char *TAG = "EPUB_READER";
+static const char *TAG = "REFLOW_READER";
 static const int TOP_H = 50;
 static const uint32_t EPUB_PROGRESS_MAGIC = 0x45504231; // EPB1
 static const uint32_t EPUB_PROGRESS_VERSION = 2;
+static const uint32_t MOBI_PROGRESS_MAGIC = 0x4d4f4231; // MOB1
+static const uint32_t MOBI_PROGRESS_VERSION = 1;
 static const uint32_t EPUB_LAYOUT_VERSION = 5;
-static EpubBook g_epub;
+static const int64_t PROGRESS_SAVE_DELAY_US = 5LL * 1000 * 1000;
+#if MYPAPER_EPD_USE_2D_ENGINE
+static constexpr bool READER_PREFETCH_FRAMEBUFFER_ENABLED = false;
+#else
+static constexpr bool READER_PREFETCH_FRAMEBUFFER_ENABLED = false;
+#endif
+static ReflowBook g_epub;
 
 extern void launch_reader_font_picker();
 
@@ -108,11 +119,6 @@ static std::string progress_cache_key(const char *path)
     char buf[32];
     snprintf(buf, sizeof(buf), "%08lx", (unsigned long)h);
     return buf;
-}
-
-static void ensure_epub_progress_root()
-{
-    app_paths::ensure_dir(app_paths::epub_progress_dir());
 }
 
 static bool file_exists(const std::string &path)
@@ -230,14 +236,17 @@ public:
 
         _ok = g_epub.open(path);
         if (_ok) {
+            _is_mobi = g_epub.is_mobi();
+            _progress_root = _is_mobi ? app_paths::mobi_progress_dir() : app_paths::epub_progress_dir();
+            _cache_root = _is_mobi ? app_paths::mobi_cache_dir() : app_paths::epub_cache_dir();
             std::string key = progress_cache_key(path);
-            ensure_epub_progress_root();
-            _progress_path = std::string(app_paths::epub_progress_dir()) + "/" + key + ".pos";
-            _image_cache_dir = std::string(app_paths::epub_cache_dir()) + "/" + key;
-            app_paths::ensure_dir(app_paths::epub_cache_dir());
+            app_paths::ensure_dir(_progress_root.c_str());
+            _progress_path = _progress_root + "/" + key + ".pos";
+            _image_cache_dir = _cache_root + "/" + key;
+            app_paths::ensure_dir(_cache_root.c_str());
             mkdir(_image_cache_dir.c_str(), 0);
             std::string cover_path = ensure_cover_cache();
-            recent_book_save(path, "epub", g_epub.title.c_str(), cover_path.c_str());
+            recent_book_save(path, g_epub.type_name(), g_epub.title.c_str(), cover_path.c_str());
             refresh_text_renderer();
             _layout_sig = layout_signature();
             int saved_spine = 0;
@@ -252,7 +261,7 @@ public:
 
     ~EpubReaderActivity()
     {
-        save_progress();
+        flush_progress(true);
         release_runtime_cache();
         g_epub.close();
     }
@@ -276,6 +285,12 @@ public:
         redraw_all(epd_mode_t::epd_quality);
     }
 
+    void loop() override
+    {
+        run_page_prefetch();
+        flush_progress(false);
+    }
+
     bool on_key(int key) override
     {
         int w = M5.Display.width();
@@ -297,13 +312,13 @@ public:
         }
         if (key == APP_KEY_UP) {
             prev_page();
-            save_progress();
+            mark_progress_dirty();
             redraw(w, h);
             return true;
         }
         if (key == APP_KEY_DOWN || key == APP_KEY_OK) {
             next_page();
-            save_progress();
+            mark_progress_dirty();
             redraw(w, h);
             return true;
         }
@@ -318,9 +333,10 @@ public:
     bool jump_to_spine(int index)
     {
         if (!_ok || index < 0 || index >= g_epub.spine_count()) return false;
+        invalidate_page_prefetch();
         if (!load_spine(index)) return false;
         _page_index = 0;
-        save_progress();
+        mark_progress_dirty();
         return true;
     }
 
@@ -346,13 +362,13 @@ public:
         if (!_ok) return false;
         if (event.type == TouchEventType::SwipeLeft) {
             next_page();
-            save_progress();
+            mark_progress_dirty();
             redraw(w, h);
             return true;
         }
         if (event.type == TouchEventType::SwipeRight) {
             prev_page();
-            save_progress();
+            mark_progress_dirty();
             redraw(w, h);
             return true;
         }
@@ -371,7 +387,7 @@ public:
         } else {
             prev_page();
         }
-        save_progress();
+        mark_progress_dirty();
         redraw(w, h);
         return true;
     }
@@ -417,6 +433,10 @@ private:
         if (action == ReaderOverlay::Action::None) return;
         if (action == ReaderOverlay::Action::OpenFont) {
             launch_reader_font_picker();
+            return;
+        }
+        if (action == ReaderOverlay::Action::OpenBackground) {
+            launch_reader_background_picker();
             return;
         }
 
@@ -476,6 +496,20 @@ private:
         int64_t total_ms = 0;
     };
 
+    struct PagePrefetch {
+        bool pending = false;
+        bool valid = false;
+        bool has_pages = false;
+        bool glyph_ready = false;
+        bool images_ready = false;
+        bool framebuffer_ready = false;
+        int spine = -1;
+        int page = -1;
+        uint32_t layout_sig = 0;
+        document_layout::Pages pages;
+        lgfx::LGFX_Sprite *framebuffer = nullptr;
+    };
+
     bool _ok = false;
     bool _seen_show = false;
     int _spine_index = 0;
@@ -484,8 +518,16 @@ private:
     uint32_t _layout_sig = 0;
     std::string _progress_path;
     std::string _image_cache_dir;
+    std::string _progress_root;
+    std::string _cache_root;
+    bool _is_mobi = false;
+    bool _progress_dirty = false;
+    int64_t _progress_dirty_at = 0;
+    int _non_quality_refresh_count = 0;
+    bool _post_image_quality_pending = false;
     document_layout::Pages _pages;
     std::unordered_map<std::string, CachedImage> _image_cache;
+    PagePrefetch _prefetch;
 
     void release_runtime_cache()
     {
@@ -495,6 +537,7 @@ private:
         size_t image_count = _image_cache.size();
 
         document_layout::Pages().swap(_pages);
+        invalidate_page_prefetch();
         std::unordered_map<std::string, CachedImage>().swap(_image_cache);
         _page_count = 0;
         _page_index = 0;
@@ -519,7 +562,7 @@ private:
         char buf[192];
         snprintf(buf,
                  sizeof(buf),
-                 ";algo=%lu;doc_algo=%lu;w=%d;h=%d;cw=%d;lpp=%d;m=%d,%d,%d,%d;indent=%d;paragraph=%d;spine=%d;file=%ld",
+                 ";algo=%lu;doc_algo=%lu;w=%d;h=%d;cw=%d;lpp=%d;m=%d,%d,%d,%d;indent=%d;paragraph=%d;header=%d;spine=%d;file=%ld",
                  (unsigned long)EPUB_LAYOUT_VERSION,
                  (unsigned long)document_layout::ALGORITHM_VERSION,
                  (int)M5.Display.width(),
@@ -532,6 +575,7 @@ private:
                  style.margin_bottom,
                  style.first_line_indent,
                  style.paragraph_spacing,
+                 header_height(),
                  g_epub.spine_count(),
                  file_size);
         sig += buf;
@@ -579,7 +623,9 @@ private:
                   fread(&saved_position, 1, sizeof(saved_position), fp) == sizeof(saved_position);
         fclose(fp);
 
-        if (!ok || magic != EPUB_PROGRESS_MAGIC || version != EPUB_PROGRESS_VERSION) {
+        uint32_t expected_magic = _is_mobi ? MOBI_PROGRESS_MAGIC : EPUB_PROGRESS_MAGIC;
+        uint32_t expected_version = _is_mobi ? MOBI_PROGRESS_VERSION : EPUB_PROGRESS_VERSION;
+        if (!ok || magic != expected_magic || version != expected_version) {
             ESP_LOGI(TAG, "progress ignored ok=%d magic=%08lx version=%lu layout=%08lx/%08lx",
                      ok ? 1 : 0,
                      (unsigned long)magic,
@@ -600,16 +646,27 @@ private:
         return true;
     }
 
-    void save_progress()
+    void mark_progress_dirty()
     {
         if (!_ok || _progress_path.empty()) return;
-        ensure_epub_progress_root();
+        _progress_dirty = true;
+        _progress_dirty_at = esp_timer_get_time();
+    }
+
+    void flush_progress(bool force)
+    {
+        if (!_ok || _progress_path.empty()) return;
+        if (!_progress_dirty && !force) return;
+        if (!force && esp_timer_get_time() - _progress_dirty_at < PROGRESS_SAVE_DELAY_US) return;
+
+        const int64_t t0 = esp_timer_get_time();
+        app_paths::ensure_dir(_progress_root.c_str());
 
         FILE *fp = fopen(_progress_path.c_str(), "wb");
         if (!fp) return;
 
-        uint32_t magic = EPUB_PROGRESS_MAGIC;
-        uint32_t version = EPUB_PROGRESS_VERSION;
+        uint32_t magic = _is_mobi ? MOBI_PROGRESS_MAGIC : EPUB_PROGRESS_MAGIC;
+        uint32_t version = _is_mobi ? MOBI_PROGRESS_VERSION : EPUB_PROGRESS_VERSION;
         uint32_t spine = (uint32_t)std::max(0, _spine_index);
         uint64_t position = page_position(_page_index);
         fwrite(&magic, 1, sizeof(magic), fp);
@@ -617,12 +674,23 @@ private:
         fwrite(&_layout_sig, 1, sizeof(_layout_sig), fp);
         fwrite(&spine, 1, sizeof(spine), fp);
         fwrite(&position, 1, sizeof(position), fp);
+        if (_is_mobi) {
+            uint32_t section_count = static_cast<uint32_t>(g_epub.spine_count());
+            uint32_t section_size = spine < section_count
+                                        ? g_epub.spine_item(static_cast<int>(spine)).uncompressed_size
+                                        : 0;
+            fwrite(&section_count, 1, sizeof(section_count), fp);
+            fwrite(&section_size, 1, sizeof(section_size), fp);
+        }
         fclose(fp);
-        ESP_LOGI(TAG, "progress saved spine=%lu position=%llu page=%d/%d",
+        _progress_dirty = false;
+        ESP_LOGI(TAG, "progress saved spine=%lu position=%llu page=%d/%d force=%d time=%lld ms",
                  (unsigned long)spine + 1,
                  (unsigned long long)position,
                  _page_index + 1,
-                 _page_count);
+                 _page_count,
+                 force ? 1 : 0,
+                 (esp_timer_get_time() - t0) / 1000);
     }
 
     int content_x() const
@@ -632,7 +700,17 @@ private:
 
     int content_y() const
     {
-        return TOP_H + reader_style_get().margin_top;
+        return header_height() + reader_style_get().margin_top;
+    }
+
+    bool header_visible() const
+    {
+        return reader_style_get().hide_header == 0;
+    }
+
+    int header_height() const
+    {
+        return header_visible() ? TOP_H : 0;
     }
 
     int content_width() const
@@ -645,7 +723,7 @@ private:
     int content_height() const
     {
         ReaderStyle style = reader_style_get();
-        int height = M5.Display.height() - TOP_H - style.margin_top - style.margin_bottom;
+        int height = M5.Display.height() - header_height() - style.margin_top - style.margin_bottom;
         return height > 100 ? height : 100;
     }
 
@@ -654,14 +732,96 @@ private:
         ReaderStyle style = reader_style_get();
         int line_h = reader_text_renderer().lineHeight();
         if (line_h <= 0) line_h = 48;
-        int usable_h = M5.Display.height() - TOP_H - style.margin_top - style.margin_bottom;
+        int usable_h = M5.Display.height() - header_height() - style.margin_top - style.margin_bottom;
         int n = usable_h / line_h;
         return n > 1 ? n : 1;
+    }
+
+    bool current_page_has_visible_image() const
+    {
+        if (!reader_style_get().show_images) return false;
+        if (_page_index < 0 || _page_index >= (int)_pages.size()) return false;
+        const auto &page = _pages[(size_t)_page_index];
+        for (const auto &item : page) {
+            if (item.type == PageItemType::Image && is_supported_image_href(item.resource)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    epd_mode_t select_page_refresh_mode()
+    {
+        ReaderStyle style = reader_style_get();
+        epd_mode_t preferred = epub_reader_epd_mode();
+        if (preferred == epd_mode_t::epd_quality) {
+            _non_quality_refresh_count = 0;
+            _post_image_quality_pending = false;
+            return preferred;
+        }
+
+        bool image_page = current_page_has_visible_image();
+        if (image_page) {
+            ESP_LOGI(TAG,
+                     "force quality refresh: image page spine=%d page=%d/%d reset_count=%d",
+                     _spine_index + 1,
+                     _page_index + 1,
+                     _page_count,
+                     _non_quality_refresh_count);
+            _non_quality_refresh_count = 0;
+            _post_image_quality_pending = true;
+            return epd_mode_t::epd_quality;
+        }
+
+        if (_post_image_quality_pending) {
+            ESP_LOGI(TAG,
+                     "force quality refresh: post-image cleanup spine=%d page=%d/%d",
+                     _spine_index + 1,
+                     _page_index + 1,
+                     _page_count);
+            _non_quality_refresh_count = 0;
+            _post_image_quality_pending = false;
+            return epd_mode_t::epd_quality;
+        }
+
+        int limit = std::min(60, std::max(1, style.full_refresh_pages));
+        if (_non_quality_refresh_count + 1 >= limit) {
+            ESP_LOGI(TAG,
+                     "force quality refresh: interval=%d preferred=%s spine=%d page=%d/%d",
+                     limit,
+                     reader_style_refresh_mode_name(style.refresh_mode),
+                     _spine_index + 1,
+                     _page_index + 1,
+                     _page_count);
+            _non_quality_refresh_count = 0;
+            return epd_mode_t::epd_quality;
+        }
+
+        ++_non_quality_refresh_count;
+        return preferred;
+    }
+
+    void note_page_refresh_mode(epd_mode_t mode)
+    {
+        if (mode == epd_mode_t::epd_quality) {
+            _non_quality_refresh_count = 0;
+            if (epub_reader_epd_mode() == epd_mode_t::epd_quality) {
+                _post_image_quality_pending = false;
+            } else if (current_page_has_visible_image()) {
+                _post_image_quality_pending = true;
+                ESP_LOGI(TAG,
+                         "post-image cleanup armed by quality refresh spine=%d page=%d/%d",
+                         _spine_index + 1,
+                         _page_index + 1,
+                         _page_count);
+            }
+        }
     }
 
     bool load_spine(int index)
     {
         if (!_ok || index < 0 || index >= g_epub.spine_count()) return false;
+        invalidate_page_prefetch();
 
         int64_t t0 = esp_timer_get_time();
         std::string xhtml;
@@ -732,7 +892,7 @@ private:
             if (file_exists(out_path)) remove(out_path.c_str());
             return thumbnail_path;
         }
-        app_paths::ensure_dir(app_paths::epub_cache_dir());
+        app_paths::ensure_dir(_cache_root.c_str());
         mkdir(_image_cache_dir.c_str(), 0);
         if (!file_exists(out_path) && !g_epub.extract_item_to_file(href, out_path)) {
             ESP_LOGW(TAG, "cover extract failed href=%s path=%s", href.c_str(), out_path.c_str());
@@ -775,7 +935,7 @@ private:
             return false;
         }
 
-        app_paths::ensure_dir(app_paths::epub_cache_dir());
+        app_paths::ensure_dir(_cache_root.c_str());
         mkdir(_image_cache_dir.c_str(), 0);
         std::string out_path = image_cache_path(href);
         bool file_cached = file_exists(out_path);
@@ -830,7 +990,15 @@ private:
         return ok;
     }
 
-    bool draw_cached_image(const CachedImage &image, int x, int y, int w, int h, float scale, ImageDrawStats *stats = nullptr)
+    bool draw_cached_image(lgfx::LGFXBase &gfx,
+                           const CachedImage &image,
+                           int x,
+                           int y,
+                           int w,
+                           int h,
+                           float scale,
+                           bool allow_hw_jpeg,
+                           ImageDrawStats *stats = nullptr)
     {
         int64_t t0 = esp_timer_get_time();
         if (stats) *stats = ImageDrawStats();
@@ -838,7 +1006,7 @@ private:
         if (image.ext == ".jpg") {
             if (image.jpg_progressive) {
                 turbo_jpeg::DrawStats sw;
-                ok = turbo_jpeg::draw_file(M5.Display, image.path.c_str(), x, y, w, h, &sw);
+                ok = turbo_jpeg::draw_file(gfx, image.path.c_str(), x, y, w, h, &sw);
                 if (stats) {
                     stats->software_attempted = sw.attempted;
                     stats->software_ok = ok;
@@ -854,21 +1022,23 @@ private:
                 if (stats) stats->total_ms = (esp_timer_get_time() - t0) / 1000;
                 return ok;
             }
-            p4_jpeg::DrawStats hw;
-            ok = p4_jpeg::draw_file(M5.Display, image.path.c_str(), x, y, w, h, &hw);
-            if (stats) {
-                stats->hardware_attempted = hw.attempted;
-                stats->hardware_ok = ok;
-                stats->hardware_read_ms = hw.read_ms;
-                stats->hardware_header_ms = hw.header_ms;
-                stats->hardware_decode_ms = hw.decode_ms;
-                stats->hardware_scale_ms = hw.scale_ms;
-                stats->hardware_push_ms = hw.push_ms;
-                stats->hardware_total_ms = hw.total_ms;
+            if (allow_hw_jpeg) {
+                p4_jpeg::DrawStats hw;
+                ok = p4_jpeg::draw_file(M5.Display, image.path.c_str(), x, y, w, h, &hw);
+                if (stats) {
+                    stats->hardware_attempted = hw.attempted;
+                    stats->hardware_ok = ok;
+                    stats->hardware_read_ms = hw.read_ms;
+                    stats->hardware_header_ms = hw.header_ms;
+                    stats->hardware_decode_ms = hw.decode_ms;
+                    stats->hardware_scale_ms = hw.scale_ms;
+                    stats->hardware_push_ms = hw.push_ms;
+                    stats->hardware_total_ms = hw.total_ms;
+                }
             }
             int64_t t_file = esp_timer_get_time();
             if (!ok) {
-                ok = M5.Display.drawJpgFile(image.path.c_str(), x, y, w, h, 0, 0, scale, scale);
+                ok = gfx.drawJpgFile(image.path.c_str(), x, y, w, h, 0, 0, scale, scale);
                 if (stats) stats->file_decode_ms = (esp_timer_get_time() - t_file) / 1000;
                 if (ok && stats) stats->file_decode_ok = true;
             }
@@ -881,13 +1051,13 @@ private:
                         stats->fallback_read_ms = (esp_timer_get_time() - t_read) / 1000;
                     }
                     int64_t t_decode = esp_timer_get_time();
-                    ok = M5.Display.drawJpg(bytes.data(), bytes.size(), x, y, w, h, 0, 0, scale, scale);
+                    ok = gfx.drawJpg(bytes.data(), bytes.size(), x, y, w, h, 0, 0, scale, scale);
                     if (stats) stats->fallback_decode_ms = (esp_timer_get_time() - t_decode) / 1000;
                 }
             }
         } else if (image.ext == ".png") {
             int64_t t_file = esp_timer_get_time();
-            ok = M5.Display.drawPngFile(image.path.c_str(), x, y, w, h, 0, 0, scale, scale);
+            ok = gfx.drawPngFile(image.path.c_str(), x, y, w, h, 0, 0, scale, scale);
             if (stats) stats->file_decode_ms = (esp_timer_get_time() - t_file) / 1000;
             if (ok && stats) stats->file_decode_ok = true;
             if (!ok) {
@@ -899,13 +1069,13 @@ private:
                         stats->fallback_read_ms = (esp_timer_get_time() - t_read) / 1000;
                     }
                     int64_t t_decode = esp_timer_get_time();
-                    ok = M5.Display.drawPng(bytes.data(), bytes.size(), x, y, w, h, 0, 0, scale, scale);
+                    ok = gfx.drawPng(bytes.data(), bytes.size(), x, y, w, h, 0, 0, scale, scale);
                     if (stats) stats->fallback_decode_ms = (esp_timer_get_time() - t_decode) / 1000;
                 }
             }
         } else if (image.ext == ".bmp") {
             int64_t t_file = esp_timer_get_time();
-            ok = M5.Display.drawBmpFile(image.path.c_str(), x, y, w, h, 0, 0, scale, scale);
+            ok = gfx.drawBmpFile(image.path.c_str(), x, y, w, h, 0, 0, scale, scale);
             if (stats) stats->file_decode_ms = (esp_timer_get_time() - t_file) / 1000;
             if (ok && stats) stats->file_decode_ok = true;
             if (!ok) {
@@ -917,7 +1087,7 @@ private:
                         stats->fallback_read_ms = (esp_timer_get_time() - t_read) / 1000;
                     }
                     int64_t t_decode = esp_timer_get_time();
-                    ok = M5.Display.drawBmp(bytes.data(), bytes.size(), x, y, w, h, 0, 0, scale, scale);
+                    ok = gfx.drawBmp(bytes.data(), bytes.size(), x, y, w, h, 0, 0, scale, scale);
                     if (stats) stats->fallback_decode_ms = (esp_timer_get_time() - t_decode) / 1000;
                 }
             }
@@ -926,17 +1096,28 @@ private:
         return ok;
     }
 
-    void draw_image_placeholder(int x, int y, int w, int h, const char *message)
+    bool draw_cached_image(const CachedImage &image, int x, int y, int w, int h, float scale, ImageDrawStats *stats = nullptr)
+    {
+        return draw_cached_image(M5.Display, image, x, y, w, h, scale, true, stats);
+    }
+
+    void draw_image_placeholder(lgfx::LGFXBase &gfx, int x, int y, int w, int h, const char *message)
     {
         int box_h = std::min(h, 120);
         int yy = y + std::max(0, (h - box_h) / 2);
-        M5.Display.drawRect(x, yy, w, box_h, TFT_BLACK);
-        M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-        system_font::draw_center(M5.Display, message, x + w / 2, yy + 32);
+        gfx.drawRect(x, yy, w, box_h, TFT_BLACK);
+        gfx.setTextColor(TFT_BLACK, TFT_WHITE);
+        system_font::draw_center(gfx, message, x + w / 2, yy + 32);
     }
 
-    void build_pages(std::vector<EpubContentBlock> &blocks)
+    void draw_image_placeholder(int x, int y, int w, int h, const char *message)
     {
+        draw_image_placeholder(M5.Display, x, y, w, h, message);
+    }
+
+    bool paginate_blocks(std::vector<EpubContentBlock> &blocks, document_layout::Pages *out_pages)
+    {
+        if (!out_pages) return false;
         auto &renderer = reader_text_renderer();
         int line_h = renderer.lineHeight();
         if (line_h <= 0) line_h = 48;
@@ -987,6 +1168,7 @@ private:
         int fullwidth_advance = renderer.measureFullwidthCellForLayout();
         options.first_line_indent = fullwidth_advance * reader_style.first_line_indent;
         options.paragraph_spacing_percent = reader_style.paragraph_spacing * 10;
+        options.ignore_tiny_declared_image_size = _is_mobi;
         options.layout_paragraph = [](void *context, const std::string &text, int width, int indent) {
             return static_cast<TextRenderer *>(context)->layoutUtf8Paragraph(text, width, indent);
         };
@@ -1009,9 +1191,9 @@ private:
             return true;
         };
         options.image_context = this;
-        _pages = document_layout::paginate(document_blocks, options);
+        *out_pages = document_layout::paginate(document_blocks, options);
 
-        for (const auto &page : _pages) {
+        for (const auto &page : *out_pages) {
             for (const auto &item : page) {
                 if (item.type != PageItemType::Image) continue;
                 ESP_LOGI(TAG,
@@ -1023,9 +1205,256 @@ private:
                          item.fitted_current_page ? 1 : 0);
             }
         }
+        return true;
+    }
+
+    void build_pages(std::vector<EpubContentBlock> &blocks)
+    {
+        paginate_blocks(blocks, &_pages);
 
         _page_count = (int)_pages.size();
         _page_index = std::min(_page_index, std::max(0, _page_count - 1));
+    }
+
+    bool load_spine_pages(int index, document_layout::Pages *out_pages)
+    {
+        if (!_ok || index < 0 || index >= g_epub.spine_count() || !out_pages) return false;
+
+        int64_t t0 = esp_timer_get_time();
+        std::string xhtml;
+        const auto &spine = g_epub.spine_item(index);
+        if (!g_epub.read_item_to_string(spine.href, &xhtml)) {
+            ESP_LOGW(TAG, "prefetch read spine failed index=%d href=%s", index, spine.href.c_str());
+            return false;
+        }
+        int64_t t_read = esp_timer_get_time();
+
+        std::vector<EpubContentBlock> blocks;
+        if (!epub_parse_xhtml_blocks(xhtml, spine.href, &blocks)) {
+            ESP_LOGW(TAG, "prefetch parse spine failed index=%d href=%s", index, spine.href.c_str());
+            return false;
+        }
+        int64_t t_parse = esp_timer_get_time();
+
+        if (!paginate_blocks(blocks, out_pages)) return false;
+        int64_t t_layout = esp_timer_get_time();
+
+        ESP_LOGI(TAG,
+                 "prefetch load_spine index=%d/%d href=%s blocks=%u pages=%u read=%lld parse=%lld layout=%lld total=%lld ms",
+                 index + 1,
+                 g_epub.spine_count(),
+                 spine.href.c_str(),
+                 (unsigned)blocks.size(),
+                 (unsigned)out_pages->size(),
+                 (t_read - t0) / 1000,
+                 (t_parse - t_read) / 1000,
+                 (t_layout - t_parse) / 1000,
+                 (t_layout - t0) / 1000);
+        return true;
+    }
+
+    std::string page_text_for_prepare(const document_layout::Page &page) const
+    {
+        std::string page_text;
+        for (const auto &item : page) {
+            if (item.type == PageItemType::Text && !item.text.empty()) {
+                page_text += item.text;
+                page_text += '\n';
+            }
+        }
+        return page_text;
+    }
+
+    bool prefetch_matches(int spine, int page) const
+    {
+        return _prefetch.valid &&
+               _prefetch.layout_sig == _layout_sig &&
+               _prefetch.spine == spine &&
+               _prefetch.page == page;
+    }
+
+    void invalidate_page_prefetch()
+    {
+        if (_prefetch.framebuffer) {
+            delete _prefetch.framebuffer;
+            _prefetch.framebuffer = nullptr;
+        }
+        _prefetch.pending = false;
+        _prefetch.valid = false;
+        _prefetch.has_pages = false;
+        _prefetch.glyph_ready = false;
+        _prefetch.images_ready = false;
+        _prefetch.framebuffer_ready = false;
+        _prefetch.spine = -1;
+        _prefetch.page = -1;
+        _prefetch.layout_sig = 0;
+        document_layout::Pages().swap(_prefetch.pages);
+    }
+
+    void schedule_page_prefetch()
+    {
+        if (!_ok || _overlay.visible()) return;
+        _prefetch.pending = true;
+    }
+
+    bool find_next_readable_page(int *spine, int *page, bool *needs_spine_pages)
+    {
+        if (!_ok || !spine || !page || !needs_spine_pages) return false;
+        if (_page_index + 1 < _page_count) {
+            *spine = _spine_index;
+            *page = _page_index + 1;
+            *needs_spine_pages = false;
+            return true;
+        }
+
+        for (int i = _spine_index + 1; i < g_epub.spine_count(); ++i) {
+            *spine = i;
+            *page = 0;
+            *needs_spine_pages = true;
+            return true;
+        }
+        return false;
+    }
+
+    void warm_page_images(const document_layout::Page &page)
+    {
+        for (const auto &item : page) {
+            if (item.type != PageItemType::Image || !is_supported_image_href(item.resource)) continue;
+            CachedImage image;
+            ImageLoadStats stats;
+            ensure_cached_image(item.resource, &image, &stats);
+            vTaskDelay(1);
+        }
+    }
+
+    bool render_prefetch_framebuffer(PagePrefetch *prefetch, const document_layout::Page &page)
+    {
+        if (!READER_PREFETCH_FRAMEBUFFER_ENABLED) return false;
+        if (!prefetch) return false;
+        if (prefetch->spine != _spine_index) return false;
+        int w = M5.Display.width();
+        int h = M5.Display.height();
+        int64_t t0 = esp_timer_get_time();
+
+        lgfx::LGFX_Sprite *sprite = new lgfx::LGFX_Sprite(&M5.Display);
+        if (!sprite) return false;
+        sprite->setPsram(true);
+        sprite->setColorDepth(lgfx::color_depth_t::grayscale_4bit);
+        if (!sprite->createSprite(w, h)) {
+            ESP_LOGW(TAG, "prefetch framebuffer create failed %dx%d", w, h);
+            delete sprite;
+            return false;
+        }
+
+        sprite->startWrite();
+        reader_background_draw(*sprite, w, h);
+        if (header_visible()) draw_topbar(*sprite, w);
+        draw_page_content(*sprite, page, w, h, false, false, false);
+        sprite->endWrite();
+
+        prefetch->framebuffer = sprite;
+        prefetch->framebuffer_ready = true;
+        ESP_LOGI(TAG,
+                 "prefetch framebuffer ready spine=%d page=%d size=%dx%d depth=%d time=%lld ms",
+                 prefetch->spine + 1,
+                 prefetch->page + 1,
+                 w,
+                 h,
+                 (int)sprite->getColorDepth(),
+                 (esp_timer_get_time() - t0) / 1000);
+        return true;
+    }
+
+    bool import_prefetch_framebuffer()
+    {
+#if MYPAPER_EPD_USE_2D_ENGINE
+        if (!_prefetch.framebuffer_ready || _prefetch.framebuffer == nullptr) return false;
+        const void *buffer = _prefetch.framebuffer->getBuffer();
+        if (buffer == nullptr) return false;
+        auto *panel = M5.Display.getPanel();
+        if (panel == nullptr) {
+            ESP_LOGW(TAG, "prefetch framebuffer native import skipped: no active panel");
+            return false;
+        }
+        return panel->writeNativeGrayscale4(static_cast<const uint8_t *>(buffer),
+                                            (uint16_t)_prefetch.framebuffer->width(),
+                                            (uint16_t)_prefetch.framebuffer->height());
+#else
+        return false;
+#endif
+    }
+
+    void run_page_prefetch()
+    {
+        if (!_prefetch.pending || !_ok || _overlay.visible()) return;
+        if (M5.Display.displayBusy()) return;
+        _prefetch.pending = false;
+
+        int target_spine = -1;
+        int target_page = -1;
+        bool needs_spine_pages = false;
+        if (!find_next_readable_page(&target_spine, &target_page, &needs_spine_pages)) {
+            invalidate_page_prefetch();
+            return;
+        }
+        if (prefetch_matches(target_spine, target_page)) return;
+
+        PagePrefetch next;
+        next.spine = target_spine;
+        next.page = target_page;
+        next.layout_sig = _layout_sig;
+        next.has_pages = false;
+
+        int64_t t0 = esp_timer_get_time();
+        const document_layout::Pages *pages = &_pages;
+        if (needs_spine_pages) {
+            bool found = false;
+            for (int i = target_spine; i < g_epub.spine_count(); ++i) {
+                next.pages.clear();
+                if (!load_spine_pages(i, &next.pages) || next.pages.empty()) continue;
+                target_spine = i;
+                target_page = 0;
+                next.spine = i;
+                next.page = 0;
+                found = true;
+                break;
+            }
+            if (!found) {
+                invalidate_page_prefetch();
+                return;
+            }
+            next.has_pages = true;
+            pages = &next.pages;
+        }
+        if (target_page < 0 || target_page >= (int)pages->size()) {
+            invalidate_page_prefetch();
+            return;
+        }
+
+        const auto &page = (*pages)[(size_t)target_page];
+        std::string page_text = page_text_for_prepare(page);
+        if (!page_text.empty()) {
+            next.glyph_ready = reader_text_renderer().preparePage(page_text);
+        } else {
+            next.glyph_ready = true;
+        }
+        warm_page_images(page);
+        next.images_ready = true;
+        if (READER_PREFETCH_FRAMEBUFFER_ENABLED) render_prefetch_framebuffer(&next, page);
+        next.valid = true;
+        invalidate_page_prefetch();
+        _prefetch = std::move(next);
+
+        ESP_LOGI(TAG,
+                 "prefetch page ready spine=%d page=%d/%u pages=%d glyph=%d images=%d framebuffer=%d total=%lld ms",
+                 _prefetch.spine + 1,
+                 _prefetch.page + 1,
+                 (unsigned)(_prefetch.has_pages ? _prefetch.pages.size() : _pages.size()),
+                 _prefetch.has_pages ? 1 : 0,
+                 _prefetch.glyph_ready ? 1 : 0,
+                 _prefetch.images_ready ? 1 : 0,
+                 _prefetch.framebuffer_ready ? 1 : 0,
+                 (esp_timer_get_time() - t0) / 1000);
     }
 
     bool first_image_on_page(int page_index, std::string *href) const
@@ -1084,7 +1513,7 @@ private:
         std::string href;
         if (!next_image_href(&href) || href.empty()) return;
 
-        app_paths::ensure_dir(app_paths::epub_cache_dir());
+        app_paths::ensure_dir(_cache_root.c_str());
         mkdir(_image_cache_dir.c_str(), 0);
 
         std::string out_path = image_cache_path(href);
@@ -1113,6 +1542,19 @@ private:
 
         int next_spine = _spine_index + 1;
         while (next_spine < g_epub.spine_count()) {
+            if (prefetch_matches(next_spine, 0) && _prefetch.has_pages && !_prefetch.pages.empty()) {
+                _spine_index = next_spine;
+                _page_index = 0;
+                _pages = std::move(_prefetch.pages);
+                _page_count = (int)_pages.size();
+                ESP_LOGI(TAG,
+                         "prefetch spine hit index=%d/%d pages=%d",
+                         _spine_index + 1,
+                         g_epub.spine_count(),
+                         _page_count);
+                invalidate_page_prefetch();
+                return;
+            }
             if (load_spine(next_spine) && !_pages.empty()) return;
             next_spine++;
         }
@@ -1121,6 +1563,7 @@ private:
     void prev_page()
     {
         if (!_ok) return;
+        invalidate_page_prefetch();
         if (_page_index > 0) {
             _page_index--;
             return;
@@ -1136,77 +1579,119 @@ private:
         }
     }
 
-    void draw_topbar(int w)
+    void draw_topbar(lgfx::LGFXBase &gfx, int w)
     {
-        M5.Display.fillRect(0, 0, w, TOP_H, TFT_WHITE);
-        M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+        if (!header_visible()) return;
+        gfx.fillRect(0, 0, w, TOP_H, TFT_WHITE);
+        gfx.setTextColor(TFT_BLACK, TFT_WHITE);
 
-        std::string title = _ok ? short_title(g_epub.title) : "EPUB open failed";
-        system_font::draw_center(M5.Display, system_font::ellipsize(title, w - 180), w / 2, 3);
+        std::string title = _ok ? short_title(g_epub.title) : "Document open failed";
+        system_font::draw_center(gfx, system_font::ellipsize(title, w - 180), w / 2, 3);
 
         if (_ok) {
             char pg[32];
             snprintf(pg, sizeof(pg), "%d/%d", _spine_index + 1, g_epub.spine_count());
-            system_font::draw_right(M5.Display, pg, w - 5, 3);
+            system_font::draw_right(gfx, pg, w - 5, 3);
         }
     }
 
-    void draw_content(int w, int h)
+    void draw_topbar(int w)
     {
-        (void)w;
-        if (!_ok) {
-            system_font::draw_left(M5.Display, "Could not parse EPUB container/OPF.", 20, TOP_H + 18);
-            return;
-        }
+        draw_topbar(M5.Display, w);
+    }
 
-        if (_page_index < 0 || _page_index >= (int)_pages.size()) return;
-        const auto &page = _pages[(size_t)_page_index];
+    void draw_page_content(lgfx::LGFXBase &gfx,
+                           const document_layout::Page &page,
+                           int w,
+                           int h,
+                           bool prepare_glyphs,
+                           bool allow_hw_jpeg,
+                           bool log_image_stats)
+    {
+        const int64_t draw_begin = esp_timer_get_time();
+        int64_t prepare_us = 0;
+        int64_t text_us = 0;
+        int64_t image_us = 0;
+        int64_t other_us = 0;
+        int64_t yield_us = 0;
+        size_t text_items = 0;
+        size_t image_items = 0;
+        (void)w;
         int x = content_x();
         int y = content_y();
         int line_h = reader_text_renderer().lineHeight();
         if (line_h <= 0) line_h = 48;
-
-        std::string page_text;
-        for (const auto &item : page) {
-            if (item.type == PageItemType::Text && !item.text.empty()) {
-                page_text += item.text;
-                page_text += '\n';
+        const int underline_type = reader_style_get().underline_type;
+        auto draw_underline = [&](int ux, int uy, int uw) {
+            if (underline_type <= 0 || uw <= 0) return;
+            int underline_y = uy + std::max(1, line_h - 5);
+            if (underline_type == 1) {
+                gfx.drawFastHLine(ux, underline_y, uw, TFT_BLACK);
+            } else {
+                constexpr int dash = 12;
+                constexpr int gap = 8;
+                for (int dx = 0; dx < uw; dx += dash + gap) {
+                    gfx.drawFastHLine(ux + dx, underline_y, std::min(dash, uw - dx), TFT_BLACK);
+                }
             }
-        }
-        if (!page_text.empty()) {
+        };
+
+        std::string page_text = page_text_for_prepare(page);
+        if (prepare_glyphs && !page_text.empty() && !(prefetch_matches(_spine_index, _page_index) && _prefetch.glyph_ready)) {
             bool prepared = reader_text_renderer().preparePage(page_text);
             if (!prepared) ESP_LOGW(TAG, "preparePage reported missing glyphs or render errors");
+        } else if (prepare_glyphs && !page_text.empty()) {
+            ESP_LOGI(TAG, "preparePage skipped: prefetch hit spine=%d page=%d", _spine_index + 1, _page_index + 1);
         }
+        prepare_us = esp_timer_get_time() - draw_begin;
 
         for (size_t i = 0; i < page.size() && y < h; ++i) {
-            if ((i & 7) == 0) vTaskDelay(1);
+            if ((i & 7) == 0) {
+                const int64_t yield_begin = esp_timer_get_time();
+                vTaskDelay(1);
+                yield_us += esp_timer_get_time() - yield_begin;
+            }
             const PageItem &item = page[i];
             if (item.type == PageItemType::Text) {
+                const int64_t item_begin = esp_timer_get_time();
                 if (!item.text.empty()) {
                     int text_x = x + item.x_offset;
                     if (item.centered) {
                         int text_width = reader_text_renderer().measureUtf8(item.text);
                         text_x = x + std::max(0, (content_width() - text_width) / 2);
                     }
+                    int underline_w = item.justify
+                        ? item.width
+                        : reader_text_renderer().measureUtf8(item.text);
                     reader_text_renderer().drawUtf8Line(
-                        M5.Display, item.text, text_x, y, TFT_BLACK,
+                        gfx, item.text, text_x, y, TFT_BLACK,
                         item.justify ? item.width : 0);
+                    draw_underline(text_x, y, underline_w);
                 }
                 y += line_h;
+                text_us += esp_timer_get_time() - item_begin;
+                ++text_items;
             } else if (item.type == PageItemType::Space) {
+                const int64_t item_begin = esp_timer_get_time();
                 y += item.height > 0 ? item.height : line_h;
+                other_us += esp_timer_get_time() - item_begin;
             } else if (item.type == PageItemType::HorizontalRule) {
+                const int64_t item_begin = esp_timer_get_time();
                 int rule_y = y + item.height / 2;
                 int inset = std::max(20, content_width() / 8);
-                M5.Display.drawFastHLine(x + inset, rule_y,
-                                         std::max(1, content_width() - inset * 2), TFT_BLACK);
+                gfx.drawFastHLine(x + inset, rule_y,
+                                  std::max(1, content_width() - inset * 2), TFT_BLACK);
                 y += item.height;
+                other_us += esp_timer_get_time() - item_begin;
             } else if (item.type == PageItemType::Image) {
+                const int64_t item_begin = esp_timer_get_time();
+                ++image_items;
                 CachedImage image;
                 ImageLoadStats load_stats;
                 if (!ensure_cached_image(item.resource, &image, &load_stats)) {
-                    system_font::draw_left(M5.Display, "[image]", x, y);
+                    system_font::draw_left(gfx, "[image]", x, y);
                     y += item.height;
+                    image_us += esp_timer_get_time() - item_begin;
                     continue;
                 }
 
@@ -1219,48 +1704,50 @@ private:
                 int draw_x = x + std::max(0, (content_width() - draw_w) / 2);
                 int draw_y = y + std::max(0, (item.height - draw_h) / 2);
                 ImageDrawStats draw_stats;
-                bool ok = draw_cached_image(image, draw_x, draw_y, draw_w, draw_h, scale, &draw_stats);
-                ESP_LOGI(TAG,
-                         "image timing href=%s ext=%s src=%dx%d draw=%dx%d scale=%.3f mem_cache=%d file_cache=%d extract=%lld probe=%lld load=%lld hw_try=%d hw_ok=%d hw_read=%lld hw_header=%lld hw_decode=%lld hw_scale=%lld hw_push=%lld hw_total=%lld sw_try=%d sw_ok=%d sw_denom=%d sw_budget=%u sw_coeff=%u/%u sw_header=%lld sw_decode=%lld sw_push=%lld sw_total=%lld file_draw=%lld fallback=%d fallback_read=%lld fallback_draw=%lld draw=%lld ok=%d progressive=%d",
-                         item.resource.c_str(),
-                         image.ext.c_str(),
-                         image.width,
-                         image.height,
-                         draw_w,
-                         draw_h,
-                         (double)scale,
-                         load_stats.memory_cache_hit ? 1 : 0,
-                         load_stats.file_cache_hit ? 1 : 0,
-                         load_stats.extract_ms,
-                         load_stats.probe_ms,
-                         load_stats.total_ms,
-                         draw_stats.hardware_attempted ? 1 : 0,
-                         draw_stats.hardware_ok ? 1 : 0,
-                         draw_stats.hardware_read_ms,
-                         draw_stats.hardware_header_ms,
-                         draw_stats.hardware_decode_ms,
-                         draw_stats.hardware_scale_ms,
-                         draw_stats.hardware_push_ms,
-                         draw_stats.hardware_total_ms,
-                         draw_stats.software_attempted ? 1 : 0,
-                         draw_stats.software_ok ? 1 : 0,
-                         draw_stats.software_scale_denom,
-                         (unsigned)draw_stats.software_memory_budget,
-                         (unsigned)draw_stats.software_compact_coefficients,
-                         (unsigned)draw_stats.software_legacy_coefficients,
-                         draw_stats.software_header_ms,
-                         draw_stats.software_decode_ms,
-                         draw_stats.software_push_ms,
-                         draw_stats.software_total_ms,
-                         draw_stats.file_decode_ms,
-                         draw_stats.fallback_used ? 1 : 0,
-                         draw_stats.fallback_read_ms,
-                         draw_stats.fallback_decode_ms,
-                         draw_stats.total_ms,
-                         ok ? 1 : 0,
-                         image.jpg_progressive ? 1 : 0);
+                bool ok = draw_cached_image(gfx, image, draw_x, draw_y, draw_w, draw_h, scale, allow_hw_jpeg, &draw_stats);
+                if (log_image_stats) {
+                    ESP_LOGI(TAG,
+                             "image timing href=%s ext=%s src=%dx%d draw=%dx%d scale=%.3f mem_cache=%d file_cache=%d extract=%lld probe=%lld load=%lld hw_try=%d hw_ok=%d hw_read=%lld hw_header=%lld hw_decode=%lld hw_scale=%lld hw_push=%lld hw_total=%lld sw_try=%d sw_ok=%d sw_denom=%d sw_budget=%u sw_coeff=%u/%u sw_header=%lld sw_decode=%lld sw_push=%lld sw_total=%lld file_draw=%lld fallback=%d fallback_read=%lld fallback_draw=%lld draw=%lld ok=%d progressive=%d",
+                             item.resource.c_str(),
+                             image.ext.c_str(),
+                             image.width,
+                             image.height,
+                             draw_w,
+                             draw_h,
+                             (double)scale,
+                             load_stats.memory_cache_hit ? 1 : 0,
+                             load_stats.file_cache_hit ? 1 : 0,
+                             load_stats.extract_ms,
+                             load_stats.probe_ms,
+                             load_stats.total_ms,
+                             draw_stats.hardware_attempted ? 1 : 0,
+                             draw_stats.hardware_ok ? 1 : 0,
+                             draw_stats.hardware_read_ms,
+                             draw_stats.hardware_header_ms,
+                             draw_stats.hardware_decode_ms,
+                             draw_stats.hardware_scale_ms,
+                             draw_stats.hardware_push_ms,
+                             draw_stats.hardware_total_ms,
+                             draw_stats.software_attempted ? 1 : 0,
+                             draw_stats.software_ok ? 1 : 0,
+                             draw_stats.software_scale_denom,
+                             (unsigned)draw_stats.software_memory_budget,
+                             (unsigned)draw_stats.software_compact_coefficients,
+                             (unsigned)draw_stats.software_legacy_coefficients,
+                             draw_stats.software_header_ms,
+                             draw_stats.software_decode_ms,
+                             draw_stats.software_push_ms,
+                             draw_stats.software_total_ms,
+                             draw_stats.file_decode_ms,
+                             draw_stats.fallback_used ? 1 : 0,
+                             draw_stats.fallback_read_ms,
+                             draw_stats.fallback_decode_ms,
+                             draw_stats.total_ms,
+                             ok ? 1 : 0,
+                             image.jpg_progressive ? 1 : 0);
+                }
                 if (!ok) {
-                    draw_image_placeholder(draw_x, draw_y, draw_w, draw_h,
+                    draw_image_placeholder(gfx, draw_x, draw_y, draw_w, draw_h,
                                            image.jpg_progressive ? "Progressive JPEG too large" : "Image decode failed");
                     ESP_LOGW(TAG,
                              "image draw failed path=%s ext=%s src=%dx%d draw=%dx%d scale=%.3f progressive=%d",
@@ -1274,27 +1761,107 @@ private:
                              image.jpg_progressive ? 1 : 0);
                 }
                 y += item.height;
+                image_us += esp_timer_get_time() - item_begin;
             }
         }
+        if (log_image_stats) {
+            const int64_t total_us = esp_timer_get_time() - draw_begin;
+            ESP_LOGI(TAG,
+                     "page draw timing: prepare=%lld us text=%lld us images=%lld us other=%lld us yield=%lld us total=%lld us items=%u/%u",
+                     (long long)prepare_us,
+                     (long long)text_us,
+                     (long long)image_us,
+                     (long long)other_us,
+                     (long long)yield_us,
+                     (long long)total_us,
+                     (unsigned)text_items,
+                     (unsigned)image_items);
+        }
+    }
+
+    void draw_content(int w, int h)
+    {
+        if (!_ok) {
+            std::string error = g_epub.last_error();
+            if (error.empty()) error = "Could not parse document.";
+            system_font::draw_left(M5.Display, system_font::ellipsize(error, M5.Display.width() - 40),
+                                   20, header_height() + 18);
+            return;
+        }
+
+        if (_page_index < 0 || _page_index >= (int)_pages.size()) return;
+        draw_page_content(M5.Display, _pages[(size_t)_page_index], w, h, true, true, true);
     }
 
     void redraw(int w, int h)
     {
         int64_t t0 = esp_timer_get_time();
+        epd_mode_t mode = select_page_refresh_mode();
+        epd_mode_t default_mode = epub_reader_epd_mode();
+        const int64_t mode_done = esp_timer_get_time();
         M5.Display.startWrite();
-        M5.Display.setEpdMode(epub_reader_epd_mode());
-        M5.Display.fillRect(0, TOP_H, w, h - TOP_H, TFT_WHITE);
-        draw_topbar(w);
-        draw_content(w, h);
+        M5.Display.setEpdMode(mode);
+        const int64_t setup_done = esp_timer_get_time();
+        bool framebuffer_hit = READER_PREFETCH_FRAMEBUFFER_ENABLED &&
+                               prefetch_matches(_spine_index, _page_index) &&
+                               _prefetch.framebuffer_ready &&
+                               _prefetch.framebuffer != nullptr &&
+                               !_overlay.visible();
+        if (framebuffer_hit) {
+            framebuffer_hit = import_prefetch_framebuffer();
+            ESP_LOGI(TAG,
+                     "redraw framebuffer hit spine=%d page=%d native=%d",
+                     _spine_index + 1,
+                     _page_index + 1,
+                      framebuffer_hit ? 1 : 0);
+        }
+        const int64_t import_done = esp_timer_get_time();
+        int64_t clear_done = import_done;
+        int64_t topbar_done = import_done;
+        int64_t content_done = import_done;
+        if (!framebuffer_hit) {
+            if (reader_background_enabled()) {
+                reader_background_draw(M5.Display, w, h);
+            } else {
+                int clear_y = header_height();
+                M5.Display.fillRect(0, clear_y, w, h - clear_y, TFT_WHITE);
+            }
+            clear_done = esp_timer_get_time();
+            if (header_visible()) draw_topbar(w);
+            topbar_done = esp_timer_get_time();
+            draw_content(w, h);
+            content_done = esp_timer_get_time();
+        }
         if (_overlay.visible()) _overlay.draw();
+        const int64_t overlay_done = esp_timer_get_time();
         M5.Display.display();
+        const int64_t submit_done = esp_timer_get_time();
         M5.Display.endWrite();
-        ESP_LOGI(TAG, "redraw spine=%d page=%d/%d total=%lld ms",
+        const int64_t end_write_done = esp_timer_get_time();
+        if (mode != default_mode) M5.Display.setEpdMode(default_mode);
+        const int64_t restore_done = esp_timer_get_time();
+        ESP_LOGI(TAG,
+                 "redraw timing: path=%s clear_path=%s mode=%lld setup=%lld import=%lld clear=%lld topbar=%lld content=%lld overlay=%lld submit=%lld end_write=%lld restore=%lld total=%lld us",
+                 framebuffer_hit ? "framebuffer" : "draw",
+                  "gfx",
+                 (long long)(mode_done - t0),
+                 (long long)(setup_done - mode_done),
+                 (long long)(import_done - setup_done),
+                 (long long)(clear_done - import_done),
+                 (long long)(topbar_done - clear_done),
+                 (long long)(content_done - topbar_done),
+                 (long long)(overlay_done - content_done),
+                 (long long)(submit_done - overlay_done),
+                 (long long)(end_write_done - submit_done),
+                 (long long)(restore_done - end_write_done),
+                 (long long)(restore_done - t0));
+        ESP_LOGI(TAG, "redraw spine=%d page=%d/%d mode=%d total=%lld ms",
                  _spine_index + 1,
                  _page_index + 1,
                  _page_count,
+                 (int)mode,
                  (esp_timer_get_time() - t0) / 1000);
-        prefetch_next_image();
+        schedule_page_prefetch();
     }
 
     void redraw_all(epd_mode_t mode = epub_reader_epd_mode())
@@ -1302,28 +1869,51 @@ private:
         int w = M5.Display.width();
         int h = M5.Display.height();
         int64_t t0 = esp_timer_get_time();
+        note_page_refresh_mode(mode);
         M5.Display.startWrite();
         M5.Display.setEpdMode(mode);
-        M5.Display.fillScreen(TFT_WHITE);
-        draw_topbar(w);
-        draw_content(w, h);
+        bool framebuffer_hit = READER_PREFETCH_FRAMEBUFFER_ENABLED &&
+                               prefetch_matches(_spine_index, _page_index) &&
+                               _prefetch.framebuffer_ready &&
+                               _prefetch.framebuffer != nullptr &&
+                               !_overlay.visible() &&
+                               mode == epub_reader_epd_mode();
+        if (framebuffer_hit) {
+            framebuffer_hit = import_prefetch_framebuffer();
+            ESP_LOGI(TAG,
+                     "redraw_all framebuffer hit spine=%d page=%d native=%d",
+                     _spine_index + 1,
+                     _page_index + 1,
+                     framebuffer_hit ? 1 : 0);
+        }
+        if (!framebuffer_hit) {
+            reader_background_draw(M5.Display, w, h);
+            if (header_visible()) draw_topbar(w);
+            draw_content(w, h);
+        }
         if (_overlay.visible()) _overlay.draw();
         M5.Display.display();
         M5.Display.endWrite();
         epd_mode_t default_mode = epub_reader_epd_mode();
         if (mode != default_mode) M5.Display.setEpdMode(default_mode);
-        ESP_LOGI(TAG, "redraw_all spine=%d page=%d/%d total=%lld ms",
+        ESP_LOGI(TAG, "redraw_all spine=%d page=%d/%d mode=%d total=%lld ms",
                  _spine_index + 1,
                  _page_index + 1,
                  _page_count,
+                 (int)mode,
                  (esp_timer_get_time() - t0) / 1000);
-        prefetch_next_image();
+        schedule_page_prefetch();
     }
 
     ReaderOverlay _overlay;
 };
 
 void launch_epub_reader(const char *path)
+{
+    ActivityManager::instance().push(new EpubReaderActivity(path));
+}
+
+void launch_mobi_reader(const char *path)
 {
     ActivityManager::instance().push(new EpubReaderActivity(path));
 }

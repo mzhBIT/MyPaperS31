@@ -180,7 +180,8 @@ static int lines_per_page()
     ReaderStyle style = reader_style_get();
     int lh = reader_text_renderer().lineHeight();
     if (lh <= 0) lh = 48;
-    int usable_h = M5.Display.height() - 50 - style.margin_top - style.margin_bottom;
+    int header_h = style.hide_header ? 0 : 50;
+    int usable_h = M5.Display.height() - header_h - style.margin_top - style.margin_bottom;
     int n = usable_h / lh;
     return n > 1 ? n : 1;
 }
@@ -236,7 +237,7 @@ uint32_t TxtBook::layout_signature() const
     std::string sig = reader_text_renderer().layoutSignature();
     ReaderStyle style = reader_style_get();
     char buf[128];
-    snprintf(buf, sizeof(buf), ";algo=%lu;w=%d;h=%d;dw=%d;lpp=%d;indent=%d;paragraph=%d;enc=%d;file=%lu",
+    snprintf(buf, sizeof(buf), ";algo=%lu;w=%d;h=%d;dw=%d;lpp=%d;indent=%d;paragraph=%d;header=%d;enc=%d;file=%lu",
              (unsigned long)TXT_LAYOUT_VERSION,
              (int)M5.Display.width(),
              (int)M5.Display.height(),
@@ -244,6 +245,7 @@ uint32_t TxtBook::layout_signature() const
              lines_per_page(),
              style.first_line_indent,
              style.paragraph_spacing,
+             style.hide_header ? 0 : 50,
              _enc,
              (unsigned long)_file_size);
     sig += buf;
@@ -360,8 +362,9 @@ TxtPage TxtBook::read_page(uint32_t offset)
     const int max_w = std::max(100, display_width());
     int line_h = reader_text_renderer().lineHeight();
     if (line_h <= 0) line_h = 48;
+    const int header_h = style.hide_header ? 0 : 50;
     const int max_height = std::max(line_h,
-        (int)M5.Display.height() - 50 - style.margin_top - style.margin_bottom);
+        (int)M5.Display.height() - header_h - style.margin_top - style.margin_bottom);
     int fullwidth_advance = reader_text_renderer().measureFullwidthCellForLayout();
     const int indent_width = std::min(max_w - 1,
                                       fullwidth_advance * style.first_line_indent);

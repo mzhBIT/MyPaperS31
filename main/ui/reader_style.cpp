@@ -9,9 +9,54 @@
 
 static const char *TAG = "READER_STYLE";
 static const char *NVS_NS = "reader_style";
-static const char *NVS_KEY = "style_v3";
+static const char *NVS_KEY = "style_v6";
+static const char *NVS_KEY_V5 = "style_v5";
+static const char *NVS_KEY_V4 = "style_v4";
+static const char *NVS_KEY_V3 = "style_v3";
 static const char *NVS_KEY_V2 = "style_v2";
 static const char *NVS_KEY_V1 = "style_v1";
+
+struct ReaderStyleV3 {
+    int font_size;
+    int line_spacing;
+    int margin_left;
+    int margin_right;
+    int margin_top;
+    int margin_bottom;
+    int refresh_mode;
+    int show_images;
+    int first_line_indent;
+    int paragraph_spacing;
+};
+
+struct ReaderStyleV4 {
+    int font_size;
+    int line_spacing;
+    int margin_left;
+    int margin_right;
+    int margin_top;
+    int margin_bottom;
+    int refresh_mode;
+    int show_images;
+    int first_line_indent;
+    int paragraph_spacing;
+    int full_refresh_pages;
+};
+
+struct ReaderStyleV5 {
+    int font_size;
+    int line_spacing;
+    int margin_left;
+    int margin_right;
+    int margin_top;
+    int margin_bottom;
+    int refresh_mode;
+    int show_images;
+    int first_line_indent;
+    int paragraph_spacing;
+    int full_refresh_pages;
+    int underline_type;
+};
 
 struct ReaderStyleV1 {
     int font_size;
@@ -53,6 +98,9 @@ static bool load_style_from_sd(ReaderStyle *out)
             style.paragraph_spacing = val;
             has_legacy_paragraph_spacing = true;
         }
+        else if (strcmp(key, "full_refresh_pages") == 0) style.full_refresh_pages = val;
+        else if (strcmp(key, "underline_type") == 0) style.underline_type = val;
+        else if (strcmp(key, "hide_header") == 0) style.hide_header = val;
     }
     fclose(fp);
 
@@ -76,11 +124,84 @@ static bool load_style_from_nvs(ReaderStyle *out, bool *migrated)
     err = nvs_get_blob(h, NVS_KEY, &style, &len);
     loaded = err == ESP_OK && len == sizeof(style);
     if (!loaded) {
-        ReaderStyle legacy_v2 = {};
+        ReaderStyleV5 legacy_v5 = {};
+        len = sizeof(legacy_v5);
+        err = nvs_get_blob(h, NVS_KEY_V5, &legacy_v5, &len);
+        if (err == ESP_OK && len == sizeof(legacy_v5)) {
+            style = ReaderStyle();
+            style.font_size = legacy_v5.font_size;
+            style.line_spacing = legacy_v5.line_spacing;
+            style.margin_left = legacy_v5.margin_left;
+            style.margin_right = legacy_v5.margin_right;
+            style.margin_top = legacy_v5.margin_top;
+            style.margin_bottom = legacy_v5.margin_bottom;
+            style.refresh_mode = legacy_v5.refresh_mode;
+            style.show_images = legacy_v5.show_images;
+            style.first_line_indent = legacy_v5.first_line_indent;
+            style.paragraph_spacing = legacy_v5.paragraph_spacing;
+            style.full_refresh_pages = legacy_v5.full_refresh_pages;
+            style.underline_type = legacy_v5.underline_type;
+            loaded = true;
+            if (migrated) *migrated = true;
+        }
+    }
+    if (!loaded) {
+        ReaderStyleV4 legacy_v4 = {};
+        len = sizeof(legacy_v4);
+        err = nvs_get_blob(h, NVS_KEY_V4, &legacy_v4, &len);
+        if (err == ESP_OK && len == sizeof(legacy_v4)) {
+            style = ReaderStyle();
+            style.font_size = legacy_v4.font_size;
+            style.line_spacing = legacy_v4.line_spacing;
+            style.margin_left = legacy_v4.margin_left;
+            style.margin_right = legacy_v4.margin_right;
+            style.margin_top = legacy_v4.margin_top;
+            style.margin_bottom = legacy_v4.margin_bottom;
+            style.refresh_mode = legacy_v4.refresh_mode;
+            style.show_images = legacy_v4.show_images;
+            style.first_line_indent = legacy_v4.first_line_indent;
+            style.paragraph_spacing = legacy_v4.paragraph_spacing;
+            style.full_refresh_pages = legacy_v4.full_refresh_pages;
+            loaded = true;
+            if (migrated) *migrated = true;
+        }
+    }
+    if (!loaded) {
+        ReaderStyleV3 legacy_v3 = {};
+        len = sizeof(legacy_v3);
+        err = nvs_get_blob(h, NVS_KEY_V3, &legacy_v3, &len);
+        if (err == ESP_OK && len == sizeof(legacy_v3)) {
+            style = ReaderStyle();
+            style.font_size = legacy_v3.font_size;
+            style.line_spacing = legacy_v3.line_spacing;
+            style.margin_left = legacy_v3.margin_left;
+            style.margin_right = legacy_v3.margin_right;
+            style.margin_top = legacy_v3.margin_top;
+            style.margin_bottom = legacy_v3.margin_bottom;
+            style.refresh_mode = legacy_v3.refresh_mode;
+            style.show_images = legacy_v3.show_images;
+            style.first_line_indent = legacy_v3.first_line_indent;
+            style.paragraph_spacing = legacy_v3.paragraph_spacing;
+            loaded = true;
+            if (migrated) *migrated = true;
+        }
+    }
+    if (!loaded) {
+        ReaderStyleV3 legacy_v2 = {};
         len = sizeof(legacy_v2);
         err = nvs_get_blob(h, NVS_KEY_V2, &legacy_v2, &len);
         if (err == ESP_OK && len == sizeof(legacy_v2)) {
-            style = legacy_v2;
+            style = ReaderStyle();
+            style.font_size = legacy_v2.font_size;
+            style.line_spacing = legacy_v2.line_spacing;
+            style.margin_left = legacy_v2.margin_left;
+            style.margin_right = legacy_v2.margin_right;
+            style.margin_top = legacy_v2.margin_top;
+            style.margin_bottom = legacy_v2.margin_bottom;
+            style.refresh_mode = legacy_v2.refresh_mode;
+            style.show_images = legacy_v2.show_images;
+            style.first_line_indent = legacy_v2.first_line_indent;
+            style.paragraph_spacing = legacy_v2.paragraph_spacing;
             style.paragraph_spacing *= 5;
             loaded = true;
             if (migrated) *migrated = true;
@@ -123,6 +244,9 @@ ReaderStyle reader_style_clamp(ReaderStyle style)
     style.show_images = style.show_images ? 1 : 0;
     style.first_line_indent = std::min(4, std::max(0, style.first_line_indent));
     style.paragraph_spacing = std::min(20, std::max(0, style.paragraph_spacing));
+    style.full_refresh_pages = std::min(60, std::max(1, style.full_refresh_pages));
+    style.underline_type = std::min(2, std::max(0, style.underline_type));
+    style.hide_header = style.hide_header ? 1 : 0;
     return style;
 }
 
@@ -142,24 +266,65 @@ const char *reader_style_refresh_mode_name(int mode)
     }
 }
 
+int reader_style_next_refresh_mode(int mode, int delta)
+{
+    static constexpr int kOrder[] = {4, 3, 2, 1}; // Fastest, Fast, Text, Quality.
+    int index = 1; // Default to Fast if the stored value is invalid.
+    for (int i = 0; i < (int)(sizeof(kOrder) / sizeof(kOrder[0])); ++i) {
+        if (kOrder[i] == mode) {
+            index = i;
+            break;
+        }
+    }
+
+    constexpr int count = (int)(sizeof(kOrder) / sizeof(kOrder[0]));
+    index = (index + delta) % count;
+    if (index < 0) index += count;
+    return kOrder[index];
+}
+
+const char *reader_style_underline_name(int type)
+{
+    switch (type) {
+    case 1:
+        return "Solid";
+    case 2:
+        return "Dashed";
+    default:
+        return "None";
+    }
+}
+
+int reader_style_next_underline_type(int type, int delta)
+{
+    constexpr int count = 3;
+    int index = std::min(2, std::max(0, type));
+    index = (index + delta) % count;
+    if (index < 0) index += count;
+    return index;
+}
+
 void reader_style_init()
 {
     s_style = reader_style_clamp(ReaderStyle());
 
     bool migrated = false;
     if (load_style_from_nvs(&s_style, &migrated)) {
-        ESP_LOGI(TAG, "loaded style from NVS size=%d line=%d indent=%d paragraph=%d margins=%d,%d,%d,%d refresh=%s",
+        ESP_LOGI(TAG, "loaded style from NVS size=%d line=%d indent=%d paragraph=%d full_refresh=%d underline=%s hide_header=%d margins=%d,%d,%d,%d refresh=%s",
                  s_style.font_size,
                  s_style.line_spacing,
                  s_style.first_line_indent,
                  s_style.paragraph_spacing,
+                 s_style.full_refresh_pages,
+                 reader_style_underline_name(s_style.underline_type),
+                 s_style.hide_header,
                  s_style.margin_left,
                  s_style.margin_right,
                  s_style.margin_top,
                  s_style.margin_bottom,
                  reader_style_refresh_mode_name(s_style.refresh_mode));
         if (migrated) {
-            ESP_LOGI(TAG, "migrating reader style to v3");
+            ESP_LOGI(TAG, "migrating reader style to v6");
             reader_style_save();
         }
         return;

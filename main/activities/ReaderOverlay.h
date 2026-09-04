@@ -17,6 +17,7 @@ class ReaderOverlay {
 public:
     enum class Tab {
         Settings,
+        Beauty,
         Chapters,
     };
 
@@ -24,6 +25,7 @@ public:
         None,
         Close,
         OpenFont,
+        OpenBackground,
         ChapterOpened,
     };
 
@@ -45,7 +47,8 @@ public:
     void redraw();
 
 private:
-    static constexpr int SETTING_COUNT = 9;
+    static constexpr int SETTING_COUNT = 7;
+    static constexpr int BEAUTY_COUNT = 6;
 
     struct Geometry {
         int x = 0;
@@ -62,6 +65,7 @@ private:
     void select_tab(Tab tab);
     void adjust_setting(int delta);
     void move_setting_focus(int delta);
+    int active_setting_count() const;
     void move_chapter_focus(int delta);
     int chapter_count() const;
     int visible_chapter_rows() const;
@@ -71,6 +75,7 @@ private:
     Action activate_setting();
     Action activate_chapter();
     void draw_settings(const Geometry &g);
+    void draw_beauty(const Geometry &g);
     void draw_chapters(const Geometry &g);
     void draw_tabs(const Geometry &g);
 

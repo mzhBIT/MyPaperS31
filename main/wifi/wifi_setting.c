@@ -7,6 +7,7 @@
 #include "esp_err.h"
 #include "esp_event.h"
 #include "esp_hosted.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_wifi.h"
@@ -47,6 +48,16 @@ static esp_netif_t *s_sta_netif;
 static EventGroupHandle_t s_wifi_event_group;
 static esp_event_handler_instance_t s_wifi_event_handler_instance;
 static esp_event_handler_instance_t s_ip_event_handler_instance;
+
+static void wifi_setting_log_heap(const char *stage)
+{
+    ESP_LOGI(TAG,
+             "heap %s: internal_free=%u internal_largest=%u psram_free=%u",
+             stage,
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+}
 
 static void wifi_setting_connect_event_handler(void *arg,
                                                esp_event_base_t event_base,
@@ -160,6 +171,7 @@ esp_err_t wifi_setting_c6_power_off(void)
 
 esp_err_t wifi_setting_init(void)
 {
+    wifi_setting_log_heap("before-init");
     s_stopping = false;
     if (s_wifi_started) {
         return ESP_OK;
@@ -222,6 +234,7 @@ esp_err_t wifi_setting_init(void)
      * handles the co-processor power-save details.
      */
     // ESP_RETURN_ON_ERROR(esp_wifi_set_ps(WIFI_PS_NONE), TAG, "Failed to disable Wi-Fi power save");
+    wifi_setting_log_heap("after-start");
     return ESP_OK;
 }
 
@@ -428,6 +441,7 @@ esp_err_t wifi_setting_connect_saved(int timeout_ms)
 
 esp_err_t wifi_setting_deinit(bool power_down_c6)
 {
+    wifi_setting_log_heap("before-deinit");
     esp_err_t first_error = ESP_OK;
     s_stopping = true;
 
@@ -518,5 +532,6 @@ esp_err_t wifi_setting_deinit(bool power_down_c6)
         ESP_LOGI(TAG, "Wi-Fi fully shut down; C6 power is off");
     }
 
+    wifi_setting_log_heap("after-deinit");
     return first_error;
 }

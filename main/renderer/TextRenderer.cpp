@@ -1840,18 +1840,18 @@ std::vector<std::string> TextRenderer::wrapUtf8Line(const std::string &line, int
     return lines;
 }
 
-void TextRenderer::drawGlyph(M5GFX &gfx, const Glyph &glyph, int x, int baseline_y, uint16_t color)
+void TextRenderer::drawGlyph(lgfx::LGFXBase &gfx, const Glyph &glyph,
+                             int x, int baseline_y, uint16_t color)
 {
     if (glyph.data_size == 0 || glyph.width <= 0 || glyph.height <= 0) return;
     if (glyph.data_offset + glyph.data_size > _glyph_pool_used) return;
 
+    int gx = x + glyph.bitmap_left;
+    int gy = baseline_y - glyph.bitmap_top;
     if (!USE_GLYPH_PUSH_GRAYIMAGE) {
         drawGlyphRuns(gfx, glyph, x, baseline_y, color);
         return;
     }
-
-    int gx = x + glyph.bitmap_left;
-    int gy = baseline_y - glyph.bitmap_top;
     (void)color;
     gfx.pushGrayscaleImage(gx,
                            gy,
@@ -1863,7 +1863,7 @@ void TextRenderer::drawGlyph(M5GFX &gfx, const Glyph &glyph, int x, int baseline
                            0xFFFFFF);
 }
 
-void TextRenderer::drawGlyphRuns(M5GFX &gfx, const Glyph &glyph, int x, int baseline_y, uint16_t color)
+void TextRenderer::drawGlyphRuns(lgfx::LGFXBase &gfx, const Glyph &glyph, int x, int baseline_y, uint16_t color)
 {
     if (glyph.data_size == 0 || glyph.width <= 0 || glyph.height <= 0) return;
     if (glyph.data_offset + glyph.data_size > _glyph_pool_used) return;
@@ -1907,7 +1907,7 @@ void TextRenderer::drawGlyphRuns(M5GFX &gfx, const Glyph &glyph, int x, int base
     }
 }
 
-void TextRenderer::drawUtf8Line(M5GFX &gfx, const std::string &text, int x, int y,
+void TextRenderer::drawUtf8Line(lgfx::LGFXBase &gfx, const std::string &text, int x, int y,
                                 uint16_t color, int justify_width)
 {
     if (!_ft_ready && !_bin_ready && !_lv_ready) {

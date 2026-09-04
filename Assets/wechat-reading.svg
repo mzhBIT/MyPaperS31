@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="150" height="150" viewBox="0 0 150 150" role="img" aria-label="微信读书图标">
+  <rect width="150" height="150" fill="#FFFFFF"/>
+  <rect x="10" y="10" width="130" height="130" rx="30" fill="#000000"/>
+
+  <!-- 微信读书标志性的展开书页 -->
+  <path fill="#FFFFFF" stroke="#000000" stroke-width="4" stroke-linejoin="round" d="M12 109h33c15 0 25 4 30 17 5-13 15-17 30-17h33v3c0 16-11 24-28 24H40c-17 0-28-8-28-24v-3Z"/>
+
+  <!-- 微信对话气泡 -->
+  <path fill="#FFFFFF" d="M75 76c0-12.2 12.1-22 27-22s27 9.8 27 22-12.1 22-27 22c-3.2 0-6.3-.5-9.1-1.4l-8.4 5.2c-1.5.9-3.3-.5-2.8-2.2l2.5-8.2C78.5 87.4 75 82 75 76Z"/>
+  <circle cx="94" cy="75" r="3.6" fill="#000000"/>
+  <circle cx="111" cy="75" r="3.6" fill="#000000"/>
+</svg>

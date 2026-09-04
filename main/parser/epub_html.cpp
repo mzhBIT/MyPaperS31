@@ -232,7 +232,10 @@ static int parse_positive_px(const std::string &value)
     if (value.empty() || value.find('%') != std::string::npos) return 0;
     char *endp = nullptr;
     long n = std::strtol(value.c_str(), &endp, 10);
-    return n > 0 ? (int)n : 0;
+    if (n <= 0 || endp == value.c_str()) return 0;
+    while (*endp && std::isspace(static_cast<unsigned char>(*endp))) ++endp;
+    if (*endp && lower_name(endp) != "px") return 0;
+    return static_cast<int>(n);
 }
 
 static void append_normalized_text(const std::string &raw, std::string *current)

@@ -12,6 +12,9 @@ static const char *TXT_PROGRESS_DIR = "/sdcard/.reader/txtprogress";
 static const char *EPUB_PROGRESS_DIR = "/sdcard/.reader/epubprogress";
 static const char *EPUB_CACHE_DIR = "/sdcard/.reader/epub_tmp";
 static const char *EPUB_METADATA_DIR = "/sdcard/.reader/epub_meta";
+static const char *MOBI_PROGRESS_DIR = "/sdcard/.reader/mobiprogress";
+static const char *MOBI_CACHE_DIR = "/sdcard/.reader/mobi_tmp";
+static const char *MOBI_METADATA_DIR = "/sdcard/.reader/mobi_meta";
 static const char *RSS_IMAGE_CACHE_DIR = "/sdcard/.reader/rss_img";
 static const char *MUSIC_COVER_CACHE_DIR = "/sdcard/.reader/music_cover";
 static const char *DEEPSEEK_SESSIONS_DIR = "/sdcard/.reader/deepseek";
@@ -24,6 +27,9 @@ const char *txt_progress_dir() { return TXT_PROGRESS_DIR; }
 const char *epub_progress_dir() { return EPUB_PROGRESS_DIR; }
 const char *epub_cache_dir() { return EPUB_CACHE_DIR; }
 const char *epub_metadata_dir() { return EPUB_METADATA_DIR; }
+const char *mobi_progress_dir() { return MOBI_PROGRESS_DIR; }
+const char *mobi_cache_dir() { return MOBI_CACHE_DIR; }
+const char *mobi_metadata_dir() { return MOBI_METADATA_DIR; }
 const char *rss_image_cache_dir() { return RSS_IMAGE_CACHE_DIR; }
 const char *music_cover_cache_dir() { return MUSIC_COVER_CACHE_DIR; }
 const char *deepseek_sessions_dir() { return DEEPSEEK_SESSIONS_DIR; }

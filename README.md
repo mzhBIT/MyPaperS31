@@ -8,11 +8,12 @@ MyPaperP4 是一套面向自定义 **ESP32-P4 单色墨水屏设备**的阅读�
 
 ### 阅读
 
-- TXT 与 EPUB 阅读。
+- TXT、EPUB 与无 DRM MOBI/PRC 阅读。
 - TXT 支持 UTF-8、UTF-16LE、GBK 和 Latin-1 回退。
 - EPUB2/EPUB3 目录、封面、正文图片和阅读进度。
 - EPUB ZIP 索引与元数据持久化缓存，加快再次打开速度。
-- 书架按最近打开顺序展示书籍，并支持 EPUB 封面缩略图缓存。
+- MOBI6/KF7 支持无压缩、PalmDOC 与 HUFF/CDIC 文本，按记录流式读取并缓存解析索引。
+- 书架按最近打开顺序展示书籍，并支持 EPUB/MOBI 封面缩略图缓存。
 - 共用分页与排版框架：
   - 字号与行距
   - 首行缩进字符数
@@ -133,7 +134,7 @@ idf.py -p /dev/ttyUSB0 flash monitor
 建议使用 FAT32，并在卡根目录准备以下结构。应用会在需要时创建大部分目录：
 
 ```text
-/books/                 TXT、EPUB
+/books/                 TXT、EPUB、MOBI、PRC
 /images/                JPG、JPEG、PNG、BMP
 /fonts/                 TTF、OTF、EDCBook BIN 字体
 /music/                 MP3、FLAC、WAV、M4A、AAC、OGG、OPUS
@@ -179,7 +180,7 @@ Bing Wallpaper|https://rsshub.app/bing
 
 | 文件类型 | 目标目录 |
 | --- | --- |
-| TXT、EPUB | `/sdcard/books` |
+| TXT、EPUB、MOBI、PRC | `/sdcard/books` |
 | JPG、JPEG、PNG、BMP | `/sdcard/images` |
 | TTF、OTF、BIN | `/sdcard/fonts` |
 | 支持的音频格式 | `/sdcard/music` |
@@ -196,6 +197,9 @@ txtprogress/             TXT 阅读进度
 epubprogress/            EPUB 阅读进度
 epub_tmp/                EPUB 图片按需解压缓存
 epub_meta/               EPUB ZIP 索引与元数据缓存
+mobi_progress/           MOBI 阅读进度
+mobi_tmp/                MOBI 图片按需提取缓存
+mobi_meta/               MOBI 记录、章节与目录元数据缓存
 rss_img/                 RSS 图片缓存
 music_cover/             音频封面与方形缩略图缓存
 ```
@@ -210,7 +214,7 @@ MyPaperP4/
 │  ├─ activities/        页面与交互逻辑
 │  ├─ audio/             本地音乐、收音机、Codec 与歌词
 │  ├─ input/             触摸与 ADC 按键
-│  ├─ parser/            TXT、EPUB、HTML 与编码解析
+│  ├─ parser/            TXT、EPUB、MOBI、HTML 与编码解析
 │  ├─ renderer/          分页、文字、图片与封面缩略图
 │  ├─ storage/           SD 卡和应用路径
 │  ├─ ui/                字体、样式和位图图标

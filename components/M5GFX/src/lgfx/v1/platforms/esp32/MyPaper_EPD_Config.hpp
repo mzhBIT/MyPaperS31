@@ -40,11 +40,44 @@
 #define MYPAPER_EPD_2D_PRECOMPUTE_WAVEFORM 1
 #endif
 
-// DU/Fast keeps the official phase sequence but stores only distinct drive
-// frames for the old->new grayscale transitions present in this update.
-// Equal phases reuse the same DMA frame; GC16/Quality is unaffected.
+// Keep the official phase sequence but store only distinct drive frames for
+// the old->new grayscale transitions present in this update.  Equal phases
+// reuse the same DMA frame while still being submitted for their original
+// duration.  This applies to GC16, DU, DU4 and A2.
 #ifndef MYPAPER_EPD_2D_DU_PHASE_DEDUP
 #define MYPAPER_EPD_2D_DU_PHASE_DEDUP 1
+#endif
+
+// Expand the current GC16 phase's 16x16 pixel transition table into a direct
+// old-byte/new-byte lookup.  The 64 KiB table lives in internal RAM and turns
+// two pixel LUT reads plus masking/shifting into one lookup for each pair of
+// 4bpp pixels.  The official waveform data and phase timing are unchanged.
+#ifndef MYPAPER_EPD_2D_GC16_PAIR_LUT
+#define MYPAPER_EPD_2D_GC16_PAIR_LUT 1
+#endif
+
+// Prime a bounded GC16 frame ring before power-on, then render the remaining
+// unique phases on the same CPU core while GDMA scans the prepared frames.
+// The scan task has the higher priority and therefore keeps phase boundaries
+// deterministic.  DU4 remains on the validated full-precompute path for now.
+#ifndef MYPAPER_EPD_2D_GC16_PIPELINE
+#define MYPAPER_EPD_2D_GC16_PIPELINE 1
+#endif
+#ifndef MYPAPER_EPD_2D_GC16_PIPELINE_SLOTS
+#define MYPAPER_EPD_2D_GC16_PIPELINE_SLOTS 20
+#endif
+#ifndef MYPAPER_EPD_2D_GC16_PIPELINE_PRIME
+#define MYPAPER_EPD_2D_GC16_PIPELINE_PRIME 10
+#endif
+
+// DU4 keeps its complete unique-frame workspace, but only renders this many
+// frames before power-on.  The remaining frames are filled by a lower-priority
+// task on the scan core while GDMA is shifting the already-ready frames.
+#ifndef MYPAPER_EPD_2D_DU4_PIPELINE
+#define MYPAPER_EPD_2D_DU4_PIPELINE 1
+#endif
+#ifndef MYPAPER_EPD_2D_DU4_PIPELINE_PRIME
+#define MYPAPER_EPD_2D_DU4_PIPELINE_PRIME 3
 #endif
 
 // Experimental epdiy-style line producer/consumer backend.  Keep disabled:

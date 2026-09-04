@@ -61,7 +61,7 @@ std::string ellipsize(const std::string &text, int max_width)
     return out + suffix;
 }
 
-void draw_left(M5GFX &gfx, const std::string &text, int x, int y, uint16_t color)
+void draw_left(lgfx::LGFXBase &gfx, const std::string &text, int x, int y, uint16_t color)
 {
     if (!ensure_ready()) return;
     gfx.setTextSize(1);
@@ -70,12 +70,12 @@ void draw_left(M5GFX &gfx, const std::string &text, int x, int y, uint16_t color
     gfx.drawString(text.c_str(), x, y, &fonts::lv_font_SourceHanSansNormalCN_36);
 }
 
-void draw_center(M5GFX &gfx, const std::string &text, int cx, int y, uint16_t color)
+void draw_center(lgfx::LGFXBase &gfx, const std::string &text, int cx, int y, uint16_t color)
 {
     draw_left(gfx, text, cx - measure(text) / 2, y, color);
 }
 
-void draw_right(M5GFX &gfx, const std::string &text, int right_x, int y, uint16_t color)
+void draw_right(lgfx::LGFXBase &gfx, const std::string &text, int right_x, int y, uint16_t color)
 {
     draw_left(gfx, text, right_x - measure(text), y, color);
 }

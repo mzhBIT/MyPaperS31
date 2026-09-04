@@ -42,7 +42,7 @@ public:
                                                         int first_line_indent = 0);
     std::vector<std::string> wrapUtf8Line(const std::string &line, int max_width);
     bool preparePage(const std::string &text);
-    void drawUtf8Line(M5GFX &gfx, const std::string &text, int x, int y,
+    void drawUtf8Line(lgfx::LGFXBase &gfx, const std::string &text, int x, int y,
                       uint16_t color, int justify_width = 0);
     void clearGlyphCache();
     TextRenderStats stats() const;
@@ -117,8 +117,9 @@ private:
     const Glyph *getGlyph(uint32_t codepoint);
     size_t nextUtf8(const std::string &text, size_t pos, uint32_t &codepoint) const;
     std::string codepointToUtf8(uint32_t codepoint) const;
-    void drawGlyph(M5GFX &gfx, const Glyph &glyph, int x, int baseline_y, uint16_t color);
-    void drawGlyphRuns(M5GFX &gfx, const Glyph &glyph, int x, int baseline_y, uint16_t color);
+    void drawGlyph(lgfx::LGFXBase &gfx, const Glyph &glyph, int x, int baseline_y,
+                   uint16_t color);
+    void drawGlyphRuns(lgfx::LGFXBase &gfx, const Glyph &glyph, int x, int baseline_y, uint16_t color);
     void preloadCommonGlyphs();
     void resetFont();
     bool compactGlyphCache(size_t needed_bytes);
