@@ -8,7 +8,7 @@
 
 namespace document_layout {
 
-static constexpr uint32_t ALGORITHM_VERSION = 4;
+static constexpr uint32_t ALGORITHM_VERSION = 5;
 
 enum class BlockType {
     Paragraph,
@@ -31,6 +31,13 @@ struct Block {
     bool page_break_before = false;
     bool allow_first_line_indent = false;
     bool paragraph_spacing_after = false;
+    struct FootnoteRef {
+        size_t byte_start = 0;
+        size_t byte_end = 0;
+        std::string target;
+        std::string content;
+    };
+    std::vector<FootnoteRef> footnotes;
 };
 
 struct ImageInfo {
@@ -56,6 +63,13 @@ struct PageItem {
     bool justify = false;
     int x_offset = 0;
     bool centered = false;
+    struct FootnoteRef {
+        size_t byte_start = 0;
+        size_t byte_end = 0;
+        std::string target;
+        std::string content;
+    };
+    std::vector<FootnoteRef> footnotes;
 
     // Image layout diagnostics retained for format-specific logging.
     int source_width = 0;

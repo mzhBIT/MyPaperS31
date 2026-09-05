@@ -6,6 +6,15 @@ set(srcs
     "deepseek/DeepSeekConfig.cpp"
     "deepseek/DeepSeekSessionStore.cpp"
     "deepseek/DeepSeekClient.cpp"
+    "weread/WereadCrypto.cpp"
+    "weread/WereadSession.cpp"
+    "weread/WereadHttpClient.cpp"
+    "weread/WereadJson.cpp"
+    "weread/WereadApi.cpp"
+    "weread/qrcodegen.cpp"
+    "weread/WereadQr.cpp"
+    "weread/WereadStore.cpp"
+    "weread/WereadContentSource.cpp"
     "ui/reader_font.cpp"
     "ui/reader_style.cpp"
     "ui/reader_background.cpp"
@@ -38,6 +47,7 @@ set(srcs
     "activities/TextInputActivity.cpp"
     "activities/EpdDiagnosticActivity.cpp"
     "activities/DeepSeekActivity.cpp"
+    "activities/WereadActivity.cpp"
     "activities/WifiTransferActivity.cpp"
     "activities/RssReaderActivity.cpp"
     "activities/recent_books.cpp"
@@ -50,7 +60,8 @@ set(srcs
     "parser/txt_parser.cpp"
     "parser/gbk_decode.cpp"
     "parser/epub_zip.cpp"
-    "parser/epub_parser.cpp"
+        "parser/epub_parser.cpp"
+        "parser/fb2_parser.cpp"
     "parser/epub_html.cpp"
     "parser/mobi_parser.cpp"
     "parser/reflow_book.cpp")
@@ -59,6 +70,9 @@ idf_component_register(SRCS ${srcs}
                        INCLUDE_DIRS "." "activities" "input" "parser" "renderer" "storage" "ui" "wifi"
                        REQUIRES fatfs sdmmc esp_driver_sdmmc esp_hw_support esp_driver_gpio esp_driver_i2c esp_driver_i2s esp_driver_jpeg esp_driver_ppa esp_adc esp_timer freertos freetype M5GFX M5Unified nvs_flash esp_event esp_netif esp_wifi esp_http_server esp_http_client esp-tls esp_psram esp_codec_dev esp_audio_simple_player esp_extractor esp_hls_stream gmf_core gmf_audio media_lib_sal espressif__eppp_link espressif__esp_hosted espressif__esp_wifi_remote espressif__libjpeg-turbo
                        WHOLE_ARCHIVE)
+
+set_source_files_properties("weread/qrcodegen.cpp" "weread/WereadQr.cpp"
+                            PROPERTIES COMPILE_OPTIONS "-fexceptions")
 
 target_add_binary_data(${COMPONENT_LIB} "spiffs/fonts/reader.bin" BINARY)
 

@@ -15,10 +15,12 @@
 #include "storage/app_paths.h"
 #include "ui/SystemFont.h"
 #include "ui/reader_background.h"
+#include "weread/WereadStore.h"
 
 #include <M5Unified.h>
 #include "lgfx/v1/platforms/esp32/MyPaper_EPD_Config.hpp"
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -29,6 +31,7 @@
 #include <sys/stat.h>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 static const char *TAG = "REFLOW_READER";
@@ -37,6 +40,8 @@ static const uint32_t EPUB_PROGRESS_MAGIC = 0x45504231; // EPB1
 static const uint32_t EPUB_PROGRESS_VERSION = 2;
 static const uint32_t MOBI_PROGRESS_MAGIC = 0x4d4f4231; // MOB1
 static const uint32_t MOBI_PROGRESS_VERSION = 1;
+static const uint32_t FB2_PROGRESS_MAGIC = 0x46423231; // FB21
+static const uint32_t FB2_PROGRESS_VERSION = 1;
 static const uint32_t EPUB_LAYOUT_VERSION = 5;
 static const int64_t PROGRESS_SAVE_DELAY_US = 5LL * 1000 * 1000;
 #if MYPAPER_EPD_USE_2D_ENGINE
@@ -129,8 +134,10 @@ static bool file_exists(const std::string &path)
 
 static std::string lower_ext(const std::string &path)
 {
-    size_t p = path.find_last_of('.');
-    std::string ext = p == std::string::npos ? std::string() : path.substr(p);
+    size_t end = path.find_first_of("?#");
+    if (end == std::string::npos) end = path.size();
+    size_t p = path.rfind('.', end);
+    std::string ext = p == std::string::npos ? std::string() : path.substr(p, end - p);
     std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return (char)std::tolower(c); });
     if (ext == ".jpeg") return ".jpg";
     return ext;
@@ -223,7 +230,7 @@ static bool probe_image_size(const std::string &path, const std::string &ext, in
 
 class EpubReaderActivity : public Activity {
 public:
-    explicit EpubReaderActivity(const char *path)
+    explicit EpubReaderActivity(const char *path, int initial_spine = -1)
     {
         ReaderOverlayChapters chapters;
         chapters.context = this;
@@ -237,8 +244,13 @@ public:
         _ok = g_epub.open(path);
         if (_ok) {
             _is_mobi = g_epub.is_mobi();
-            _progress_root = _is_mobi ? app_paths::mobi_progress_dir() : app_paths::epub_progress_dir();
-            _cache_root = _is_mobi ? app_paths::mobi_cache_dir() : app_paths::epub_cache_dir();
+            _is_fb2 = g_epub.is_fb2();
+            _progress_root = _is_mobi ? app_paths::mobi_progress_dir()
+                                      : (_is_fb2 ? app_paths::fb2_progress_dir()
+                                                 : app_paths::epub_progress_dir());
+            _cache_root = _is_mobi ? app_paths::mobi_cache_dir()
+                                   : (_is_fb2 ? app_paths::fb2_cache_dir()
+                                              : app_paths::epub_cache_dir());
             std::string key = progress_cache_key(path);
             app_paths::ensure_dir(_progress_root.c_str());
             _progress_path = _progress_root + "/" + key + ".pos";
@@ -251,7 +263,9 @@ public:
             _layout_sig = layout_signature();
             int saved_spine = 0;
             uint64_t saved_position = 0;
-            if (load_progress(&saved_spine, &saved_position) && load_spine(saved_spine)) {
+            if (initial_spine >= 0 && load_spine(std::clamp(initial_spine, 0, g_epub.spine_count() - 1))) {
+                _page_index = 0;
+            } else if (load_progress(&saved_spine, &saved_position) && load_spine(saved_spine)) {
                 _page_index = page_for_position(saved_position);
             } else {
                 load_spine(0);
@@ -295,6 +309,12 @@ public:
     {
         int w = M5.Display.width();
         int h = M5.Display.height();
+
+        if (_footnote_popup_visible) {
+            _footnote_popup_visible = false;
+            redraw(w, h);
+            return true;
+        }
 
         if (_overlay.visible()) {
             handle_overlay_action(_overlay.on_key(key));
@@ -345,6 +365,20 @@ public:
         int w = M5.Display.width();
         int h = M5.Display.height();
 
+        if (_footnote_popup_visible) {
+            if (event.type == TouchEventType::SwipeUp || event.type == TouchEventType::SwipeLeft) {
+                ++_footnote_popup_page;
+                redraw(w, h);
+            } else if (event.type == TouchEventType::SwipeDown || event.type == TouchEventType::SwipeRight) {
+                _footnote_popup_page = std::max(0, _footnote_popup_page - 1);
+                redraw(w, h);
+            } else if (event.type == TouchEventType::Tap || event.type == TouchEventType::Back) {
+                _footnote_popup_visible = false;
+                redraw(w, h);
+            }
+            return true;
+        }
+
         if (_overlay.visible()) {
             handle_overlay_action(_overlay.on_touch(event));
             return true;
@@ -373,6 +407,13 @@ public:
             return true;
         }
         if (event.type != TouchEventType::Tap) return false;
+
+        document_layout::PageItem::FootnoteRef footnote;
+        if (footnote_at(event.x, event.y, &footnote)) {
+            open_footnote(footnote);
+            redraw(w, h);
+            return true;
+        }
 
         if (event.y < TOP_H + 10 && event.x < 120) {
             ActivityManager::instance().pop();
@@ -521,12 +562,19 @@ private:
     std::string _progress_root;
     std::string _cache_root;
     bool _is_mobi = false;
+    bool _is_fb2 = false;
     bool _progress_dirty = false;
     int64_t _progress_dirty_at = 0;
     int _non_quality_refresh_count = 0;
     bool _post_image_quality_pending = false;
     document_layout::Pages _pages;
     std::unordered_map<std::string, CachedImage> _image_cache;
+    std::unordered_set<std::string> _missing_images;
+    std::unordered_map<std::string, std::string> _footnote_cache;
+    std::unordered_set<std::string> _missing_footnotes;
+    bool _footnote_popup_visible = false;
+    std::string _footnote_popup_text;
+    int _footnote_popup_page = 0;
     PagePrefetch _prefetch;
 
     void release_runtime_cache()
@@ -539,6 +587,12 @@ private:
         document_layout::Pages().swap(_pages);
         invalidate_page_prefetch();
         std::unordered_map<std::string, CachedImage>().swap(_image_cache);
+        std::unordered_set<std::string>().swap(_missing_images);
+        std::unordered_map<std::string, std::string>().swap(_footnote_cache);
+        std::unordered_set<std::string>().swap(_missing_footnotes);
+        _footnote_popup_text.clear();
+        _footnote_popup_visible = false;
+        _footnote_popup_page = 0;
         _page_count = 0;
         _page_index = 0;
 
@@ -623,8 +677,10 @@ private:
                   fread(&saved_position, 1, sizeof(saved_position), fp) == sizeof(saved_position);
         fclose(fp);
 
-        uint32_t expected_magic = _is_mobi ? MOBI_PROGRESS_MAGIC : EPUB_PROGRESS_MAGIC;
-        uint32_t expected_version = _is_mobi ? MOBI_PROGRESS_VERSION : EPUB_PROGRESS_VERSION;
+        uint32_t expected_magic = _is_mobi ? MOBI_PROGRESS_MAGIC
+                                           : (_is_fb2 ? FB2_PROGRESS_MAGIC : EPUB_PROGRESS_MAGIC);
+        uint32_t expected_version = _is_mobi ? MOBI_PROGRESS_VERSION
+                                             : (_is_fb2 ? FB2_PROGRESS_VERSION : EPUB_PROGRESS_VERSION);
         if (!ok || magic != expected_magic || version != expected_version) {
             ESP_LOGI(TAG, "progress ignored ok=%d magic=%08lx version=%lu layout=%08lx/%08lx",
                      ok ? 1 : 0,
@@ -665,8 +721,10 @@ private:
         FILE *fp = fopen(_progress_path.c_str(), "wb");
         if (!fp) return;
 
-        uint32_t magic = _is_mobi ? MOBI_PROGRESS_MAGIC : EPUB_PROGRESS_MAGIC;
-        uint32_t version = _is_mobi ? MOBI_PROGRESS_VERSION : EPUB_PROGRESS_VERSION;
+        uint32_t magic = _is_mobi ? MOBI_PROGRESS_MAGIC
+                                  : (_is_fb2 ? FB2_PROGRESS_MAGIC : EPUB_PROGRESS_MAGIC);
+        uint32_t version = _is_mobi ? MOBI_PROGRESS_VERSION
+                                    : (_is_fb2 ? FB2_PROGRESS_VERSION : EPUB_PROGRESS_VERSION);
         uint32_t spine = (uint32_t)std::max(0, _spine_index);
         uint64_t position = page_position(_page_index);
         fwrite(&magic, 1, sizeof(magic), fp);
@@ -674,7 +732,7 @@ private:
         fwrite(&_layout_sig, 1, sizeof(_layout_sig), fp);
         fwrite(&spine, 1, sizeof(spine), fp);
         fwrite(&position, 1, sizeof(position), fp);
-        if (_is_mobi) {
+        if (_is_mobi || _is_fb2) {
             uint32_t section_count = static_cast<uint32_t>(g_epub.spine_count());
             uint32_t section_size = spine < section_count
                                         ? g_epub.spine_item(static_cast<int>(spine)).uncompressed_size
@@ -683,6 +741,20 @@ private:
             fwrite(&section_size, 1, sizeof(section_size), fp);
         }
         fclose(fp);
+        if (g_epub.is_weread()) {
+            const weread::Chapter *chapter = g_epub.weread_chapter(static_cast<int>(spine));
+            if (chapter) {
+                const float within = _page_count > 0
+                    ? static_cast<float>(_page_index) / static_cast<float>(_page_count) : 0.0f;
+                const float overall = (static_cast<float>(spine) + within) /
+                                      static_cast<float>(std::max(1, g_epub.spine_count()));
+                weread::store::PendingProgress pending;
+                pending.book_id = g_epub.weread_book_id();
+                pending.chapter = *chapter;
+                pending.percent = std::clamp(static_cast<int>(overall * 100.0f + 0.5f), 0, 100);
+                weread::store::save_pending_progress(pending);
+            }
+        }
         _progress_dirty = false;
         ESP_LOGI(TAG, "progress saved spine=%lu position=%llu page=%d/%d force=%d time=%lld ms",
                  (unsigned long)spine + 1,
@@ -837,6 +909,8 @@ private:
             ESP_LOGW(TAG, "parse spine failed index=%d href=%s", index, spine.href.c_str());
             return false;
         }
+        size_t footnote_ref_count = 0;
+        for (const auto &block : blocks) footnote_ref_count += block.footnotes.size();
         int64_t t_parse = esp_timer_get_time();
 
         _spine_index = index;
@@ -844,12 +918,13 @@ private:
         build_pages(blocks);
         int64_t t_layout = esp_timer_get_time();
 
-        ESP_LOGI(TAG, "load_spine index=%d/%d href=%s blocks=%u pages=%d read=%lld parse=%lld layout=%lld total=%lld ms",
+        ESP_LOGI(TAG, "load_spine index=%d/%d href=%s blocks=%u pages=%d footnotes=%u read=%lld parse=%lld layout=%lld total=%lld ms",
                  _spine_index + 1,
                  g_epub.spine_count(),
                  spine.href.c_str(),
                  (unsigned)blocks.size(),
                  _page_count,
+                 (unsigned)footnote_ref_count,
                  (t_read - t0) / 1000,
                  (t_parse - t_read) / 1000,
                  (t_layout - t_parse) / 1000,
@@ -913,11 +988,26 @@ private:
         return ext == ".jpg" || ext == ".png" || ext == ".bmp";
     }
 
+    bool is_ignored_layout_image(const std::string &href) const
+    {
+        if (!g_epub.is_weread() || href.empty()) return false;
+        size_t end = href.find_first_of("?#");
+        if (end == std::string::npos) end = href.size();
+        const size_t slash = href.find_last_of("/\\", end);
+        std::string name = href.substr(slash == std::string::npos ? 0 : slash + 1,
+                                       end - (slash == std::string::npos ? 0 : slash + 1));
+        std::transform(name.begin(), name.end(), name.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        return name == "note.png";
+    }
+
     bool ensure_cached_image(const std::string &href, CachedImage *image, ImageLoadStats *stats = nullptr)
     {
         int64_t t0 = esp_timer_get_time();
         if (stats) *stats = ImageLoadStats();
         if (!image || href.empty()) return false;
+        if (_missing_images.find(href) != _missing_images.end()) return false;
         auto cached = _image_cache.find(href);
         if (cached != _image_cache.end() && file_exists(cached->second.path)) {
             *image = cached->second;
@@ -943,6 +1033,8 @@ private:
             int64_t t_extract = esp_timer_get_time();
             if (!g_epub.extract_item_to_file(href, out_path)) {
                 ESP_LOGW(TAG, "image extract failed href=%s", href.c_str());
+                remove(out_path.c_str());
+                _missing_images.insert(href);
                 return false;
             }
             if (stats) stats->extract_ms = (esp_timer_get_time() - t_extract) / 1000;
@@ -954,6 +1046,7 @@ private:
         int64_t t_probe = esp_timer_get_time();
         if (!probe_image_size(out_path, ext, &info.width, &info.height, &info.jpg_progressive)) {
             ESP_LOGW(TAG, "image probe failed href=%s path=%s", href.c_str(), out_path.c_str());
+            _missing_images.insert(href);
             return false;
         }
         if (stats) {
@@ -1126,6 +1219,15 @@ private:
         document_blocks.reserve(blocks.size());
         uint64_t content_position = 0;
         for (auto &block : blocks) {
+            if (block.type == EpubContentBlockType::Image &&
+                is_ignored_layout_image(block.href)) {
+                // WeRead uses note.png as a decorative footnote marker. It is
+                // not part of the readable content and may not be included in
+                // the downloaded chapter payload. Do not create a fallback
+                // image line or consume any layout height for it.
+                content_position += 1;
+                continue;
+            }
             document_layout::Block output;
             bool is_image = block.type == EpubContentBlockType::Image;
             if (block.type == EpubContentBlockType::Image) {
@@ -1150,6 +1252,15 @@ private:
             output.allow_first_line_indent = !block.heading &&
                                              block.type == EpubContentBlockType::Text;
             output.paragraph_spacing_after = output.allow_first_line_indent;
+            output.footnotes.reserve(block.footnotes.size());
+            for (auto &ref : block.footnotes) {
+                document_layout::Block::FootnoteRef output_ref;
+                output_ref.byte_start = ref.byte_start;
+                output_ref.byte_end = ref.byte_end;
+                output_ref.target = std::move(ref.target);
+                output_ref.content = std::move(ref.content);
+                output.footnotes.push_back(std::move(output_ref));
+            }
             size_t text_bytes = output.text.size();
             document_blocks.push_back(std::move(output));
 
@@ -1183,7 +1294,6 @@ private:
             }
             CachedImage image;
             if (!reader->ensure_cached_image(resource, &image)) {
-                ESP_LOGW(TAG, "image layout probe failed href=%s", resource.c_str());
                 return false;
             }
             info->width = image.width;
@@ -1411,7 +1521,10 @@ private:
             bool found = false;
             for (int i = target_spine; i < g_epub.spine_count(); ++i) {
                 next.pages.clear();
-                if (!load_spine_pages(i, &next.pages) || next.pages.empty()) continue;
+                if (!load_spine_pages(i, &next.pages) || next.pages.empty()) {
+                    if (g_epub.is_weread()) break;
+                    continue;
+                }
                 target_spine = i;
                 target_page = 0;
                 next.spine = i;
@@ -1480,7 +1593,9 @@ private:
         std::vector<EpubContentBlock> blocks;
         if (!epub_parse_xhtml_blocks(xhtml, spine.href, &blocks)) return false;
         for (const auto &block : blocks) {
-            if (block.type == EpubContentBlockType::Image && is_supported_image_href(block.href)) {
+            if (block.type == EpubContentBlockType::Image &&
+                !is_ignored_layout_image(block.href) &&
+                is_supported_image_href(block.href)) {
                 *href = block.href;
                 return true;
             }
@@ -1532,6 +1647,112 @@ private:
                  out_path.c_str());
     }
 
+    bool resolve_footnote_content(const document_layout::PageItem::FootnoteRef &ref,
+                                  std::string *content)
+    {
+        if (!content) return false;
+        if (!ref.content.empty()) {
+            *content = ref.content;
+            return true;
+        }
+        if (ref.target.empty() || _missing_footnotes.count(ref.target)) return false;
+        const auto cached = _footnote_cache.find(ref.target);
+        if (cached != _footnote_cache.end()) {
+            *content = cached->second;
+            return true;
+        }
+
+        if (!g_epub.resolve_footnote(ref.target, content)) {
+            _missing_footnotes.insert(ref.target);
+            ESP_LOGW(TAG, "footnote target unresolved: %s", ref.target.c_str());
+            return false;
+        }
+        _footnote_cache[ref.target] = *content;
+        return true;
+    }
+
+    bool footnote_at(int touch_x, int touch_y,
+                     document_layout::PageItem::FootnoteRef *result)
+    {
+        if (!result || _page_index < 0 || _page_index >= static_cast<int>(_pages.size())) return false;
+        auto &renderer = reader_text_renderer();
+        int y = content_y();
+        const int line_h = std::max(1, renderer.lineHeight());
+        for (const auto &item : _pages[static_cast<size_t>(_page_index)]) {
+            if (item.type == PageItemType::Text && !item.footnotes.empty()) {
+                int text_x = content_x() + item.x_offset;
+                if (item.centered) {
+                    text_x = content_x() + std::max(0, (content_width() - renderer.measureUtf8(item.text)) / 2);
+                }
+                for (const auto &ref : item.footnotes) {
+                    if (ref.byte_start >= ref.byte_end || ref.byte_end > item.text.size()) continue;
+                    const int ref_x = text_x + renderer.measureUtf8(item.text.substr(0, ref.byte_start));
+                    const int ref_w = std::max(12, renderer.measureUtf8(
+                        item.text.substr(ref.byte_start, ref.byte_end - ref.byte_start)));
+                    if (touch_x >= ref_x - 12 && touch_x <= ref_x + ref_w + 12 &&
+                        touch_y >= y - 10 && touch_y <= y + line_h + 10) {
+                        *result = ref;
+                        return true;
+                    }
+                }
+            }
+            y += item.type == PageItemType::Text ? line_h : item.height;
+        }
+        return false;
+    }
+
+    void open_footnote(const document_layout::PageItem::FootnoteRef &ref)
+    {
+        if (!resolve_footnote_content(ref, &_footnote_popup_text)) {
+            _footnote_popup_text = "Footnote content is unavailable.";
+        }
+        _footnote_popup_page = 0;
+        _footnote_popup_visible = true;
+    }
+
+    void draw_footnote_popup(lgfx::LGFXBase &gfx, int w, int h)
+    {
+        if (!_footnote_popup_visible || _footnote_popup_text.empty()) return;
+        auto &renderer = reader_text_renderer();
+        const int line_h = std::max(42, renderer.lineHeight());
+        const int box_x = 24;
+        const int box_w = std::max(80, w - box_x * 2);
+        const int text_x = box_x + 28;
+        const int text_w = std::max(40, box_w - 56);
+        auto lines = renderer.layoutUtf8Paragraph(_footnote_popup_text, text_w, 0);
+        const int max_box_h = h * 68 / 100;
+        const int max_lines = std::max(1, (max_box_h - 94) / line_h);
+        const int page_count = std::max(1, (static_cast<int>(lines.size()) + max_lines - 1) / max_lines);
+        _footnote_popup_page = std::clamp(_footnote_popup_page, 0, page_count - 1);
+        const size_t first_line = static_cast<size_t>(_footnote_popup_page * max_lines);
+        const size_t last_line = std::min(lines.size(), first_line + static_cast<size_t>(max_lines));
+        const int visible_lines = std::max(1, static_cast<int>(last_line - first_line));
+        const int box_h = std::min(max_box_h, 82 + visible_lines * line_h);
+        const int box_y = h - box_h - 24;
+
+        gfx.fillRect(box_x, box_y, box_w, box_h, TFT_WHITE);
+        gfx.drawRect(box_x, box_y, box_w, box_h, TFT_BLACK);
+        gfx.drawFastHLine(box_x, box_y + 58, box_w, TFT_BLACK);
+        std::string title = "Footnote";
+        if (page_count > 1) {
+            title += " " + std::to_string(_footnote_popup_page + 1) + "/" + std::to_string(page_count);
+        }
+        system_font::draw_left(gfx, title.c_str(), text_x, box_y + 10, TFT_BLACK);
+        std::string visible_text;
+        for (size_t i = first_line; i < last_line; ++i) {
+            visible_text += lines[i].text;
+            visible_text.push_back('\n');
+        }
+        renderer.preparePage(visible_text);
+        int y = box_y + 72;
+        for (size_t i = first_line; i < last_line; ++i) {
+            const auto &line = lines[i];
+            if (y + line_h > box_y + box_h) break;
+            renderer.drawUtf8Line(gfx, line.text, text_x, y, TFT_BLACK, 0);
+            y += line_h;
+        }
+    }
+
     void next_page()
     {
         if (!_ok) return;
@@ -1556,6 +1777,7 @@ private:
                 return;
             }
             if (load_spine(next_spine) && !_pages.empty()) return;
+            if (g_epub.is_weread()) return;
             next_spine++;
         }
     }
@@ -1575,6 +1797,7 @@ private:
                 _page_index = std::max(0, _page_count - 1);
                 return;
             }
+            if (g_epub.is_weread()) return;
             prev_spine--;
         }
     }
@@ -1667,6 +1890,16 @@ private:
                         gfx, item.text, text_x, y, TFT_BLACK,
                         item.justify ? item.width : 0);
                     draw_underline(text_x, y, underline_w);
+                    for (const auto &ref : item.footnotes) {
+                        if (ref.byte_start >= ref.byte_end || ref.byte_end > item.text.size()) continue;
+                        const int ref_x = text_x + reader_text_renderer().measureUtf8(
+                            item.text.substr(0, ref.byte_start));
+                        const int ref_w = reader_text_renderer().measureUtf8(
+                            item.text.substr(ref.byte_start, ref.byte_end - ref.byte_start));
+                        if (ref_w > 0) {
+                            gfx.drawFastHLine(ref_x, y + std::max(1, line_h - 3), ref_w, TFT_BLACK);
+                        }
+                    }
                 }
                 y += line_h;
                 text_us += esp_timer_get_time() - item_begin;
@@ -1833,6 +2066,7 @@ private:
             content_done = esp_timer_get_time();
         }
         if (_overlay.visible()) _overlay.draw();
+        if (_footnote_popup_visible) draw_footnote_popup(M5.Display, w, h);
         const int64_t overlay_done = esp_timer_get_time();
         M5.Display.display();
         const int64_t submit_done = esp_timer_get_time();
@@ -1892,6 +2126,7 @@ private:
             draw_content(w, h);
         }
         if (_overlay.visible()) _overlay.draw();
+        if (_footnote_popup_visible) draw_footnote_popup(M5.Display, w, h);
         M5.Display.display();
         M5.Display.endWrite();
         epd_mode_t default_mode = epub_reader_epd_mode();
@@ -1916,4 +2151,14 @@ void launch_epub_reader(const char *path)
 void launch_mobi_reader(const char *path)
 {
     ActivityManager::instance().push(new EpubReaderActivity(path));
+}
+
+void launch_fb2_reader(const char *path)
+{
+    ActivityManager::instance().push(new EpubReaderActivity(path));
+}
+
+void launch_weread_reader(const char *path, int initial_spine)
+{
+    ActivityManager::instance().push(new EpubReaderActivity(path, initial_spine));
 }

@@ -40,6 +40,7 @@ public:
     uint64_t text_length() const { return _decoded_text_length; }
 
     bool read_section_to_string(const std::string &href, std::string *out) const;
+    bool resolve_filepos_footnote(uint64_t position, std::string *out) const;
     bool extract_resource_to_file(const std::string &href, const std::string &out_path) const;
 
 private:

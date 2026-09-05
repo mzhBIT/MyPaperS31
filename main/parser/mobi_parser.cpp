@@ -1,4 +1,5 @@
 #include "parser/mobi_parser.h"
+#include "parser/epub_html.h"
 #include "storage/app_paths.h"
 
 #include <algorithm>
@@ -871,6 +872,28 @@ bool MobiBook::read_section_to_string(const std::string &href, std::string *out)
         std::string lower = lower_ascii(tag);
         if (lower.find("mbp:pagebreak") == 0) {
             normalized += "<pagebreak/>";
+        } else if (!lower.empty() && lower[0] == 'a' &&
+                   (lower.size() == 1 || std::isspace(static_cast<unsigned char>(lower[1]))) &&
+                   lower.find("href=") == std::string::npos) {
+            uint32_t filepos = 0;
+            const MobiSectionItem *target_section = nullptr;
+            if (parse_decimal_attr(tag, "filepos", &filepos)) {
+                for (const auto &candidate : _sections) {
+                    if (filepos >= candidate.start && filepos < candidate.end) {
+                        target_section = &candidate;
+                        break;
+                    }
+                }
+            }
+            if (target_section) {
+                while (!tag.empty() && std::isspace(static_cast<unsigned char>(tag.back()))) tag.pop_back();
+                normalized += '<';
+                normalized += tag;
+                normalized += " href=\"" + target_section->href + "#mobi-filepos-" +
+                              std::to_string(filepos) + "\">";
+            } else {
+                normalized.append(*out, start, end - start + 1);
+            }
         } else if (lower.find("img") == 0 && lower.find("src=") == std::string::npos) {
             uint32_t recindex = 0;
             if (parse_decimal_attr(tag, "recindex", &recindex) && recindex > 0) {
@@ -891,6 +914,47 @@ bool MobiBook::read_section_to_string(const std::string &href, std::string *out)
     }
     *out = std::move(normalized);
     return true;
+}
+
+bool MobiBook::resolve_filepos_footnote(uint64_t position, std::string *out) const
+{
+    if (!out || position >= _decoded_text_length) return false;
+    const MobiSectionItem *section = nullptr;
+    for (const auto &candidate : _sections) {
+        if (position >= candidate.start && position < candidate.end) {
+            section = &candidate;
+            break;
+        }
+    }
+    if (!section) return false;
+
+    std::string snippet;
+    const uint64_t end = std::min<uint64_t>(section->end, position + 12000);
+    if (!read_text_range(position, end, &snippet) || snippet.empty()) return false;
+
+    std::string lower = lower_ascii(snippet);
+    size_t cut = std::string::npos;
+    for (const char *closing : {"</p", "</li", "</div", "</aside", "<mbp:pagebreak"}) {
+        const size_t found = lower.find(closing);
+        if (found != std::string::npos && (cut == std::string::npos || found < cut)) cut = found;
+    }
+    if (cut != std::string::npos) {
+        const size_t close_end = snippet.find('>', cut);
+        snippet.resize(close_end == std::string::npos ? cut : close_end + 1);
+    } else if (snippet.size() > 6000) {
+        snippet.resize(6000);
+    }
+
+    std::vector<EpubContentBlock> blocks;
+    const std::string wrapped = "<html><body><p>" + snippet + "</p></body></html>";
+    if (!epub_parse_xhtml_blocks(wrapped, section->href, &blocks)) return false;
+    for (const auto &block : blocks) {
+        if (block.type == EpubContentBlockType::Text && !block.text.empty()) {
+            *out = block.text;
+            return true;
+        }
+    }
+    return false;
 }
 
 std::string MobiBook::resource_href(uint32_t resource_index) const

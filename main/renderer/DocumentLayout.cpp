@@ -52,10 +52,10 @@ struct Builder {
         }
     }
 
-    void add_text(const text_layout::Line &line, uint64_t block_position, bool centered)
+    void add_text(const text_layout::Line &line, const Block &block, bool centered)
     {
         if (line.text.empty()) {
-            if (line.hard_break) add_space(block_position + line.byte_start,
+            if (line.hard_break) add_space(block.content_position + line.byte_start,
                                            options.line_height);
             return;
         }
@@ -63,11 +63,26 @@ struct Builder {
         item.type = PageItemType::Text;
         item.text = line.text;
         item.height = options.line_height;
-        item.content_position = block_position + line.byte_start;
+        item.content_position = block.content_position + line.byte_start;
         item.justify = line.justify && !centered;
         item.x_offset = line.x_offset;
         item.width = std::max(1, options.content_width - line.x_offset);
         item.centered = centered;
+        for (const auto &ref : block.footnotes) {
+            const size_t start = std::max(ref.byte_start, line.byte_start);
+            const size_t end = std::min(ref.byte_end, line.byte_end);
+            if (start >= end) continue;
+            PageItem::FootnoteRef line_ref;
+            line_ref.byte_start = start - line.byte_start;
+            line_ref.byte_end = end - line.byte_start;
+            line_ref.target = ref.target;
+            line_ref.content = ref.content;
+            item.footnotes.push_back(std::move(line_ref));
+        }
+        // Exact touch geometry for a justified substring would require the
+        // renderer's per-gap expansion map. Footnote lines are rare; retain
+        // their natural spacing so the visible marker and hit box agree.
+        if (!item.footnotes.empty()) item.justify = false;
         ensure_space(item.height);
         page.push_back(std::move(item));
         used_height += options.line_height;
@@ -78,7 +93,9 @@ struct Builder {
         if (!options.image_fallback_text || !options.image_fallback_text[0]) return;
         text_layout::Line line;
         line.text = options.image_fallback_text;
-        add_text(line, position, false);
+        Block fallback;
+        fallback.content_position = position;
+        add_text(line, fallback, false);
     }
 
     void add_rule(uint64_t position)
@@ -296,7 +313,7 @@ Pages paginate(const std::vector<Block> &blocks, const Options &options)
 
                 for (int n = 0; n < take && line_index < wrapped.size();
                      ++n, ++line_index) {
-                    builder.add_text(wrapped[line_index], block.content_position,
+                    builder.add_text(wrapped[line_index], block,
                                      block.heading || block.heading_level > 0);
                 }
                 if (line_index < wrapped.size()) builder.finish_page();

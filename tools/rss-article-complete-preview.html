@@ -1,0 +1,310 @@
+<div id="rss-article-complete-preview">
+  <div class="viz-controls" aria-label="文章翻页控件">
+    <button class="btn" type="button" data-action="previous">上一页</button>
+    <span class="page-status" aria-live="polite">正在排版…</span>
+    <button class="btn" type="button" data-action="next">下一页</button>
+  </div>
+  <canvas width="1216" height="684" tabindex="0" aria-label="RSS 文章完整分页预览"></canvas>
+  <p class="hint">点击画面左右区域，或使用键盘 ← → 翻页</p>
+</div>
+
+<style>
+  #rss-article-complete-preview {
+    width: 100%;
+    color-scheme: light dark;
+    --rss-panel: light-dark(#f2f2f2, #202020);
+    --rss-ink: light-dark(#151515, #f2f2f2);
+    --rss-border: light-dark(#aaa, #666);
+    font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  }
+  #rss-article-complete-preview .viz-controls {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    margin-bottom: 10px;
+  }
+  #rss-article-complete-preview .btn {
+    appearance: none;
+    min-width: 86px;
+    min-height: 38px;
+    border: 1px solid var(--rss-border);
+    border-radius: 8px;
+    background: var(--rss-panel);
+    color: var(--rss-ink);
+    cursor: pointer;
+    font: inherit;
+  }
+  #rss-article-complete-preview .btn:disabled {
+    cursor: default;
+    opacity: 0.42;
+  }
+  #rss-article-complete-preview .page-status {
+    min-width: 82px;
+    color: var(--rss-ink);
+    text-align: center;
+    font-variant-numeric: tabular-nums;
+  }
+  #rss-article-complete-preview canvas {
+    display: block;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1216 / 684;
+    border: 1px solid var(--rss-border);
+    background: #fff;
+    cursor: pointer;
+    image-rendering: auto;
+  }
+  #rss-article-complete-preview .hint {
+    margin: 8px 0 0;
+    color: var(--rss-ink);
+    text-align: center;
+    font-size: 13px;
+    opacity: 0.72;
+  }
+</style>
+
+<script>
+(() => {
+  const root = document.getElementById('rss-article-complete-preview');
+  const canvas = root.querySelector('canvas');
+  const ctx = canvas.getContext('2d');
+  const status = root.querySelector('.page-status');
+  const previous = root.querySelector('[data-action="previous"]');
+  const next = root.querySelector('[data-action="next"]');
+
+  const W = 1216;
+  const H = 684;
+  const TOP_H = 50;
+  const LEFT = 20;
+  const RIGHT = 20;
+  const CONTENT_TOP = 55;
+  const CONTENT_BOTTOM = 634;
+  const CONTENT_W = W - LEFT - RIGHT;
+  const LINE_H = 44;
+  const FONT_SIZE = 36;
+  const INDENT = FONT_SIZE * 2;
+  const FONT = `${FONT_SIZE}px "Microsoft YaHei", "Noto Sans CJK SC", sans-serif`;
+
+  const article = {
+    title: '宝马新世代 BMW iX3 将于 11 月到店，全系配备智能驾驶辅助',
+    date: '2026-09-03 20:45',
+    blocks: [
+      { type: 'p', text: 'IT之家 9 月 3 日消息，宝马中国今日发布新世代 BMW iX3 答网友问第三期，透露新车将于 11 月到店，全系配备智能驾驶辅助。' },
+      { type: 'p', text: '据介绍，新世代 BMWiX3 将于 11 月起陆续到店，并开放试驾体验。目前，BMW 新世代限时城市首秀正在火热进行中。9 月巡展将陆续登陆杭州、上海、深圳和武汉。现场将展出 3 台新世代 BMW iX3，以及 1 台新世代 BMW i3。' },
+      { type: 'img', src: 'https://img.ithome.com/newsuploadfiles/2026/9/f0a5ed32-ff00-4e9b-a795-13f030ddd605.png?x-bce-process=image/format,f_auto', sourceW: 631, sourceH: 477 },
+      { type: 'p', text: 'IT之家附城市首秀活动时间和地址如下：' },
+      { type: 'p', text: '9 月 5 日至 6 日杭州站：湖滨步行街 (湖滨银泰 in77)' },
+      { type: 'p', text: '9 月 12 日至 13 日上海站：西岸梦中心 · 剧院广场东' },
+      { type: 'p', text: '9 月 19 日至 20 日深圳站：万象天地 · 水广场' },
+      { type: 'p', text: '9 月 26 日至 27 日武汉站：新天地 · 南馆 A1 户外广场' },
+      { type: 'p', text: '自 9 月 15 日起，BMW 上海品牌体验中心 (上海市浦东新区雪野路 35 号) 将开启新世代限时展览，展车将持续展出至 12 月。现场将展出 1 台新世代 BMW iX3 及 1 台新世代 BMW i3。10 月起，更多城市的 BMW 授权经销商将陆续开展实车品鉴活动。' },
+      { type: 'p', text: '新世代 BMW iX3 全系配备了 BMW 智能驾驶辅助系统，其中智能驾驶辅助系统 Pro、智能泊车辅助系统 Pro、基础驾驶辅助功能和所有主动安全相关功能，均长期免费使用，无需额外付费。同时，全系新世代 BMWiX3 购车即可获赠高速及城区领航驾驶辅助 Pro 免费权益，总价值超 2 万元：' },
+      { type: 'p', text: '城区领航驾驶辅助 Pro：免费使用 3 年' },
+      { type: 'p', text: '高速领航驾驶辅助 Pro：免费使用 8 年' },
+      { type: 'p', text: '高速及城区领航驾驶辅助 Pro 免费权益到期后，用户可根据自身需求灵活选择是否续订。如果选择不续订，智能驾驶辅助系统 Pro (包括支持红绿灯启停和漫游场景的辅助驾驶以及主动巡航功能等)、智能泊车辅助系统 Pro 和主动安全相关功能依然可以继续免费使用。' },
+      { type: 'p', text: '智能驾驶辅助系统 Pro 支持红绿灯启停和漫游场景的辅助驾驶，主动巡航功能等常用功能，无论在城区还是高速场景，无需开启导航即可使用。系统还可以根据用户指令完成变道和路口转弯，提升日常驾驶的便利性与安全性。' },
+      { type: 'p', text: '高速及城区领航驾驶辅助 Pro 支持高速公路及城市道路点到点领航辅助驾驶。在领航过程中，车辆可根据导航路线和路况，辅助完成变道、转弯等操作进一步减轻驾驶负担。' },
+      { type: 'img', src: 'https://img.ithome.com/newsuploadfiles/2026/9/c96cd750-df0c-42af-88a3-7868e7d3964d.png?x-bce-process=image/format,f_auto', sourceW: 668, sourceH: 6885 }
+    ]
+  };
+
+  const images = article.blocks.filter(block => block.type === 'img').map(block => {
+    const image = new Image();
+    image.referrerPolicy = 'no-referrer';
+    image.src = block.src;
+    image.addEventListener('load', draw);
+    image.addEventListener('error', draw);
+    return image;
+  });
+
+  ctx.font = FONT;
+
+  function measure(text) {
+    return ctx.measureText(text).width;
+  }
+
+  function wrap(text, firstIndent = 0) {
+    const chars = Array.from(text);
+    const lines = [];
+    let line = '';
+    let lineIndex = 0;
+    for (const char of chars) {
+      const available = CONTENT_W - (lineIndex === 0 ? firstIndent : 0);
+      if (line && measure(line + char) > available) {
+        lines.push({ text: line, indent: lineIndex === 0 ? firstIndent : 0, justify: true });
+        line = char;
+        lineIndex += 1;
+      } else {
+        line += char;
+      }
+    }
+    if (line) lines.push({ text: line, indent: lineIndex === 0 ? firstIndent : 0, justify: false });
+    return lines;
+  }
+
+  const pages = [[]];
+  let y = CONTENT_TOP;
+  let imageIndex = 0;
+
+  function pageBreak() {
+    pages.push([]);
+    y = CONTENT_TOP;
+  }
+
+  function ensure(height) {
+    if (y + height > CONTENT_BOTTOM) pageBreak();
+  }
+
+  function addLine(line, options = {}) {
+    ensure(LINE_H);
+    pages.at(-1).push({ type: 'text', y, ...line, ...options });
+    y += LINE_H;
+  }
+
+  wrap(article.title).forEach(line => addLine(line, { center: true, justify: false }));
+  addLine({ text: article.date, indent: 0, justify: false });
+  ensure(LINE_H);
+  y += LINE_H;
+
+  article.blocks.forEach(block => {
+    if (block.type === 'p') {
+      wrap(block.text, INDENT).forEach(line => addLine(line));
+      return;
+    }
+
+    const maxImageH = Math.min(320, Math.max(120, Math.floor(H / 3)));
+    let imageW = block.sourceW;
+    let imageH = block.sourceH;
+    const scale = Math.min(1, CONTENT_W / imageW, maxImageH / imageH);
+    imageW = Math.max(1, Math.round(imageW * scale));
+    imageH = Math.max(1, Math.round(imageH * scale));
+    let remaining = CONTENT_BOTTOM - y;
+    if (imageH > remaining) {
+      if (remaining > (CONTENT_BOTTOM - CONTENT_TOP) / 2) {
+        const fit = remaining / imageH;
+        imageW = Math.max(1, Math.round(imageW * fit));
+        imageH = remaining;
+      } else {
+        pageBreak();
+        remaining = CONTENT_BOTTOM - y;
+      }
+    }
+    pages.at(-1).push({ type: 'image', y, w: imageW, h: imageH, imageIndex });
+    y += imageH;
+    imageIndex += 1;
+  });
+
+  let currentPage = 0;
+
+  function drawJustified(text, x, baseline, width) {
+    const chars = Array.from(text);
+    if (chars.length < 2) {
+      ctx.fillText(text, x, baseline);
+      return;
+    }
+    const rawWidth = chars.reduce((sum, char) => sum + measure(char), 0);
+    const gap = Math.max(0, (width - rawWidth) / (chars.length - 1));
+    let cursor = x;
+    chars.forEach(char => {
+      ctx.fillText(char, cursor, baseline);
+      cursor += measure(char) + gap;
+    });
+  }
+
+  function drawImageItem(item) {
+    const image = images[item.imageIndex];
+    const x = LEFT + Math.floor((CONTENT_W - item.w) / 2);
+    if (image && image.complete && image.naturalWidth) {
+      ctx.drawImage(image, x, item.y, item.w, item.h);
+    } else {
+      ctx.save();
+      ctx.strokeStyle = '#777';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(x + 0.5, item.y + 0.5, Math.max(0, item.w - 1), Math.max(0, item.h - 1));
+      ctx.font = '24px "Microsoft YaHei", sans-serif';
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = '#666';
+      ctx.fillText('图片', x + item.w / 2, item.y + item.h / 2);
+      ctx.restore();
+    }
+  }
+
+  function draw() {
+    ctx.save();
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, W, H);
+    ctx.strokeStyle = '#111';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, 49.5);
+    ctx.lineTo(W, 49.5);
+    ctx.stroke();
+
+    ctx.fillStyle = '#111';
+    ctx.font = FONT;
+    ctx.textBaseline = 'top';
+    ctx.textAlign = 'left';
+    ctx.fillText('<', 12, 3);
+    ctx.textAlign = 'center';
+    ctx.fillText('RSS', W / 2, 3);
+
+    pages[currentPage].forEach(item => {
+      if (item.type === 'image') {
+        drawImageItem(item);
+        return;
+      }
+      ctx.font = FONT;
+      ctx.fillStyle = '#111';
+      ctx.textBaseline = 'top';
+      if (item.center) {
+        ctx.textAlign = 'center';
+        ctx.fillText(item.text, LEFT + CONTENT_W / 2, item.y);
+      } else if (item.justify) {
+        ctx.textAlign = 'left';
+        drawJustified(item.text, LEFT + item.indent, item.y, CONTENT_W - item.indent);
+      } else {
+        ctx.textAlign = 'left';
+        ctx.fillText(item.text, LEFT + item.indent, item.y);
+      }
+    });
+
+    ctx.font = FONT;
+    ctx.fillStyle = '#111';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'top';
+    ctx.fillText(`${currentPage + 1}/${pages.length}`, 1206, 634);
+    ctx.restore();
+
+    status.textContent = `${currentPage + 1} / ${pages.length}`;
+    previous.disabled = currentPage === 0;
+    next.disabled = currentPage === pages.length - 1;
+  }
+
+  function go(delta) {
+    const target = Math.max(0, Math.min(pages.length - 1, currentPage + delta));
+    if (target === currentPage) return;
+    currentPage = target;
+    draw();
+  }
+
+  previous.addEventListener('click', () => go(-1));
+  next.addEventListener('click', () => go(1));
+  canvas.addEventListener('click', event => {
+    const rect = canvas.getBoundingClientRect();
+    go(event.clientX - rect.left < rect.width / 2 ? -1 : 1);
+  });
+  canvas.addEventListener('keydown', event => {
+    if (event.key === 'ArrowLeft') {
+      event.preventDefault();
+      go(-1);
+    } else if (event.key === 'ArrowRight') {
+      event.preventDefault();
+      go(1);
+    }
+  });
+
+  draw();
+})();
+</script>

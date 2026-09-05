@@ -1,0 +1,94 @@
+<div id="rss-layout-preview">
+  <svg viewBox="0 0 1216 684" role="img" aria-labelledby="rss-preview-title rss-preview-desc">
+    <title id="rss-preview-title">RSS News 1216 by 684 preview</title>
+    <desc id="rss-preview-desc">The first four news items from rss_sample.xml, rendered with the current RSS list dimensions and horizontal separators.</desc>
+    <rect class="rss-screen" x="0" y="0" width="1216" height="684"></rect>
+
+    <text class="rss-ui-text rss-back" x="12" y="3">&lt;</text>
+    <text class="rss-ui-text rss-heading" x="608" y="3">RSS News</text>
+    <line class="rss-rule" x1="0" y1="49" x2="1216" y2="49"></line>
+
+    <foreignObject x="24" y="64" width="1060" height="126">
+      <div xmlns="http://www.w3.org/1999/xhtml" class="rss-title">宝马新世代 BMW iX3 将于 11 月到店，全系配备智能驾驶辅助</div>
+    </foreignObject>
+    <text class="rss-ui-text rss-date" x="1190" y="68">20:45</text>
+    <line class="rss-rule" x1="12" y1="204" x2="1204" y2="204"></line>
+
+    <foreignObject x="24" y="214" width="1060" height="126">
+      <div xmlns="http://www.w3.org/1999/xhtml" class="rss-title">英特尔取消沿用近半世纪的 Fellow 头衔，顶尖研究员改称杰出工程师</div>
+    </foreignObject>
+    <text class="rss-ui-text rss-date" x="1190" y="218">20:44</text>
+    <line class="rss-rule" x1="12" y1="354" x2="1204" y2="354"></line>
+
+    <foreignObject x="24" y="364" width="1060" height="126">
+      <div xmlns="http://www.w3.org/1999/xhtml" class="rss-title">TCL 首款 OLED 显示屏 NXTPAPER 手机 P80 Ultra 发布，可一键切换“电纸书”模式</div>
+    </foreignObject>
+    <text class="rss-ui-text rss-date" x="1190" y="368">20:41</text>
+    <line class="rss-rule" x1="12" y1="504" x2="1204" y2="504"></line>
+
+    <foreignObject x="24" y="514" width="1060" height="126">
+      <div xmlns="http://www.w3.org/1999/xhtml" class="rss-title">创历史新高：挪威 8 月新车 98.7% 为纯电动汽车</div>
+    </foreignObject>
+    <text class="rss-ui-text rss-date" x="1190" y="518">20:32</text>
+    <line class="rss-rule" x1="12" y1="654" x2="1204" y2="654"></line>
+  </svg>
+</div>
+
+<style>
+  #rss-layout-preview {
+    width: 100%;
+    background: transparent;
+    color-scheme: light dark;
+    --rss-paper: light-dark(#ffffff, #ffffff);
+    --rss-ink: light-dark(#111111, #111111);
+  }
+
+  #rss-layout-preview svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    aspect-ratio: 1216 / 684;
+    background: var(--rss-paper);
+  }
+
+  #rss-layout-preview .rss-screen {
+    fill: var(--rss-paper);
+  }
+
+  #rss-layout-preview .rss-rule {
+    stroke: var(--rss-ink);
+    stroke-width: 1;
+    shape-rendering: crispEdges;
+  }
+
+  #rss-layout-preview .rss-ui-text,
+  #rss-layout-preview .rss-title {
+    color: var(--rss-ink);
+    fill: var(--rss-ink);
+    font-family: "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+    font-size: 36px;
+    font-weight: 400;
+    line-height: 42px;
+  }
+
+  #rss-layout-preview .rss-ui-text {
+    dominant-baseline: hanging;
+  }
+
+  #rss-layout-preview .rss-heading {
+    text-anchor: middle;
+  }
+
+  #rss-layout-preview .rss-date {
+    text-anchor: end;
+  }
+
+  #rss-layout-preview .rss-title {
+    display: -webkit-box;
+    overflow: hidden;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 3;
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+</style>

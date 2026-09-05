@@ -1,6 +1,7 @@
 #include "parser/epub_zip.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
 #include <esp_log.h>
@@ -122,6 +123,35 @@ bool EpubZip::entry_info(const std::string &name, Entry *entry) const
     if (it == _entries.end()) return false;
     if (entry) *entry = it->second;
     return true;
+}
+
+bool EpubZip::extract_unique_suffix_to_file(const std::string &name,
+                                            const std::string &out_path,
+                                            uint32_t max_size)
+{
+    const std::string wanted = normalize_path(name);
+    auto exact = _entries.find(wanted);
+    if (exact != _entries.end()) return extract_entry_to_file(exact->first, out_path, max_size);
+
+    std::string wanted_lower = wanted;
+    std::transform(wanted_lower.begin(), wanted_lower.end(), wanted_lower.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const std::string *matched = nullptr;
+    for (const auto &[entry_name, entry] : _entries) {
+        (void)entry;
+        std::string candidate = entry_name;
+        std::transform(candidate.begin(), candidate.end(), candidate.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        const bool suffix = candidate == wanted_lower ||
+            (candidate.size() > wanted_lower.size() &&
+             candidate.compare(candidate.size() - wanted_lower.size(), wanted_lower.size(),
+                               wanted_lower) == 0 &&
+             candidate[candidate.size() - wanted_lower.size() - 1] == '/');
+        if (!suffix) continue;
+        if (matched) return false;
+        matched = &entry_name;
+    }
+    return matched && extract_entry_to_file(*matched, out_path, max_size);
 }
 
 bool EpubZip::load_central_directory(FILE *fp)

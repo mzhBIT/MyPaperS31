@@ -18,6 +18,7 @@ enum class HomeIconId {
     Radio,
     Setting,
     DeepSeek,
+    WeChatReading,
     Count,
 };
 

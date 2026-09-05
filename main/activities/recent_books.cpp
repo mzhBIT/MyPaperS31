@@ -1,6 +1,7 @@
 #include "recent_books.h"
 #include "parser/epub_parser.h"
 #include "storage/app_paths.h"
+#include "weread/WereadStore.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -17,6 +18,8 @@ static constexpr uint32_t EPUB_PROGRESS_MAGIC = 0x45504231; // EPB1
 static constexpr uint32_t EPUB_PROGRESS_VERSION = 2;
 static constexpr uint32_t MOBI_PROGRESS_MAGIC = 0x4d4f4231; // MOB1
 static constexpr uint32_t MOBI_PROGRESS_VERSION = 1;
+static constexpr uint32_t FB2_PROGRESS_MAGIC = 0x46423231; // FB21
+static constexpr uint32_t FB2_PROGRESS_VERSION = 1;
 
 const char *recent_book_base_name(const char *path)
 {
@@ -98,10 +101,11 @@ static RecentBookProgress epub_progress(const char *path)
     return result;
 }
 
-static RecentBookProgress mobi_progress(const char *path)
+static RecentBookProgress sectioned_progress(const char *path, const char *root,
+                                             uint32_t expected_magic, uint32_t expected_version)
 {
     RecentBookProgress result;
-    std::string progress_path = std::string(app_paths::mobi_progress_dir()) + "/" +
+    std::string progress_path = std::string(root) + "/" +
                                 recent_book_progress_key(path) + ".pos";
     FILE *fp = std::fopen(progress_path.c_str(), "rb");
     if (!fp) return result;
@@ -117,7 +121,7 @@ static RecentBookProgress mobi_progress(const char *path)
               std::fread(&section_count, 1, sizeof(section_count), fp) == sizeof(section_count) &&
               std::fread(&section_size, 1, sizeof(section_size), fp) == sizeof(section_size);
     std::fclose(fp);
-    if (!ok || magic != MOBI_PROGRESS_MAGIC || version != MOBI_PROGRESS_VERSION || section_count == 0) {
+    if (!ok || magic != expected_magic || version != expected_version || section_count == 0) {
         return result;
     }
 
@@ -133,12 +137,53 @@ static RecentBookProgress mobi_progress(const char *path)
     return result;
 }
 
+static RecentBookProgress mobi_progress(const char *path)
+{
+    return sectioned_progress(path, app_paths::mobi_progress_dir(),
+                              MOBI_PROGRESS_MAGIC, MOBI_PROGRESS_VERSION);
+}
+
+static RecentBookProgress fb2_progress(const char *path)
+{
+    return sectioned_progress(path, app_paths::fb2_progress_dir(),
+                              FB2_PROGRESS_MAGIC, FB2_PROGRESS_VERSION);
+}
+
+static RecentBookProgress weread_progress(const char *path)
+{
+    RecentBookProgress result;
+    std::string progress_path = std::string(app_paths::epub_progress_dir()) + "/" +
+                                recent_book_progress_key(path) + ".pos";
+    FILE *fp = std::fopen(progress_path.c_str(), "rb");
+    if (!fp) return result;
+    uint32_t magic = 0, version = 0, layout = 0, spine = 0;
+    uint64_t position = 0;
+    const bool ok = std::fread(&magic, 1, sizeof(magic), fp) == sizeof(magic) &&
+                    std::fread(&version, 1, sizeof(version), fp) == sizeof(version) &&
+                    std::fread(&layout, 1, sizeof(layout), fp) == sizeof(layout) &&
+                    std::fread(&spine, 1, sizeof(spine), fp) == sizeof(spine) &&
+                    std::fread(&position, 1, sizeof(position), fp) == sizeof(position);
+    std::fclose(fp);
+    if (!ok || magic != EPUB_PROGRESS_MAGIC || version != EPUB_PROGRESS_VERSION) return result;
+    weread::Book book;
+    std::vector<weread::Chapter> chapters;
+    std::string format;
+    if (!weread::store::load_manifest(path, &book, &chapters, &format) || chapters.empty()) return result;
+    spine = std::min<uint32_t>(spine, static_cast<uint32_t>(chapters.size() - 1));
+    result.chapter = static_cast<int>(spine + 1);
+    result.chapter_count = static_cast<int>(chapters.size());
+    result.percent = static_cast<int>((static_cast<uint64_t>(spine) * 100) / chapters.size());
+    return result;
+}
+
 RecentBookProgress recent_book_progress(const RecentBook &book)
 {
     if (strcasecmp(book.type.c_str(), "epub") == 0) {
         return epub_progress(book.path.c_str());
     }
     if (strcasecmp(book.type.c_str(), "mobi") == 0) return mobi_progress(book.path.c_str());
+    if (strcasecmp(book.type.c_str(), "fb2") == 0) return fb2_progress(book.path.c_str());
+    if (strcasecmp(book.type.c_str(), "weread") == 0) return weread_progress(book.path.c_str());
     RecentBookProgress result;
     result.percent = txt_progress_percent(book.path.c_str());
     return result;
@@ -170,6 +215,7 @@ static void normalize_book(RecentBook *book)
         const char *dot = strrchr(book->path.c_str(), '.');
         if (dot && strcasecmp(dot, ".epub") == 0) book->type = "epub";
         else if (dot && (strcasecmp(dot, ".mobi") == 0 || strcasecmp(dot, ".prc") == 0)) book->type = "mobi";
+        else if (dot && strcasecmp(dot, ".fb2") == 0) book->type = "fb2";
         else book->type = "txt";
     }
     // EPUB package titles are often extended with edition or promotional
@@ -177,7 +223,8 @@ static void normalize_book(RecentBook *book)
     // filename without its format suffix. The reader itself still uses the
     // OPF title.
     if (strcasecmp(book->type.c_str(), "epub") == 0 ||
-        strcasecmp(book->type.c_str(), "mobi") == 0 || book->title.empty()) {
+        strcasecmp(book->type.c_str(), "mobi") == 0 ||
+        strcasecmp(book->type.c_str(), "fb2") == 0 || book->title.empty()) {
         book->title = recent_book_file_stem(book->path.c_str());
     }
 }
@@ -241,7 +288,8 @@ bool recent_book_save(const char *path, const char *type, const char *title, con
     RecentBook current;
     current.path = path;
     current.type = type;
-    bool packaged_book = strcasecmp(type, "epub") == 0 || strcasecmp(type, "mobi") == 0;
+    bool packaged_book = strcasecmp(type, "epub") == 0 || strcasecmp(type, "mobi") == 0 ||
+                           strcasecmp(type, "fb2") == 0;
     current.title = packaged_book
                         ? recent_book_file_stem(path)
                         : ((title && title[0]) ? title : recent_book_base_name(path));
@@ -332,7 +380,7 @@ bool recent_books_rename_path(const char *old_path, const char *new_path)
     const std::string old_key = recent_book_progress_key(old_path);
     const std::string new_key = recent_book_progress_key(new_path);
     const char *dirs[] = {app_paths::txt_progress_dir(), app_paths::epub_progress_dir(),
-                          app_paths::mobi_progress_dir()};
+                          app_paths::mobi_progress_dir(), app_paths::fb2_progress_dir()};
     for (const char *dir : dirs) {
         std::string old_progress = std::string(dir) + "/" + old_key + ".pos";
         std::string new_progress = std::string(dir) + "/" + new_key + ".pos";

@@ -13,9 +13,14 @@ const char *epub_metadata_dir();
 const char *mobi_progress_dir();
 const char *mobi_cache_dir();
 const char *mobi_metadata_dir();
+const char *fb2_progress_dir();
+const char *fb2_cache_dir();
 const char *rss_image_cache_dir();
 const char *music_cover_cache_dir();
 const char *deepseek_sessions_dir();
+const char *weread_dir();
+const char *weread_books_dir();
+const char *weread_covers_dir();
 
 void ensure_data_dir();
 void ensure_dir(const char *path);

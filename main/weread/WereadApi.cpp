@@ -1,0 +1,547 @@
+#include "weread/WereadApi.h"
+
+#include "weread/WereadJson.h"
+
+#include <esp_log.h>
+#include <esp_netif_sntp.h>
+#include <esp_random.h>
+#include <freertos/FreeRTOS.h>
+#include <mbedtls/sha256.h>
+
+#include <algorithm>
+#include <cstring>
+#include <ctime>
+#include <string_view>
+
+namespace weread {
+namespace {
+
+constexpr const char *TAG = "WEREAD_API";
+constexpr const char *WEB_HOST = "https://weread.qq.com";
+constexpr const char *READER_TOKEN = "3c5c8717f3daf09iop3423zafeqoi";
+constexpr const char *WEB_USER_AGENT =
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 "
+    "Safari/537.36 Edg/135.0.0.0";
+constexpr std::time_t MIN_VALID_UNIX_TIME = 1704067200;  // 2024-01-01 UTC
+
+bool ensure_signed_request_time(std::string *error)
+{
+    std::time_t now = std::time(nullptr);
+    if (now >= MIN_VALID_UNIX_TIME) return true;
+
+    ESP_LOGI(TAG, "system clock invalid (%lld), synchronizing SNTP",
+             static_cast<long long>(now));
+    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("ntp.aliyun.com");
+    esp_err_t result = esp_netif_sntp_init(&config);
+    if (result == ESP_OK) {
+        result = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(10000));
+        esp_netif_sntp_deinit();
+    }
+    now = std::time(nullptr);
+    if (result == ESP_OK && now >= MIN_VALID_UNIX_TIME) {
+        ESP_LOGI(TAG, "SNTP synchronized unix=%lld", static_cast<long long>(now));
+        return true;
+    }
+    ESP_LOGE(TAG, "SNTP synchronization failed: %s unix=%lld",
+             esp_err_to_name(result), static_cast<long long>(now));
+    if (error) *error = "network time synchronization failed";
+    return false;
+}
+
+std::string_view response_view(const HttpResponse &response)
+{
+    return {reinterpret_cast<const char *>(response.data()), response.size()};
+}
+
+bool field_view(std::string_view object, const char *name, std::string_view *value)
+{
+    return json::member(object, name, value);
+}
+
+bool field_string(std::string_view object, const char *name, std::string *value)
+{
+    std::string_view raw;
+    if (!field_view(object, name, &raw)) return false;
+    if (json::string(raw, value)) return true;
+    int64_t number = 0;
+    if (!json::integer(raw, &number)) return false;
+    *value = std::to_string(number);
+    return true;
+}
+
+int field_int(std::string_view object, const char *name, int fallback = 0)
+{
+    std::string_view raw;
+    int64_t value = fallback;
+    return field_view(object, name, &raw) && json::integer(raw, &value)
+               ? static_cast<int>(value) : fallback;
+}
+
+bool field_bool(std::string_view object, const char *name, bool fallback = false)
+{
+    std::string_view raw;
+    bool value = fallback;
+    return field_view(object, name, &raw) && json::boolean(raw, &value) ? value : fallback;
+}
+
+std::string json_escape(const std::string &value)
+{
+    std::string output;
+    output.reserve(value.size() + 8);
+    for (char c : value) {
+        if (c == '"' || c == '\\') { output.push_back('\\'); output.push_back(c); }
+        else if (c == '\n') output += "\\n";
+        else if (c == '\r') output += "\\r";
+        else if (c == '\t') output += "\\t";
+        else output.push_back(c);
+    }
+    return output;
+}
+
+std::string params_json(const std::vector<std::pair<std::string, std::string>> &params)
+{
+    std::string body = "{";
+    for (size_t i = 0; i < params.size(); ++i) {
+        if (i) body.push_back(',');
+        const auto &key = params[i].first;
+        const auto &value = params[i].second;
+        body += "\"" + key + "\":";
+        // WeRead's signed chapter endpoint is type-sensitive. These fields
+        // are JSON numbers in the web client; encoding them as strings makes
+        // an otherwise correctly signed request return an empty object.
+        const bool numeric = key == "sc" || key == "st";
+        const bool boolean = key == "prevChapter";
+        if (numeric || boolean) body += value;
+        else body += "\"" + json_escape(value) + "\"";
+    }
+    body.push_back('}');
+    return body;
+}
+
+std::string extract_psvts(std::string_view html)
+{
+    constexpr std::string_view marker = "window.__INITIAL_STATE__";
+    size_t position = html.find(marker);
+    if (position == std::string_view::npos) return {};
+    position = html.find('=', position + marker.size());
+    if (position == std::string_view::npos) return {};
+    do { ++position; } while (position < html.size() &&
+        (html[position] == ' ' || html[position] == '\t' || html[position] == '\r' || html[position] == '\n'));
+    if (position >= html.size() || html[position] != '{') return {};
+
+    int depth = 0;
+    bool quoted = false;
+    bool escaped = false;
+    size_t end = position;
+    for (; end < html.size(); ++end) {
+        const char c = html[end];
+        if (quoted) {
+            if (escaped) escaped = false;
+            else if (c == '\\') escaped = true;
+            else if (c == '"') quoted = false;
+            continue;
+        }
+        if (c == '"') quoted = true;
+        else if (c == '{') ++depth;
+        else if (c == '}' && --depth == 0) { ++end; break; }
+    }
+    if (depth != 0) return {};
+
+    const std::string_view initial = html.substr(position, end - position);
+    std::string_view reader;
+    std::string_view raw_psvts;
+    std::string psvts;
+    if (!json::member(initial, "reader", &reader) ||
+        !json::member(reader, "psvts", &raw_psvts) ||
+        !json::string(raw_psvts, &psvts)) return {};
+    return psvts;
+}
+
+bool is_zip(const uint8_t *data, size_t size)
+{
+    return data && size >= 4 && data[0] == 'P' && data[1] == 'K' && data[2] == 3 && data[3] == 4;
+}
+
+bool likely_txt_metadata(const HttpResponse &response)
+{
+    if (!response.data() || !response.size() || response.data()[0] != '{') return false;
+    return response_view(response).find("\"bookId\"") != std::string_view::npos;
+}
+
+bool empty_json_object(const HttpResponse &response)
+{
+    if (!response.data()) return false;
+    const std::string_view body = response_view(response);
+    const size_t first = body.find_first_not_of(" \t\r\n");
+    const size_t last = body.find_last_not_of(" \t\r\n");
+    return first != std::string_view::npos && last != std::string_view::npos &&
+           body.substr(first, last - first + 1) == "{}";
+}
+
+std::string request_error(const char *operation, const HttpResponse &response)
+{
+    if (!response.error.empty()) return std::string(operation) + ": " + response.error;
+    return std::string(operation) + " HTTP " + std::to_string(response.status);
+}
+
+std::string sha256_hex(const std::string &value)
+{
+    uint8_t digest[32];
+    mbedtls_sha256(reinterpret_cast<const uint8_t *>(value.data()), value.size(), digest, 0);
+    static const char hex[] = "0123456789abcdef";
+    std::string output(64, '0');
+    for (size_t i = 0; i < sizeof(digest); ++i) {
+        output[i * 2] = hex[digest[i] >> 4];
+        output[i * 2 + 1] = hex[digest[i] & 15];
+    }
+    return output;
+}
+
+std::string web_app_id()
+{
+    const std::string ua = WEB_USER_AGENT;
+    std::string prefix;
+    size_t start = 0;
+    int count = 0;
+    for (size_t i = 0; i <= ua.size() && count < 12; ++i) {
+        if (i == ua.size() || ua[i] == ' ' || ua[i] == '\t') {
+            if (i > start) { prefix += static_cast<char>('0' + ((i - start) % 10)); ++count; }
+            start = i + 1;
+        }
+    }
+    uint32_t hash = 0;
+    for (unsigned char c : ua) hash = static_cast<uint32_t>((0x83ULL * hash + c) & 0x7fffffff);
+    return "wb" + prefix + "h" + std::to_string(hash);
+}
+
+}  // namespace
+
+bool Api::create_login(std::string *uid, std::string *confirm_url, std::string *error)
+{
+    if (!_client || !uid || !confirm_url) return false;
+    const std::string skills_url = std::string(WEB_HOST) + "/r/weread-skills";
+    HttpResponse bootstrap = _client->get_html(skills_url, std::string(WEB_HOST) + "/");
+    if (!bootstrap.ok()) {
+        if (error) *error = request_error("login bootstrap", bootstrap);
+        return false;
+    }
+    ESP_LOGI(TAG, "login bootstrap complete cookies=%s", _client->cookie_names().c_str());
+    HttpResponse response = _client->get(std::string(WEB_HOST) + "/api/auth/getLoginUid", skills_url);
+    if (!response.ok()) {
+        if (error) *error = request_error("getLoginUid", response);
+        return false;
+    }
+    std::string_view root = response_view(response);
+    if (!field_string(root, "uid", uid)) {
+        std::string_view data;
+        if (!field_view(root, "data", &data) || !field_string(data, "uid", uid)) {
+            if (error) *error = "login response has no uid";
+            return false;
+        }
+    }
+    *confirm_url = std::string(WEB_HOST) + "/web/confirm?uid=" + *uid;
+    return true;
+}
+
+LoginPoll Api::poll_login(const std::string &uid)
+{
+    LoginPoll result;
+    if (!_client || uid.empty()) { result.state = LoginState::Failed; result.message = "invalid login uid"; return result; }
+    const Session before_request = _client->session();
+    HttpResponse response = _client->get(std::string(WEB_HOST) + "/api/auth/getLoginInfo?uid=" +
+                                         url_encode(uid) + "&otp=");
+    if (!response.ok()) { result.message = request_error("getLoginInfo", response); return result; }
+    std::string_view root = response_view(response);
+    std::string_view object = root;
+    std::string_view data;
+    if (field_view(root, "data", &data) && !data.empty() && data.front() == '{') object = data;
+
+    bool success = field_bool(object, "succeed");
+    std::string vid, token, refresh_token, logic;
+    if (!field_string(object, "webLoginVid", &vid)) {
+        if (!field_string(object, "vid", &vid)) field_string(object, "userVid", &vid);
+    }
+    field_string(object, "accessToken", &token);
+    field_string(object, "refreshToken", &refresh_token);
+    field_string(object, "logicCode", &logic);
+    if (success && !vid.empty() && !token.empty()) {
+        Session session = _client->session();
+        if (session.vid.empty() || session.vid == before_request.vid) session.vid = vid;
+        if (session.skey.empty() || session.skey == before_request.skey) session.skey = token;
+        session.cookies["wr_vid"] = session.vid;
+        session.cookies["wr_skey"] = session.skey;
+        session.cookies["wr_ql"] = "0";
+        if (!refresh_token.empty()) {
+            session.refresh_token = url_encode(refresh_token);
+            session.cookies["wr_rt"] = session.refresh_token;
+        }
+        _client->set_session(session);
+        if (!save_session(session)) {
+            result.state = LoginState::Failed;
+            result.message = "failed to save login session";
+        } else {
+            result.state = LoginState::Success;
+        }
+        return result;
+    }
+    if (logic == "NEED_OTP" || logic == "OTP_EXPIRED" || logic == "OTP_NOT_MATCH") {
+        result.state = LoginState::NeedsOtp;
+        result.message = logic;
+    } else if (logic == "LOGIN_TIMEOUT") {
+        result.state = LoginState::Expired;
+        result.message = logic;
+    } else if (!logic.empty()) {
+        result.state = LoginState::Failed;
+        result.message = logic;
+    }
+    return result;
+}
+
+bool Api::get_shelf(std::vector<Book> *books, std::string *error)
+{
+    if (!_client || !books) return false;
+    books->clear();
+    HttpResponse response = _client->get(std::string(WEB_HOST) + "/web/shelf/sync");
+    if (!response.ok()) { if (error) *error = request_error("shelf", response); return false; }
+    const std::string_view root = response_view(response);
+    if (field_int(root, "errcode", field_int(root, "errCode")) == -2012) {
+        if (error) *error = "login expired";
+        return false;
+    }
+    std::string_view array;
+    if (!field_view(root, "books", &array)) { if (error) *error = "shelf has no books"; return false; }
+    json::ObjectIterator iterator(array);
+    std::string_view object;
+    while (iterator.next(&object)) {
+        Book book;
+        field_string(object, "bookId", &book.id);
+        field_string(object, "title", &book.title);
+        field_string(object, "author", &book.author);
+        field_string(object, "cover", &book.cover_url);
+        field_string(object, "format", &book.format);
+        if (!book.id.empty()) books->push_back(std::move(book));
+    }
+
+    if (field_view(root, "bookProgress", &array)) {
+        json::ObjectIterator progress_iterator(array);
+        while (progress_iterator.next(&object)) {
+            std::string id;
+            if (!field_string(object, "bookId", &id)) continue;
+            auto found = std::find_if(books->begin(), books->end(), [&](const Book &book) { return book.id == id; });
+            if (found == books->end()) continue;
+            found->progress = field_int(object, "progress");
+            field_string(object, "chapterUid", &found->progress_chapter_uid);
+            found->update_time = static_cast<uint32_t>(field_int(object, "updateTime"));
+        }
+    }
+    std::stable_sort(books->begin(), books->end(), [](const Book &lhs, const Book &rhs) {
+        return lhs.update_time > rhs.update_time;
+    });
+    return !books->empty();
+}
+
+bool Api::get_chapters(const std::string &book_id, std::vector<Chapter> *chapters,
+                       std::string *format, std::string *error)
+{
+    if (!_client || !chapters || book_id.empty()) return false;
+    chapters->clear();
+    const std::string body = "{\"bookIds\":[\"" + json_escape(book_id) + "\"]}";
+    HttpResponse response = _client->post_json(std::string(WEB_HOST) + "/web/book/chapterInfos", body);
+    if (!response.ok()) { if (error) *error = request_error("chapterInfos", response); return false; }
+    const std::string_view root = response_view(response);
+    std::string_view data;
+    if (!field_view(root, "data", &data)) { if (error) *error = "chapterInfos has no data"; return false; }
+    json::ObjectIterator books(data);
+    std::string_view item;
+    while (books.next(&item)) {
+        std::string id;
+        field_string(item, "bookId", &id);
+        if (id.empty()) {
+            std::string_view nested;
+            if (field_view(item, "book", &nested)) field_string(nested, "bookId", &id);
+        }
+        if (id != book_id) continue;
+        if (format) field_string(item, "format", format);
+        std::string_view list;
+        if (!field_view(item, "updated", &list)) field_view(item, "chapterInfos", &list);
+        json::ObjectIterator chapter_iterator(list);
+        std::string_view chapter_object;
+        while (chapter_iterator.next(&chapter_object)) {
+            Chapter chapter;
+            field_string(chapter_object, "chapterUid", &chapter.uid);
+            field_string(chapter_object, "title", &chapter.title);
+            field_string(chapter_object, "tar", &chapter.resource_url);
+            chapter.index = field_int(chapter_object, "chapterIdx");
+            chapter.word_count = field_int(chapter_object, "wordCount");
+            chapter.paid = field_bool(chapter_object, "paid");
+            if (!chapter.uid.empty()) chapters->push_back(std::move(chapter));
+        }
+        break;
+    }
+    if (chapters->empty() && error) *error = "book has no readable chapters";
+    return !chapters->empty();
+}
+
+bool Api::fetch_psvts(const std::string &book_id, const std::string &chapter_uid,
+                      std::string *reader_url, std::string *psvts, std::string *error,
+                      bool allow_cache)
+{
+    *reader_url = std::string(WEB_HOST) + "/web/reader/" + encode_id(book_id);
+    if (!chapter_uid.empty()) *reader_url += "k" + encode_id(chapter_uid);
+    if (allow_cache && _psvts_book == book_id && _psvts_chapter == chapter_uid && !_psvts.empty()) {
+        *psvts = _psvts;
+        return true;
+    }
+    HttpResponse response = _client->get(*reader_url, *reader_url);
+    if (!response.ok()) { if (error) *error = request_error("reader", response); return false; }
+    *psvts = extract_psvts(response_view(response));
+    if (psvts->empty()) { if (error) *error = "reader page has no psvts"; return false; }
+    if (*psvts == "dangerMode") {
+        ESP_LOGW(TAG, "reader page entered dangerMode");
+        // A shelf-only legacy login can remain valid while the Web Reader
+        // rejects it. Drop that incomplete session so the next entry runs the
+        // full browser-style bootstrap and QR login flow.
+        _client->clear_session();
+        if (error) *error = "Web Reader login is incomplete (dangerMode). Reopen WeRead and scan again.";
+        return false;
+    }
+    _psvts_book = book_id;
+    _psvts_chapter = chapter_uid;
+    _psvts = *psvts;
+    return true;
+}
+
+bool Api::get_chapter(const std::string &book_id, const Chapter &chapter,
+                      ChapterPayload *payload, std::string *error)
+{
+    if (!_client || !payload) return false;
+    if (!ensure_signed_request_time(error)) return false;
+    std::string reader, psvts;
+    if (!fetch_psvts(book_id, chapter.uid, &reader, &psvts, error, false)) return false;
+    auto request_shard = [&](const char *path) {
+        const int64_t request_time = static_cast<int64_t>(std::time(nullptr));
+        const auto params = make_content_params(book_id, chapter.uid, psvts, request_time, esp_random());
+        const std::string body = params_json(params);
+        HttpResponse response = _client->post_json(std::string(WEB_HOST) + path, body, reader);
+        std::string signature;
+        for (const auto &param : params) {
+            if (param.first == "s") { signature = param.second; break; }
+        }
+        ESP_LOGI(TAG,
+                 "chapter shard path=%s status=%d bytes=%u unix=%lld psvts=%u body=%u sig=%s",
+                 path, response.status, static_cast<unsigned>(response.size()),
+                 static_cast<long long>(request_time), static_cast<unsigned>(psvts.size()),
+                 static_cast<unsigned>(body.size()), signature.c_str());
+        if (std::strcmp(path, "/web/book/chapter/e_0") == 0 &&
+            response.ok() && empty_json_object(response)) {
+            ESP_LOGW(TAG, "e_0 request reader=%s cookies=%s body=%s",
+                     reader.c_str(), _client->cookie_names().c_str(), body.c_str());
+        }
+        return response;
+    };
+
+    HttpResponse part0 = request_shard("/web/book/chapter/e_0");
+    if (!part0.ok() || empty_json_object(part0)) {
+        _psvts.clear();
+        _psvts_book.clear();
+        _psvts_chapter.clear();
+        if (!fetch_psvts(book_id, chapter.uid, &reader, &psvts, error, false)) return false;
+        part0 = request_shard("/web/book/chapter/e_0");
+    }
+    if (!part0.ok()) { if (error) *error = request_error("e_0", part0); return false; }
+    if (empty_json_object(part0)) {
+        HttpResponse session_probe = _client->get(std::string(WEB_HOST) + "/web/shelf/sync");
+        bool expired = !session_probe.ok();
+        if (session_probe.ok()) {
+            const std::string_view root = response_view(session_probe);
+            expired = field_int(root, "errcode", field_int(root, "errCode")) == -2012;
+        }
+        if (expired) {
+            _client->clear_session();
+            if (error) *error = "Login session expired. Tap to scan the QR code again.";
+            ESP_LOGW(TAG, "e_0 rejected and session validation failed");
+        } else {
+            if (error) {
+                *error = "Chapter request was rejected although the login session is valid. "
+                         "See serial diagnostics.";
+            }
+            ESP_LOGW(TAG, "e_0 rejected but shelf session remains valid");
+        }
+        return false;
+    }
+    if (is_zip(part0.data(), part0.size())) {
+        payload->kind = ChapterPayloadKind::EpubZip;
+        if (!payload->content.copy_from(part0.data(), part0.size())) {
+            if (error) *error = "EPUB PSRAM allocation failed";
+            return false;
+        }
+        return true;
+    }
+
+    if (likely_txt_metadata(part0)) {
+        HttpResponse text0 = request_shard("/web/book/chapter/t_0");
+        HttpResponse text1 = request_shard("/web/book/chapter/t_1");
+        if (!text0.ok() || !text1.ok()) {
+            if (error) *error = !text0.ok() ? request_error("t_0", text0) : request_error("t_1", text1);
+            return false;
+        }
+        payload->kind = ChapterPayloadKind::Txt;
+        return decode_content_shards(text0.data(), text0.size(), text1.data(), text1.size(),
+                                     nullptr, 0, &payload->content, error);
+    }
+
+    HttpResponse part1 = request_shard("/web/book/chapter/e_1");
+    HttpResponse part3 = request_shard("/web/book/chapter/e_3");
+    if (!part1.ok() || !part3.ok()) {
+        if (error) *error = !part1.ok() ? request_error("e_1", part1) : request_error("e_3", part3);
+        return false;
+    }
+    payload->kind = ChapterPayloadKind::Xhtml;
+    if (!decode_content_shards(part0.data(), part0.size(), part1.data(), part1.size(),
+                               part3.data(), part3.size(), &payload->content, error)) return false;
+    if (is_zip(payload->content.data(), payload->content.size())) payload->kind = ChapterPayloadKind::EpubZip;
+    return true;
+}
+
+bool Api::upload_progress(const std::string &book_id, const Chapter &chapter,
+                          int progress_percent, std::string *error)
+{
+    if (!_client || book_id.empty() || chapter.uid.empty()) return false;
+    if (!ensure_signed_request_time(error)) return false;
+    std::string reader, psvts;
+    if (!fetch_psvts(book_id, chapter.uid, &reader, &psvts, error, false)) return false;
+    const int64_t now = static_cast<int64_t>(std::time(nullptr));
+    const uint32_t random = esp_random() % 1000;
+    const std::string timestamp = std::to_string(now * 1000 + random);
+    const std::string random_text = std::to_string(esp_random() % 1000);
+    std::vector<std::pair<std::string, std::string>> params = {
+        {"appId", web_app_id()}, {"b", encode_id(book_id)}, {"c", encode_id(chapter.uid)},
+        {"ci", std::to_string(chapter.index)}, {"co", "0"}, {"sm", ""},
+        {"pr", std::to_string(std::clamp(progress_percent, 0, 100))}, {"rt", "0"},
+        {"ts", timestamp}, {"rn", random_text},
+        {"sg", sha256_hex(timestamp + random_text + READER_TOKEN)},
+        {"ct", std::to_string(now)}, {"ps", psvts}, {"pc", encode_id(std::to_string(now))},
+    };
+    params.push_back({"s", sign_query(sorted_query(params))});
+    std::string body = "{";
+    for (size_t i = 0; i < params.size(); ++i) {
+        if (i) body.push_back(',');
+        body += "\"" + params[i].first + "\":";
+        const std::string &key = params[i].first;
+        const bool numeric = key == "ci" || key == "co" || key == "pr" || key == "rt" ||
+                             key == "ts" || key == "rn" || key == "ct";
+        body += numeric ? params[i].second : "\"" + json_escape(params[i].second) + "\"";
+    }
+    body.push_back('}');
+    HttpResponse response = _client->post_json(std::string(WEB_HOST) + "/web/book/read", body, reader);
+    if (!response.ok()) { if (error) *error = request_error("progress", response); return false; }
+    const std::string_view root = response_view(response);
+    if (field_int(root, "succ") != 1) {
+        if (error) *error = "progress update rejected";
+        return false;
+    }
+    return true;
+}
+
+}  // namespace weread

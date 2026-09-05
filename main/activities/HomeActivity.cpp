@@ -6,6 +6,7 @@
 #include "activities/RadioActivity.h"
 #include "activities/SettingActivity.h"
 #include "activities/WifiTransferActivity.h"
+#include "activities/WereadActivity.h"
 #include "recent_books.h"
 #include "renderer/CoverThumbnail.h"
 #include "renderer/P4JpegDecoder.h"
@@ -27,6 +28,8 @@ extern void launch_rss_reader();
 extern void launch_reader(const char *path);
 extern void launch_epub_reader(const char *path);
 extern void launch_mobi_reader(const char *path);
+extern void launch_fb2_reader(const char *path);
+extern void launch_weread_reader(const char *path, int initial_spine);
 
 static const char *TAG = "HOME";
 
@@ -51,6 +54,7 @@ static void go_clock()   { ActivityManager::instance().push(new PlaceholderActiv
 static void go_music()   { launch_music(); }
 static void go_images()  { launch_file_browser("/sdcard"); }
 static void go_deepseek(){ launch_deepseek(); }
+static void go_weread()  { launch_weread(); }
 
 static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
     {
@@ -66,7 +70,7 @@ static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
     },
     {
         {"DeepSeek", go_deepseek},
-        {nullptr, nullptr}, {nullptr, nullptr},
+        {"WeRead", go_weread}, {nullptr, nullptr},
         {nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
         {nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
     },
@@ -96,7 +100,7 @@ static const HomeIconId g_icons[HOME_PAGE_CNT][MENU_CNT] = {
     },
     {
         HomeIconId::DeepSeek,
-        HomeIconId::Count, HomeIconId::Count,
+        HomeIconId::WeChatReading, HomeIconId::Count,
         HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
         HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
     },
@@ -212,7 +216,8 @@ static bool probe_image(const std::string &path, const std::string &ext, int *w,
 }
 
 static bool draw_epub_cover_image(const RecentBook &recent, int x, int y, int w, int h) {
-    if ((recent.type != "epub" && recent.type != "mobi") ||
+    if ((recent.type != "epub" && recent.type != "mobi" && recent.type != "fb2" &&
+         recent.type != "weread") ||
         recent.cover_path.empty() || !file_exists(recent.cover_path)) return false;
     std::string image_path = recent.cover_path;
     std::string thumbnail_path = cover_thumbnail::cache_path_for(image_path);
@@ -401,6 +406,8 @@ private:
         ESP_LOGI(TAG, "open bookshelf item: %s", book.path.c_str());
         if (book.type == "epub") launch_epub_reader(book.path.c_str());
         else if (book.type == "mobi") launch_mobi_reader(book.path.c_str());
+        else if (book.type == "fb2") launch_fb2_reader(book.path.c_str());
+        else if (book.type == "weread") launch_weread_reader(book.path.c_str(), -1);
         else launch_reader(book.path.c_str());
     }
 
@@ -423,7 +430,9 @@ private:
         M5.Display.drawRoundRect(x, y, w, h, 3, TFT_BLACK);
         int spine_x = x + std::max(7, w / 7);
         M5.Display.drawLine(spine_x, y, spine_x, y + h, TFT_BLACK);
-        std::string type = book.type == "epub" ? "EPUB" : (book.type == "mobi" ? "MOBI" : "TXT");
+        std::string type = book.type == "epub" ? "EPUB" :
+                           (book.type == "mobi" ? "MOBI" :
+                            (book.type == "fb2" ? "FB2" : (book.type == "weread" ? "WR" : "TXT")));
         system_font::draw_center(M5.Display, type, x + w / 2 + 4,
                                  y + std::max(4, (h - system_font::line_height()) / 2), TFT_BLACK);
     }

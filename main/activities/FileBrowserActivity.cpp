@@ -51,6 +51,7 @@ static bool is_supported(const char *n, bool is_dir) {
     if (!ext) return false;
     return (strcasecmp(ext, ".txt") == 0 || strcasecmp(ext, ".epub") == 0 ||
             strcasecmp(ext, ".mobi") == 0 || strcasecmp(ext, ".prc") == 0 ||
+            strcasecmp(ext, ".fb2") == 0 ||
             strcasecmp(ext, ".bmp") == 0 || strcasecmp(ext, ".png") == 0 ||
             strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0 ||
             strcasecmp(ext, ".ttf") == 0 ||
@@ -72,6 +73,11 @@ static bool is_epub_file(const char *n) {
 static bool is_mobi_file(const char *n) {
     const char *ext = strrchr(n, '.');
     return ext && (strcasecmp(ext, ".mobi") == 0 || strcasecmp(ext, ".prc") == 0);
+}
+
+static bool is_fb2_file(const char *n) {
+    const char *ext = strrchr(n, '.');
+    return ext && strcasecmp(ext, ".fb2") == 0;
 }
 
 static bool is_image_file(const char *n) {
@@ -319,6 +325,9 @@ public:
         } else if (is_mobi_file(full.c_str())) {
             extern void launch_mobi_reader(const char*);
             launch_mobi_reader(full.c_str());
+        } else if (is_fb2_file(full.c_str())) {
+            extern void launch_fb2_reader(const char*);
+            launch_fb2_reader(full.c_str());
         } else if (is_image_file(full.c_str())) {
             extern void launch_image_viewer(const char*);
             launch_image_viewer(full.c_str());

@@ -55,7 +55,7 @@ static const char INDEX_HTML[] =
     "<div class='box'>"
     "<div class='muted'>Choose any supported files. They will be sorted into books, images, fonts, or music automatically.</div>"
     "<label>Files</label><input id='files' type='file' multiple "
-    "accept='.txt,.epub,.mobi,.prc,.bmp,.png,.jpg,.jpeg,.ttf,.otf,.bin," AUDIO_FILE_ACCEPT_EXTENSIONS "'>"
+    "accept='.txt,.epub,.mobi,.prc,.fb2,.bmp,.png,.jpg,.jpeg,.ttf,.otf,.bin," AUDIO_FILE_ACCEPT_EXTENSIONS "'>"
     "<button onclick='upload()'>Upload</button>"
     "<p><progress id='bar' value='0' max='100'></progress></p>"
     "<pre id='log'>Ready.</pre>"
@@ -309,7 +309,7 @@ static const char *upload_dir_for_name(const std::string &name)
         return "/sdcard/system/ime";
     }
     if (has_ext_ci(name, ".txt") || has_ext_ci(name, ".epub") ||
-        has_ext_ci(name, ".mobi") || has_ext_ci(name, ".prc")) {
+        has_ext_ci(name, ".mobi") || has_ext_ci(name, ".prc") || has_ext_ci(name, ".fb2")) {
         return "/sdcard/books";
     }
     if (has_ext_ci(name, ".bmp") || has_ext_ci(name, ".png") ||

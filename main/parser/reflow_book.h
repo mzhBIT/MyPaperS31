@@ -1,7 +1,9 @@
 #pragma once
 
 #include "parser/epub_parser.h"
+#include "parser/fb2_parser.h"
 #include "parser/mobi_parser.h"
+#include "weread/WereadApi.h"
 
 #include <cstdint>
 #include <string>
@@ -23,7 +25,7 @@ struct ReflowTocItem {
 
 class ReflowBook {
 public:
-    enum class Format { None, Epub, Mobi };
+    enum class Format { None, Epub, Mobi, Fb2, Weread };
 
     std::string title;
 
@@ -31,8 +33,14 @@ public:
     void close();
     Format format() const { return _format; }
     bool is_mobi() const { return _format == Format::Mobi; }
-    const char *type_name() const { return is_mobi() ? "mobi" : "epub"; }
-    const char *display_name() const { return is_mobi() ? "MOBI" : "EPUB"; }
+    bool is_fb2() const { return _format == Format::Fb2; }
+    bool is_weread() const { return _format == Format::Weread; }
+    const char *type_name() const {
+        return is_weread() ? "weread" : (is_mobi() ? "mobi" : (is_fb2() ? "fb2" : "epub"));
+    }
+    const char *display_name() const {
+        return is_weread() ? "WeRead" : (is_mobi() ? "MOBI" : (is_fb2() ? "FB2" : "EPUB"));
+    }
     const std::string &last_error() const { return _last_error; }
 
     int spine_count() const { return static_cast<int>(_sections.size()); }
@@ -41,8 +49,14 @@ public:
     const ReflowTocItem &toc_item(int index) const { return _toc[static_cast<size_t>(index)]; }
     const std::string &path() const { return _path; }
     const std::string &cover_image_href() const { return _cover_href; }
+    const std::string &weread_book_id() const { return _weread_book.id; }
+    const weread::Chapter *weread_chapter(int index) const {
+        return index >= 0 && index < static_cast<int>(_weread_chapters.size())
+                   ? &_weread_chapters[static_cast<size_t>(index)] : nullptr;
+    }
 
     bool read_item_to_string(const std::string &href, std::string *out);
+    bool resolve_footnote(const std::string &target, std::string *out);
     bool extract_item_to_file(const std::string &href, const std::string &out_path);
 
 private:
@@ -52,6 +66,11 @@ private:
     std::string _last_error;
     EpubBook _epub;
     MobiBook _mobi;
+    Fb2Book _fb2;
+    EpubBook _weread_epub;
+    weread::Book _weread_book;
+    std::vector<weread::Chapter> _weread_chapters;
+    int _weread_active_chapter = -1;
     std::vector<ReflowSectionItem> _sections;
     std::vector<ReflowTocItem> _toc;
 };
