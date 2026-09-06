@@ -186,23 +186,6 @@ static int lines_per_page()
     return n > 1 ? n : 1;
 }
 
-static int estimate_codepoint_width(uint32_t cp)
-{
-    int measured = reader_text_renderer().measureCodepointForLayout(cp);
-    if (measured > 0) return measured;
-
-    if (cp == '\t') return 72;
-    if (cp < 0x80) {
-        if (cp == ' ') return 12;
-        if (cp == '.' || cp == ',' || cp == ':' || cp == ';' || cp == '\'' || cp == '"') return 10;
-        if (cp == 'i' || cp == 'l' || cp == 'I' || cp == '!' || cp == '|') return 10;
-        if (cp == 'm' || cp == 'w' || cp == 'M' || cp == 'W') return 28;
-        return 20;
-    }
-    if ((cp >= 0xFF00 && cp <= 0xFFEF) || (cp >= 0x3000 && cp <= 0x303F)) return 36;
-    return 36;
-}
-
 static uint32_t hash32_bytes(const void *data, size_t len, uint32_t h = 2166136261u)
 {
     const uint8_t *p = static_cast<const uint8_t *>(data);
@@ -371,22 +354,8 @@ TxtPage TxtBook::read_page(uint32_t offset)
     const int paragraph_gap = line_h * style.paragraph_spacing / 10;
     int used_height = 0;
     int text_line_count = 0;
-    bool reading_explicit_indent = first_line_of_paragraph;
-    int explicit_indent_width = 0;
-    int line_width = 0;
-    std::string line;
-    line.reserve(256);
-    uint32_t last_cp = 0;
-    uint32_t last_cp_start = 0;
-    size_t last_cp_utf8_bytes = 0;
-    int last_cp_width = 0;
     page.text.reserve(2048);
     page.lines.reserve((size_t)lines_per_page() * 2);
-    auto current_indent = [&]() {
-        return first_line_of_paragraph
-            ? std::max(0, indent_width - explicit_indent_width)
-            : 0;
-    };
     auto append_line = [&page, &used_height, &text_line_count](
                            const std::string &value, bool justify,
                            int x_offset, int height) {
@@ -413,129 +382,92 @@ TxtPage TxtBook::read_page(uint32_t offset)
     };
     int64_t t0 = esp_timer_get_time();
 
-    while (used_height + line_h <= max_height || page.lines.empty()) {
-        uint32_t cp = 0, cp_start = 0, cp_next = 0;
-        if (!read_cp(fp, (Enc)_enc, cp, cp_start, cp_next)) {
-            if (!line.empty()) {
-                // The final line of a paragraph/file must not be stretched.
-                append_line(line, false, current_indent(), line_h);
+    struct SourcePoint {
+        size_t utf8_offset = 0;
+        uint32_t file_offset = 0;
+    };
+    constexpr size_t MAX_PARAGRAPH_UTF8_BYTES = 12 * 1024;
+    bool done = false;
+    while (!done && (used_height + line_h <= max_height || page.lines.empty())) {
+        const uint32_t paragraph_file_start = static_cast<uint32_t>(ftell(fp));
+        std::string paragraph;
+        paragraph.reserve(1024);
+        std::vector<SourcePoint> source_points;
+        source_points.reserve(512);
+        bool newline = false;
+        bool eof = false;
+        uint32_t after_paragraph = paragraph_file_start;
+
+        while (paragraph.size() < MAX_PARAGRAPH_UTF8_BYTES) {
+            uint32_t cp = 0, cp_start = 0, cp_next = 0;
+            if (!read_cp(fp, (Enc)_enc, cp, cp_start, cp_next)) {
+                eof = true;
+                after_paragraph = _file_size;
+                break;
+            }
+            after_paragraph = cp_next;
+            if (cp == '\r') continue;
+            if (cp == '\n') {
+                newline = true;
+                break;
+            }
+            source_points.push_back({paragraph.size(), cp_start});
+            paragraph += cp_to_utf8(cp);
+        }
+
+        auto source_offset_for = [&](size_t utf8_offset) -> uint32_t {
+            if (utf8_offset >= paragraph.size()) return after_paragraph;
+            auto it = std::lower_bound(source_points.begin(), source_points.end(), utf8_offset,
+                [](const SourcePoint &point, size_t wanted) { return point.utf8_offset < wanted; });
+            return it != source_points.end() ? it->file_offset : after_paragraph;
+        };
+
+        if (paragraph.empty()) {
+            if (newline) {
+                append_line(std::string(), false, 0, line_h);
+                page.next_offset = after_paragraph;
+                first_line_of_paragraph = true;
+                if (used_height + line_h > max_height) done = true;
+                continue;
             }
             page.next_offset = _file_size;
             page.eof = true;
             break;
         }
 
-        if (cp == '\r') {
-            page.next_offset = cp_next;
-            continue;
+        const int paragraph_indent = first_line_of_paragraph ? indent_width : 0;
+        std::vector<text_layout::Line> wrapped =
+            reader_text_renderer().layoutUtf8Paragraph(paragraph, max_w, paragraph_indent);
+        for (size_t i = 0; i < wrapped.size(); ++i) {
+            if (!page.lines.empty() && used_height + line_h > max_height) {
+                page.next_offset = source_offset_for(wrapped[i].byte_start);
+                page.eof = false;
+                done = true;
+                break;
+            }
+            append_line(wrapped[i].text, wrapped[i].justify, wrapped[i].x_offset, line_h);
+            first_line_of_paragraph = false;
+            page.next_offset = (i + 1 < wrapped.size())
+                             ? source_offset_for(wrapped[i + 1].byte_start)
+                             : after_paragraph;
         }
+        if (done) break;
 
-        if (cp == '\n') {
-            // An explicit newline terminates the paragraph. This includes an
-            // empty line, whose vertical space must be retained.
-            bool had_text = !line.empty();
-            append_line(line, false, had_text ? current_indent() : 0, line_h);
-            line.clear();
-            line_width = 0;
-            reading_explicit_indent = true;
-            explicit_indent_width = 0;
-            last_cp = 0;
-            last_cp_start = 0;
-            last_cp_utf8_bytes = 0;
-            last_cp_width = 0;
-            page.next_offset = cp_next;
+        if (newline) {
             first_line_of_paragraph = true;
-            if (had_text && paragraph_gap > 0 &&
-                used_height + paragraph_gap <= max_height) {
+            if (paragraph_gap > 0 && used_height + paragraph_gap <= max_height) {
                 append_gap(paragraph_gap);
             }
-            if (used_height + line_h > max_height) {
-                page.eof = cp_next >= _file_size;
-                break;
-            }
-            continue;
         }
-
-        std::string ch = cp_to_utf8(cp);
-        int ch_width = estimate_codepoint_width(cp);
-        // Preserve ideographic spaces already present in the TXT and add only
-        // the remaining width required by the configured paragraph indent.
-        if (first_line_of_paragraph && reading_explicit_indent) {
-            if (cp == 0x3000) explicit_indent_width += ch_width;
-            else reading_explicit_indent = false;
+        if (eof) {
+            page.next_offset = _file_size;
+            page.eof = true;
+            break;
         }
-        int line_limit = std::max(1, max_w - current_indent());
-        if (!line.empty() && line_width + ch_width > line_limit) {
-            bool move_last = (text_layout::prohibited_at_line_start(cp) ||
-                              text_layout::prohibited_at_line_end(last_cp)) &&
-                             last_cp_utf8_bytes > 0 &&
-                             line.size() > last_cp_utf8_bytes;
-
-            // A pathological one-glyph line cannot move its only glyph. Keep
-            // the closing punctuation with it instead of starting the next
-            // line with punctuation; overflow is limited to one glyph.
-            if (text_layout::prohibited_at_line_start(cp) && !move_last) {
-                line += ch;
-                line_width += ch_width;
-                append_line(line, true, current_indent(), line_h);
-                line.clear();
-                line_width = 0;
-                last_cp = 0;
-                last_cp_start = 0;
-                last_cp_utf8_bytes = 0;
-                last_cp_width = 0;
-                first_line_of_paragraph = false;
-                reading_explicit_indent = false;
-                explicit_indent_width = 0;
-                page.next_offset = cp_next;
-                if (used_height + line_h > max_height) {
-                    page.eof = cp_next >= _file_size;
-                    break;
-                }
-                continue;
-            }
-
-            // Move the previous glyph when the current punctuation cannot
-            // start a line, or when the previous opening bracket cannot end
-            // one. Original file offsets are retained so a page boundary can
-            // restart exactly for UTF-8, UTF-16, GBK and Latin-1 alike.
-            std::string carried;
-            if (move_last) {
-                carried = line.substr(line.size() - last_cp_utf8_bytes);
-                line.resize(line.size() - last_cp_utf8_bytes);
-                line_width -= last_cp_width;
-            }
-
-            // Width overflow is a soft wrap and is eligible for two-ended
-            // alignment. Paragraph-ending lines above remain left aligned.
-            append_line(line, true, current_indent(), line_h);
-            line.clear();
-            line_width = 0;
-            first_line_of_paragraph = false;
-            reading_explicit_indent = false;
-            explicit_indent_width = 0;
-            if (used_height + line_h > max_height) {
-                page.next_offset = move_last ? last_cp_start : cp_start;
-                page.eof = page.next_offset >= _file_size;
-                break;
-            }
-
-            if (move_last) {
-                line = carried;
-                line_width = last_cp_width;
-            }
-            last_cp = move_last ? last_cp : 0;
-            last_cp_utf8_bytes = move_last ? carried.size() : 0;
-            last_cp_width = move_last ? last_cp_width : 0;
+        if (used_height + line_h > max_height) {
+            page.eof = page.next_offset >= _file_size;
+            break;
         }
-
-        line += ch;
-        line_width += ch_width;
-        last_cp = cp;
-        last_cp_start = cp_start;
-        last_cp_utf8_bytes = ch.size();
-        last_cp_width = ch_width;
-        page.next_offset = cp_next;
     }
 
     fclose(fp);

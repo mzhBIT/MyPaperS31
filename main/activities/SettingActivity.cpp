@@ -9,6 +9,8 @@
 #include "ui/SystemFont.h"
 #include "ui/VirtualKeyboard.h"
 #include "wifi/wifi_setting.h"
+#include "zhihu/ZhihuClient.h"
+#include "zhihu/ZhihuConfig.h"
 
 #include <M5Unified.h>
 #include <esp_err.h>
@@ -28,7 +30,7 @@ constexpr int PAD = 20;
 constexpr int SETTINGS_ROW_Y = 106;
 constexpr int SETTINGS_ROW_H = 126;
 constexpr int SETTINGS_ROW_GAP = 14;
-constexpr int SETTINGS_ITEM_COUNT = 3;
+constexpr int SETTINGS_ITEM_COUNT = 4;
 
 constexpr int SCAN_TOP = 94;
 constexpr int SCAN_ROW_H = 92;
@@ -580,6 +582,131 @@ private:
     }
 };
 
+class ZhihuSettingsActivity final : public Activity {
+public:
+    void on_create() override { draw(true); }
+
+    void on_show() override
+    {
+        if (!_seen_show) {
+            _seen_show = true;
+            return;
+        }
+        draw(false);
+    }
+
+    bool on_touch(const TouchEvent &event) override
+    {
+        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+            ActivityManager::instance().pop();
+            return true;
+        }
+        if (event.type != TouchEventType::Tap) return false;
+        if (event.y >= 170 && event.y < 310) {
+            _focus = 0;
+            edit_access_secret();
+            return true;
+        }
+        if (event.y >= 330 && event.y < 470) {
+            _focus = 1;
+            test_connection();
+            return true;
+        }
+        return false;
+    }
+
+    bool on_key(int key) override
+    {
+        if (key == APP_KEY_BACK) {
+            ActivityManager::instance().pop();
+            return true;
+        }
+        if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
+            _focus = 1 - _focus;
+            draw(false);
+            return true;
+        }
+        if (key == APP_KEY_OK) {
+            if (_focus == 0) edit_access_secret();
+            else test_connection();
+            return true;
+        }
+        return false;
+    }
+
+private:
+    bool _seen_show = false;
+    int _focus = 0;
+    std::string _message;
+
+    void edit_access_secret()
+    {
+        TextInputOptions options;
+        options.title = "Zhihu Access Secret";
+        options.submit_label = "Save";
+        options.max_bytes = 255;
+        options.start_in_chinese = false;
+        options.secret = true;
+        launch_text_input(options, [](const std::string &value) {
+            if (!zhihu_config_save_access_secret(value)) {
+                ESP_LOGE(TAG, "Failed to save Zhihu Access Secret");
+            }
+        });
+    }
+
+    void test_connection()
+    {
+        if (!ensure_wifi_configured_or_show_guide()) return;
+        ZhihuConfig config;
+        zhihu_config_load(&config);
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        M5.Display.fillScreen(TFT_WHITE);
+        draw_header("ZhiHu Settings");
+        system_font::draw_center(M5.Display, "Loading Zhihu hot list...",
+                                 M5.Display.width() / 2, 420, TFT_BLACK);
+        M5.Display.display();
+        M5.Display.endWrite();
+        M5.Display.waitDisplay();
+        ZhihuHotListResult result = ZhihuClient::fetch_hot_list(config, 1, true);
+        _message = result.success ? "Connection successful" : result.error;
+        draw(false);
+    }
+
+    void draw_row(int y, const char *title, const std::string &detail, bool selected)
+    {
+        const int width = M5.Display.width();
+        const uint16_t background = selected ? TFT_BLACK : TFT_WHITE;
+        const uint16_t foreground = selected ? TFT_WHITE : TFT_BLACK;
+        M5.Display.fillRoundRect(PAD, y, width - PAD * 2, 140, 8, background);
+        M5.Display.drawRoundRect(PAD, y, width - PAD * 2, 140, 8, TFT_BLACK);
+        system_font::draw_left(M5.Display, title, PAD + 18, y + 14, foreground);
+        system_font::draw_left(M5.Display, detail, PAD + 18, y + 74, foreground);
+        system_font::draw_right(M5.Display, ">", width - PAD - 20, y + 48, foreground);
+    }
+
+    void draw(bool quality)
+    {
+        ZhihuConfig config;
+        const bool configured = zhihu_config_load(&config);
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
+        M5.Display.fillScreen(TFT_WHITE);
+        draw_header("ZhiHu Settings");
+        draw_row(170, "Access Secret",
+                 configured ? "Configured (tap to replace)" : "Not configured",
+                 _focus == 0);
+        draw_row(330, "Test Connection", "Request one hot-list item", _focus == 1);
+        system_font::draw_center(M5.Display,
+                                 _message.empty() ? "The secret is stored in device NVS" :
+                                                    system_font::ellipsize(_message,
+                                                                           M5.Display.width() - 40),
+                                 M5.Display.width() / 2, 540, TFT_BLACK);
+        M5.Display.display();
+        M5.Display.endWrite();
+    }
+};
+
 class SettingActivity final : public Activity {
 public:
     void on_create() override
@@ -646,6 +773,7 @@ private:
     {
         if (_focus == 0) ActivityManager::instance().push(new WifiSettingsActivity());
         else if (_focus == 1) ActivityManager::instance().push(new DeepSeekSettingsActivity());
+        else if (_focus == 2) ActivityManager::instance().push(new ZhihuSettingsActivity());
         else launch_epd_diagnostics();
     }
 
@@ -687,7 +815,11 @@ private:
         draw_item(1, "DeepSeek",
                   has_api_key ? std::string("Configured, ") + deepseek_model_label(deepseek.default_model)
                               : "API key not configured");
-        draw_item(2, "EPD Diagnostics",
+        ZhihuConfig zhihu;
+        draw_item(2, "ZhiHu",
+                  zhihu_config_load(&zhihu) ? "Access Secret configured"
+                                            : "Access Secret not configured");
+        draw_item(3, "EPD Diagnostics",
                   "Direction, grayscale, transitions and VCOM");
         M5.Display.display();
         M5.Display.endWrite();

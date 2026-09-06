@@ -40,6 +40,11 @@ constexpr int LIST_BOTTOM = 1124;
 constexpr int LIST_ROWS = 5;
 constexpr int LIST_ROW_H = (LIST_BOTTOM - LIST_TOP) / LIST_ROWS;
 constexpr int FOOTER_Y = 1138;
+constexpr int REVIEW_TABS_TOP = 88;
+constexpr int REVIEW_TABS_H = 72;
+constexpr int REVIEW_LIST_TOP = REVIEW_TABS_TOP + REVIEW_TABS_H + 12;
+constexpr int REVIEW_ROWS = 4;
+constexpr int REVIEW_ROW_H = (LIST_BOTTOM - REVIEW_LIST_TOP) / REVIEW_ROWS;
 // This task reads NVS and may enter other flash-backed ESP-IDF APIs. Its stack
 // therefore must remain accessible while the flash cache is disabled.
 constexpr uint32_t WEREAD_TASK_STACK_BYTES = 8192;
@@ -75,8 +80,8 @@ bool load_local_reader_spine(const std::string &manifest_path, int chapter_count
     return true;
 }
 
-enum class WorkKind { LoadShelf, LoadCatalog, LoadChapter, LoadCovers };
-enum class ResultKind { LoginQr, Shelf, Catalog, OpenReader, CoversReady, Error, Cancelled };
+enum class WorkKind { LoadShelf, LoadCatalog, LoadChapter, LoadCovers, LoadReviews };
+enum class ResultKind { LoginQr, Shelf, Catalog, OpenReader, CoversReady, Reviews, Error, Cancelled };
 
 struct WorkResult {
     ResultKind kind = ResultKind::Error;
@@ -84,6 +89,7 @@ struct WorkResult {
     std::string login_url;
     std::vector<weread::Book> books;
     std::vector<weread::Chapter> chapters;
+    std::vector<weread::Review> reviews;
     std::string format;
     bool offline = false;
     std::string reader_path;
@@ -91,6 +97,7 @@ struct WorkResult {
     int cover_page = -1;
     bool covers_changed = false;
     bool cover_network_failed = false;
+    int review_list_type = 3;
 };
 
 struct WorkJob {
@@ -100,6 +107,7 @@ struct WorkJob {
     int chapter_index = 0;
     bool resume_saved_position = false;
     int cover_page = -1;
+    int review_list_type = 3;
     std::vector<weread::Book> cover_books;
     QueueHandle_t result_queue = nullptr;
     const volatile bool *cancelled = nullptr;
@@ -223,6 +231,17 @@ void weread_task(void *argument)
         }
     };
     if (client.session().valid()) sync_pending_progress();
+    if (job->kind == WorkKind::LoadReviews) {
+        auto result = std::make_unique<WorkResult>();
+        result->kind = ResultKind::Reviews;
+        result->review_list_type = job->review_list_type;
+        std::string error;
+        if (!api.get_book_reviews(job->book.id, job->review_list_type, 20,
+                                  &result->reviews, &error)) {
+            send_final(job.get(), error_result(error), external_stack, &client);
+        }
+        send_final(job.get(), std::move(result), external_stack, &client);
+    }
     if (job->kind == WorkKind::LoadChapter) {
         if (job->chapter.uid.empty()) {
             send_final(job.get(), error_result("Invalid chapter index"), external_stack, &client);
@@ -431,7 +450,7 @@ public:
                 _pending_work = PendingWork();
                 _busy = false;
                 start_work(pending.kind, pending.book, pending.chapter_index,
-                           pending.resume_saved_position, false);
+                           pending.resume_saved_position, false, pending.review_list_type);
                 return;
             }
             if (result->covers_changed && _view == View::Shelf && result->cover_page == _page) {
@@ -457,6 +476,8 @@ public:
             _return_to_shelf_after_reader = false;
             _chapters.clear();
             _chapters.shrink_to_fit();
+            _reviews.clear();
+            _reviews.shrink_to_fit();
             _books.clear();
             _books.shrink_to_fit();
             launch_weread_reader(result->reader_path.c_str(), result->reader_spine);
@@ -525,6 +546,12 @@ public:
             }
             _resume_after_catalog = false;
             draw_catalog();
+        } else if (result->kind == ResultKind::Reviews) {
+            _reviews = std::move(result->reviews);
+            _review_list_type = result->review_list_type;
+            _page = 0;
+            _view = View::Reviews;
+            draw_reviews();
         } else {
             _return_to_shelf_after_reader = false;
             _view = View::Error;
@@ -595,6 +622,7 @@ public:
 
     bool on_touch(const TouchEvent &event) override
     {
+        if (_book_menu_visible) return book_menu_touch(event);
         if (event.type == TouchEventType::Back ||
             (event.type == TouchEventType::Tap && event.x < 110 && event.y < HEADER_H)) {
             go_back();
@@ -607,6 +635,8 @@ public:
         }
         if (_view == View::Shelf) return shelf_touch(event);
         if (_view == View::Catalog) return catalog_touch(event);
+        if (_view == View::Reviews) return reviews_touch(event);
+        if (_view == View::ReviewDetail) return review_detail_touch(event);
         return false;
     }
 
@@ -619,13 +649,14 @@ public:
     bool allow_system_back() const override { return !_busy; }
 
 private:
-    enum class View { Loading, Login, Shelf, Catalog, Error };
+    enum class View { Loading, Login, Shelf, Catalog, Reviews, ReviewDetail, Error };
     struct PendingWork {
         bool valid = false;
         WorkKind kind = WorkKind::LoadShelf;
         weread::Book book;
         int chapter_index = 0;
         bool resume_saved_position = false;
+        int review_list_type = 3;
     };
     View _view = View::Loading;
     QueueHandle_t _queue = nullptr;
@@ -639,8 +670,12 @@ private:
     bool _return_to_shelf_after_reader = false;
     bool _cover_prefetch_active = false;
     bool _cover_prefetch_disabled = false;
+    bool _book_menu_visible = false;
     int _page = 0;
     int _shelf_page = 0;
+    int _review_list_type = 3;
+    int _review_index = -1;
+    int _review_detail_page = 0;
     PendingWork _pending_work;
     std::vector<bool> _cover_pages_attempted;
     std::string _status;
@@ -649,6 +684,7 @@ private:
     weread::Book _selected_book;
     std::vector<weread::Book> _books;
     std::vector<weread::Chapter> _chapters;
+    std::vector<weread::Review> _reviews;
 
     void begin_frame(epd_mode_t mode = epd_mode_t::epd_text)
     {
@@ -725,8 +761,101 @@ private:
         system_font::draw_center(M5.Display, std::to_string(_page + 1) + "/" + std::to_string(total_pages),
                                  M5.Display.width() / 2, FOOTER_Y, TFT_BLACK);
         if (_offline) system_font::draw_right(M5.Display, "Offline", M5.Display.width() - 24, FOOTER_Y, TFT_DARKGRAY);
+        if (_book_menu_visible) draw_book_menu_overlay();
         end_frame();
-        schedule_cover_prefetch();
+        if (!_book_menu_visible) schedule_cover_prefetch();
+    }
+
+    void draw_book_menu_overlay()
+    {
+        const int width = M5.Display.width();
+        const int box_x = 32;
+        const int box_w = width - 64;
+        const int box_y = 420;
+        const int box_h = 300;
+        M5.Display.fillRoundRect(box_x, box_y, box_w, box_h, 18, TFT_WHITE);
+        M5.Display.drawRoundRect(box_x, box_y, box_w, box_h, 18, TFT_BLACK);
+        system_font::draw_center(M5.Display,
+            system_font::ellipsize(_selected_book.title, box_w - 50), width / 2, box_y + 24, TFT_BLACK);
+        M5.Display.drawFastHLine(box_x + 20, box_y + 92, box_w - 40, TFT_BLACK);
+        M5.Display.drawRect(box_x + 24, box_y + 126, (box_w - 64) / 2, 104, TFT_BLACK);
+        M5.Display.drawRect(box_x + 40 + (box_w - 64) / 2, box_y + 126,
+                           (box_w - 64) / 2, 104, TFT_BLACK);
+        system_font::draw_center(M5.Display, "章节目录",
+                                 box_x + 24 + (box_w - 64) / 4, box_y + 154, TFT_BLACK);
+        system_font::draw_center(M5.Display, "书评",
+                                 box_x + 40 + 3 * (box_w - 64) / 4, box_y + 154, TFT_BLACK);
+        system_font::draw_center(M5.Display, "点击空白处关闭", width / 2, box_y + 250, TFT_DARKGRAY);
+    }
+
+    void draw_reviews()
+    {
+        begin_frame();
+        draw_header(_selected_book.title);
+        const int width = M5.Display.width();
+        const int half = width / 2;
+        system_font::draw_center(M5.Display, "推荐", half / 2, REVIEW_TABS_TOP + 15, TFT_BLACK);
+        system_font::draw_center(M5.Display, "最新", half + half / 2, REVIEW_TABS_TOP + 15, TFT_BLACK);
+        M5.Display.drawFastHLine(0, REVIEW_TABS_TOP + REVIEW_TABS_H - 1, width, TFT_LIGHTGRAY);
+        const int active_x = _review_list_type == 3 ? 20 : half + 20;
+        M5.Display.fillRect(active_x, REVIEW_TABS_TOP + REVIEW_TABS_H - 5, half - 40, 5, TFT_BLACK);
+
+        const int total_pages = std::max(1, static_cast<int>((_reviews.size() + REVIEW_ROWS - 1) / REVIEW_ROWS));
+        _page = std::clamp(_page, 0, total_pages - 1);
+        for (int row = 0; row < REVIEW_ROWS; ++row) {
+            const int index = _page * REVIEW_ROWS + row;
+            const int y = REVIEW_LIST_TOP + row * REVIEW_ROW_H;
+            if (index < static_cast<int>(_reviews.size())) {
+                const auto &review = _reviews[static_cast<size_t>(index)];
+                system_font::draw_left(M5.Display,
+                    system_font::ellipsize(review.author, width - 56), 28, y + 14, TFT_BLACK);
+                const auto lines = wrap_text(review.content, width - 56);
+                const int line_height = system_font::line_height() + 4;
+                const int max_lines = std::min(3, static_cast<int>(lines.size()));
+                for (int line = 0; line < max_lines; ++line) {
+                    std::string text = lines[static_cast<size_t>(line)];
+                    if (line == max_lines - 1 && static_cast<int>(lines.size()) > max_lines) text += "...";
+                    system_font::draw_left(M5.Display,
+                        system_font::ellipsize(text, width - 56), 28,
+                        y + 65 + line * line_height, TFT_DARKGRAY);
+                }
+            }
+            M5.Display.drawFastHLine(20, y + REVIEW_ROW_H - 1, width - 40, TFT_BLACK);
+        }
+        if (_reviews.empty()) {
+            system_font::draw_center(M5.Display, "暂无书评", width / 2, 520, TFT_DARKGRAY);
+        }
+        system_font::draw_center(M5.Display, std::to_string(_page + 1) + "/" + std::to_string(total_pages),
+                                 width / 2, FOOTER_Y, TFT_BLACK);
+        end_frame();
+    }
+
+    void draw_review_detail()
+    {
+        if (_review_index < 0 || _review_index >= static_cast<int>(_reviews.size())) return;
+        begin_frame();
+        draw_header("书评");
+        const auto &review = _reviews[static_cast<size_t>(_review_index)];
+        const int width = M5.Display.width();
+        system_font::draw_left(M5.Display,
+            system_font::ellipsize(review.author, width - 56), 28, 104, TFT_BLACK);
+        M5.Display.drawFastHLine(20, 165, width - 40, TFT_BLACK);
+        const auto lines = wrap_text(review.content, width - 56);
+        const int line_height = system_font::line_height() + 8;
+        const int content_top = 192;
+        const int lines_per_page = std::max(1, (LIST_BOTTOM - content_top) / line_height);
+        const int total_pages = std::max(1, static_cast<int>((lines.size() + lines_per_page - 1) / lines_per_page));
+        _review_detail_page = std::clamp(_review_detail_page, 0, total_pages - 1);
+        const int begin = _review_detail_page * lines_per_page;
+        const int end = std::min(static_cast<int>(lines.size()), begin + lines_per_page);
+        for (int line = begin; line < end; ++line) {
+            system_font::draw_left(M5.Display, lines[static_cast<size_t>(line)], 28,
+                                   content_top + (line - begin) * line_height, TFT_BLACK);
+        }
+        system_font::draw_center(M5.Display,
+            std::to_string(_review_detail_page + 1) + "/" + std::to_string(total_pages),
+            width / 2, FOOTER_Y, TFT_BLACK);
+        end_frame();
     }
 
     void draw_catalog()
@@ -771,16 +900,52 @@ private:
 
     bool shelf_touch(const TouchEvent &event)
     {
-        if (event.type == TouchEventType::SwipeLeft) { ++_page; draw_shelf(); return true; }
-        if (event.type == TouchEventType::SwipeRight) { --_page; draw_shelf(); return true; }
-        if (event.type != TouchEventType::Tap || event.y < LIST_TOP || event.y >= LIST_BOTTOM) return false;
+        if (event.type == TouchEventType::SwipeUp) { ++_page; draw_shelf(); return true; }
+        if (event.type == TouchEventType::SwipeDown) { --_page; draw_shelf(); return true; }
+        if ((event.type != TouchEventType::Tap && event.type != TouchEventType::LongPress) ||
+            event.y < LIST_TOP || event.y >= LIST_BOTTOM) return false;
         const int row = (event.y - LIST_TOP) / LIST_ROW_H;
         const int index = _page * LIST_ROWS + row;
         if (index >= static_cast<int>(_books.size())) return true;
         _shelf_page = _page;
         _selected_book = _books[index];
+        if (event.type == TouchEventType::LongPress) {
+            _book_menu_visible = true;
+            draw_shelf();
+            return true;
+        }
         _resume_after_catalog = true;
         start_work(WorkKind::LoadCatalog, _selected_book);
+        return true;
+    }
+
+    bool book_menu_touch(const TouchEvent &event)
+    {
+        if (event.type == TouchEventType::Back) {
+            _book_menu_visible = false;
+            draw_shelf();
+            return true;
+        }
+        if (event.type != TouchEventType::Tap) return true;
+        const int box_x = 32;
+        const int box_w = M5.Display.width() - 64;
+        const int button_y = 546;
+        const int button_h = 104;
+        if (event.y >= button_y && event.y < button_y + button_h) {
+            const int split = M5.Display.width() / 2;
+            _book_menu_visible = false;
+            if (event.x < split && event.x >= box_x + 24) {
+                _resume_after_catalog = false;
+                start_work(WorkKind::LoadCatalog, _selected_book);
+                return true;
+            }
+            if (event.x >= split && event.x < box_x + box_w - 24) {
+                start_work(WorkKind::LoadReviews, _selected_book, 0, false, true, 3);
+                return true;
+            }
+        }
+        _book_menu_visible = false;
+        draw_shelf();
         return true;
     }
 
@@ -800,8 +965,62 @@ private:
         return false;
     }
 
+    bool reviews_touch(const TouchEvent &event)
+    {
+        if (event.type == TouchEventType::SwipeUp) { ++_page; draw_reviews(); return true; }
+        if (event.type == TouchEventType::SwipeDown) { --_page; draw_reviews(); return true; }
+        if (event.type != TouchEventType::Tap) return false;
+        if (event.y >= REVIEW_TABS_TOP && event.y < REVIEW_TABS_TOP + REVIEW_TABS_H) {
+            const int type = event.x < M5.Display.width() / 2 ? 3 : 2;
+            if (type != _review_list_type) {
+                start_work(WorkKind::LoadReviews, _selected_book, 0, false, true, type);
+            }
+            return true;
+        }
+        if (event.y >= REVIEW_LIST_TOP && event.y < LIST_BOTTOM) {
+            const int row = (event.y - REVIEW_LIST_TOP) / REVIEW_ROW_H;
+            const int index = _page * REVIEW_ROWS + row;
+            if (index >= 0 && index < static_cast<int>(_reviews.size())) {
+                _review_index = index;
+                _review_detail_page = 0;
+                _view = View::ReviewDetail;
+                draw_review_detail();
+            }
+            return true;
+        }
+        return false;
+    }
+
+    bool review_detail_touch(const TouchEvent &event)
+    {
+        if (event.type == TouchEventType::SwipeUp) {
+            ++_review_detail_page;
+            draw_review_detail();
+            return true;
+        }
+        if (event.type == TouchEventType::SwipeDown) {
+            --_review_detail_page;
+            draw_review_detail();
+            return true;
+        }
+        return false;
+    }
+
+    static const char *work_loading_message(WorkKind kind)
+    {
+        switch (kind) {
+        case WorkKind::LoadShelf: return "Loading shelf...";
+        case WorkKind::LoadCatalog: return "Loading chapters...";
+        case WorkKind::LoadChapter: return "Downloading chapter...";
+        case WorkKind::LoadReviews: return "Loading book reviews...";
+        case WorkKind::LoadCovers: return "Loading covers...";
+        }
+        return "Loading...";
+    }
+
     void start_work(WorkKind kind, const weread::Book &book, int chapter_index = 0,
-                    bool resume_saved_position = false, bool show_loading = true)
+                    bool resume_saved_position = false, bool show_loading = true,
+                    int review_list_type = 3)
     {
         if (!_queue) return;
         if (_task) {
@@ -812,12 +1031,11 @@ private:
                 _pending_work.book = book;
                 _pending_work.chapter_index = chapter_index;
                 _pending_work.resume_saved_position = resume_saved_position;
+                _pending_work.review_list_type = review_list_type;
                 _busy = true;
                 _view = View::Loading;
                 if (show_loading) {
-                    draw_loading(kind == WorkKind::LoadShelf ? "Loading shelf..." :
-                                 (kind == WorkKind::LoadCatalog ? "Loading chapters..." :
-                                  "Downloading chapter..."));
+                    draw_loading(work_loading_message(kind));
                 }
             }
             return;
@@ -828,8 +1046,7 @@ private:
         _exit_when_done = false;
         _view = View::Loading;
         if (show_loading) {
-            draw_loading(kind == WorkKind::LoadShelf ? "Loading shelf..." :
-                         (kind == WorkKind::LoadCatalog ? "Loading chapters..." : "Downloading chapter..."));
+            draw_loading(work_loading_message(kind));
             M5.Display.waitDisplay();
         }
 
@@ -838,6 +1055,7 @@ private:
         job->book = book;
         job->chapter_index = chapter_index;
         job->resume_saved_position = resume_saved_position;
+        job->review_list_type = review_list_type;
         if (kind == WorkKind::LoadChapter && chapter_index >= 0 &&
             chapter_index < static_cast<int>(_chapters.size())) {
             job->chapter = _chapters[static_cast<size_t>(chapter_index)];
@@ -918,6 +1136,11 @@ private:
 
     void go_back()
     {
+        if (_book_menu_visible) {
+            _book_menu_visible = false;
+            draw_shelf();
+            return;
+        }
         if (_busy) {
             _cancelled = true;
             _exit_when_done = true;
@@ -930,6 +1153,20 @@ private:
             return;
         }
         if (_view == View::Catalog) {
+            _view = View::Shelf;
+            _page = _shelf_page;
+            restore_selected_book_shelf_page();
+            draw_shelf();
+            return;
+        }
+        if (_view == View::ReviewDetail) {
+            _view = View::Reviews;
+            draw_reviews();
+            return;
+        }
+        if (_view == View::Reviews) {
+            _reviews.clear();
+            _reviews.shrink_to_fit();
             _view = View::Shelf;
             _page = _shelf_page;
             restore_selected_book_shelf_page();

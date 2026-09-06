@@ -389,6 +389,10 @@ private:
             launch_reader_background_picker();
             return;
         }
+        if (action == ReaderOverlay::Action::OpenBookCover) {
+            launch_reader_book_cover_picker();
+            return;
+        }
 
         bool apply_layout = m_overlay.settings_dirty();
         m_overlay.close();

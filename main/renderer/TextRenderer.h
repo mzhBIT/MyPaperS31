@@ -2,6 +2,7 @@
 
 #include <M5Unified.h>
 #include "renderer/TextLayout.h"
+#include "renderer/InlineStyle.h"
 #include <cstddef>
 #include <cstdint>
 #include <string>
@@ -36,6 +37,7 @@ public:
     int baseline() const;
     int measureCodepoint(uint32_t codepoint);
     int measureCodepointForLayout(uint32_t codepoint);
+    int measureKerningForLayout(uint32_t left, uint32_t right);
     int measureFullwidthCellForLayout();
     int measureUtf8(const std::string &text);
     std::vector<text_layout::Line> layoutUtf8Paragraph(const std::string &text, int max_width,
@@ -44,6 +46,9 @@ public:
     bool preparePage(const std::string &text);
     void drawUtf8Line(lgfx::LGFXBase &gfx, const std::string &text, int x, int y,
                       uint16_t color, int justify_width = 0);
+    void drawStyledUtf8Line(lgfx::LGFXBase &gfx, const std::string &text,
+                            const std::vector<inline_style::Span> &styles,
+                            int x, int y, uint16_t color, int justify_width = 0);
     void clearGlyphCache();
     TextRenderStats stats() const;
     std::string layoutSignature() const;
@@ -120,6 +125,8 @@ private:
     void drawGlyph(lgfx::LGFXBase &gfx, const Glyph &glyph, int x, int baseline_y,
                    uint16_t color);
     void drawGlyphRuns(lgfx::LGFXBase &gfx, const Glyph &glyph, int x, int baseline_y, uint16_t color);
+    void drawGlyphStyled(lgfx::LGFXBase &gfx, const Glyph &glyph, int x, int baseline_y,
+                         uint16_t color, uint8_t style_flags);
     void preloadCommonGlyphs();
     void resetFont();
     bool compactGlyphCache(size_t needed_bytes);

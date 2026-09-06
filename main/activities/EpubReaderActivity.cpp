@@ -3,6 +3,7 @@
 #include "activities/ReaderBackgroundPickerActivity.h"
 #include "activities/ReaderOverlay.h"
 #include "parser/epub_html.h"
+#include "parser/markdown_parser.h"
 #include "parser/reflow_book.h"
 #include "recent_books.h"
 #include "renderer/CoverThumbnail.h"
@@ -243,8 +244,12 @@ public:
 
         _ok = g_epub.open(path);
         if (_ok) {
+            // JPEG engine control descriptors require contiguous internal DMA
+            // memory. Reserve them before font/image caches fragment SRAM.
+            p4_jpeg::prepare();
             _is_mobi = g_epub.is_mobi();
             _is_fb2 = g_epub.is_fb2();
+            _is_markdown = g_epub.is_markdown();
             _progress_root = _is_mobi ? app_paths::mobi_progress_dir()
                                       : (_is_fb2 ? app_paths::fb2_progress_dir()
                                                  : app_paths::epub_progress_dir());
@@ -257,8 +262,10 @@ public:
             _image_cache_dir = _cache_root + "/" + key;
             app_paths::ensure_dir(_cache_root.c_str());
             mkdir(_image_cache_dir.c_str(), 0);
-            std::string cover_path = ensure_cover_cache();
-            recent_book_save(path, g_epub.type_name(), g_epub.title.c_str(), cover_path.c_str());
+            if (!g_epub.is_weread()) {
+                std::string cover_path = ensure_cover_cache();
+                recent_book_save(path, g_epub.type_name(), g_epub.title.c_str(), cover_path.c_str());
+            }
             refresh_text_renderer();
             _layout_sig = layout_signature();
             int saved_spine = 0;
@@ -480,6 +487,10 @@ private:
             launch_reader_background_picker();
             return;
         }
+        if (action == ReaderOverlay::Action::OpenBookCover) {
+            launch_reader_book_cover_picker();
+            return;
+        }
 
         bool apply_layout = _overlay.settings_dirty();
         _overlay.close();
@@ -563,6 +574,7 @@ private:
     std::string _cache_root;
     bool _is_mobi = false;
     bool _is_fb2 = false;
+    bool _is_markdown = false;
     bool _progress_dirty = false;
     int64_t _progress_dirty_at = 0;
     int _non_quality_refresh_count = 0;
@@ -905,7 +917,7 @@ private:
         int64_t t_read = esp_timer_get_time();
 
         std::vector<EpubContentBlock> blocks;
-        if (!epub_parse_xhtml_blocks(xhtml, spine.href, &blocks)) {
+        if (!parse_source_blocks(xhtml, spine.href, &blocks)) {
             ESP_LOGW(TAG, "parse spine failed index=%d href=%s", index, spine.href.c_str());
             return false;
         }
@@ -941,9 +953,10 @@ private:
 
     std::string image_cache_path(const std::string &href) const
     {
-        std::string ext = lower_ext(href);
+        const std::string resolved = g_epub.normalize_resource_href(href);
+        std::string ext = lower_ext(resolved);
         if (ext != ".jpg" && ext != ".png" && ext != ".bmp") ext = ".img";
-        uint32_t h = hash32_string(href);
+        uint32_t h = hash32_string(resolved);
         char name[40];
         snprintf(name, sizeof(name), "/%08lx%s", (unsigned long)h, ext.c_str());
         return _image_cache_dir + name;
@@ -984,8 +997,16 @@ private:
 
     bool is_supported_image_href(const std::string &href) const
     {
-        std::string ext = lower_ext(href);
+        std::string ext = lower_ext(g_epub.normalize_resource_href(href));
         return ext == ".jpg" || ext == ".png" || ext == ".bmp";
+    }
+
+    bool parse_source_blocks(const std::string &source, const std::string &href,
+                             std::vector<EpubContentBlock> *blocks) const
+    {
+        return _is_markdown
+            ? markdown_parse_blocks(source, g_epub.path(), blocks)
+            : epub_parse_xhtml_blocks(source, href, blocks);
     }
 
     bool is_ignored_layout_image(const std::string &href) const
@@ -1007,8 +1028,9 @@ private:
         int64_t t0 = esp_timer_get_time();
         if (stats) *stats = ImageLoadStats();
         if (!image || href.empty()) return false;
-        if (_missing_images.find(href) != _missing_images.end()) return false;
-        auto cached = _image_cache.find(href);
+        const std::string resolved = g_epub.normalize_resource_href(href);
+        if (_missing_images.find(resolved) != _missing_images.end()) return false;
+        auto cached = _image_cache.find(resolved);
         if (cached != _image_cache.end() && file_exists(cached->second.path)) {
             *image = cached->second;
             if (stats) {
@@ -1019,7 +1041,7 @@ private:
             return true;
         }
 
-        std::string ext = lower_ext(href);
+        std::string ext = lower_ext(resolved);
         if (ext != ".jpg" && ext != ".png" && ext != ".bmp") {
             ESP_LOGW(TAG, "unsupported image ext href=%s", href.c_str());
             return false;
@@ -1027,14 +1049,14 @@ private:
 
         app_paths::ensure_dir(_cache_root.c_str());
         mkdir(_image_cache_dir.c_str(), 0);
-        std::string out_path = image_cache_path(href);
+        std::string out_path = image_cache_path(resolved);
         bool file_cached = file_exists(out_path);
         if (!file_cached) {
             int64_t t_extract = esp_timer_get_time();
-            if (!g_epub.extract_item_to_file(href, out_path)) {
+            if (!g_epub.extract_item_to_file(resolved, out_path)) {
                 ESP_LOGW(TAG, "image extract failed href=%s", href.c_str());
                 remove(out_path.c_str());
-                _missing_images.insert(href);
+                _missing_images.insert(resolved);
                 return false;
             }
             if (stats) stats->extract_ms = (esp_timer_get_time() - t_extract) / 1000;
@@ -1046,7 +1068,7 @@ private:
         int64_t t_probe = esp_timer_get_time();
         if (!probe_image_size(out_path, ext, &info.width, &info.height, &info.jpg_progressive)) {
             ESP_LOGW(TAG, "image probe failed href=%s path=%s", href.c_str(), out_path.c_str());
-            _missing_images.insert(href);
+            _missing_images.insert(resolved);
             return false;
         }
         if (stats) {
@@ -1055,7 +1077,7 @@ private:
             stats->total_ms = (esp_timer_get_time() - t0) / 1000;
         }
 
-        _image_cache[href] = info;
+        _image_cache[resolved] = info;
         *image = info;
         return true;
     }
@@ -1127,6 +1149,22 @@ private:
                     stats->hardware_scale_ms = hw.scale_ms;
                     stats->hardware_push_ms = hw.push_ms;
                     stats->hardware_total_ms = hw.total_ms;
+                }
+            }
+            if (!ok) {
+                turbo_jpeg::DrawStats sw;
+                ok = turbo_jpeg::draw_file(gfx, image.path.c_str(), x, y, w, h, &sw);
+                if (stats) {
+                    stats->software_attempted = sw.attempted;
+                    stats->software_ok = ok;
+                    stats->software_scale_denom = sw.scale_denom;
+                    stats->software_memory_budget = sw.memory_budget;
+                    stats->software_legacy_coefficients = sw.legacy_coefficient_bytes;
+                    stats->software_compact_coefficients = sw.compact_coefficient_bytes;
+                    stats->software_header_ms = sw.header_ms;
+                    stats->software_decode_ms = sw.decode_ms;
+                    stats->software_push_ms = sw.push_ms;
+                    stats->software_total_ms = sw.total_ms;
                 }
             }
             int64_t t_file = esp_timer_get_time();
@@ -1261,6 +1299,7 @@ private:
                 output_ref.content = std::move(ref.content);
                 output.footnotes.push_back(std::move(output_ref));
             }
+            output.styles = std::move(block.styles);
             size_t text_bytes = output.text.size();
             document_blocks.push_back(std::move(output));
 
@@ -1340,7 +1379,7 @@ private:
         int64_t t_read = esp_timer_get_time();
 
         std::vector<EpubContentBlock> blocks;
-        if (!epub_parse_xhtml_blocks(xhtml, spine.href, &blocks)) {
+        if (!parse_source_blocks(xhtml, spine.href, &blocks)) {
             ESP_LOGW(TAG, "prefetch parse spine failed index=%d href=%s", index, spine.href.c_str());
             return false;
         }
@@ -1591,7 +1630,7 @@ private:
         if (!g_epub.read_item_to_string(spine.href, &xhtml)) return false;
 
         std::vector<EpubContentBlock> blocks;
-        if (!epub_parse_xhtml_blocks(xhtml, spine.href, &blocks)) return false;
+        if (!parse_source_blocks(xhtml, spine.href, &blocks)) return false;
         for (const auto &block : blocks) {
             if (block.type == EpubContentBlockType::Image &&
                 !is_ignored_layout_image(block.href) &&
@@ -1886,8 +1925,8 @@ private:
                     int underline_w = item.justify
                         ? item.width
                         : reader_text_renderer().measureUtf8(item.text);
-                    reader_text_renderer().drawUtf8Line(
-                        gfx, item.text, text_x, y, TFT_BLACK,
+                    reader_text_renderer().drawStyledUtf8Line(
+                        gfx, item.text, item.styles, text_x, y, TFT_BLACK,
                         item.justify ? item.width : 0);
                     draw_underline(text_x, y, underline_w);
                     for (const auto &ref : item.footnotes) {
@@ -2154,6 +2193,11 @@ void launch_mobi_reader(const char *path)
 }
 
 void launch_fb2_reader(const char *path)
+{
+    ActivityManager::instance().push(new EpubReaderActivity(path));
+}
+
+void launch_markdown_reader(const char *path)
 {
     ActivityManager::instance().push(new EpubReaderActivity(path));
 }

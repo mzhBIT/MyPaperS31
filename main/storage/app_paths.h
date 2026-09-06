@@ -21,6 +21,7 @@ const char *deepseek_sessions_dir();
 const char *weread_dir();
 const char *weread_books_dir();
 const char *weread_covers_dir();
+const char *zhihu_hot_list_file();
 
 void ensure_data_dir();
 void ensure_dir(const char *path);

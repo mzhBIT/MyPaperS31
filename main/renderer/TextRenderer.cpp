@@ -1559,6 +1559,24 @@ int TextRenderer::measureCodepointForLayout(uint32_t codepoint)
     return estimate_width_no_font(codepoint, _style.font_size);
 }
 
+int TextRenderer::measureKerningForLayout(uint32_t left, uint32_t right)
+{
+    if (!_ft_ready || !_face || left == 0 || right == 0 ||
+        left == '\r' || left == '\n' || right == '\r' || right == '\n') {
+        return 0;
+    }
+
+    FT_Face face = static_cast<FT_Face>(_face);
+    if (!FT_HAS_KERNING(face)) return 0;
+    FT_UInt left_index = FT_Get_Char_Index(face, static_cast<FT_ULong>(left));
+    FT_UInt right_index = FT_Get_Char_Index(face, static_cast<FT_ULong>(right));
+    if (left_index == 0 || right_index == 0) return 0;
+
+    FT_Vector delta = {};
+    if (FT_Get_Kerning(face, left_index, right_index, FT_KERNING_DEFAULT, &delta) != 0) return 0;
+    return static_cast<int>(delta.x >> 6);
+}
+
 int TextRenderer::measureFullwidthCellForLayout()
 {
     const int fallback = std::max(1, _bin_ready && _bin_font_height
@@ -1581,11 +1599,14 @@ int TextRenderer::measureUtf8(const std::string &text)
 {
     int w = 0;
     int glyph_count = 0;
+    uint32_t previous = 0;
     for (size_t pos = 0; pos < text.size();) {
         uint32_t cp = 0;
         pos = nextUtf8(text, pos, cp);
         if (cp == '\r' || cp == '\n') continue;
+        if (previous != 0) w += measureKerningForLayout(previous, cp);
         w += measureCodepoint(cp);
+        previous = cp;
         glyph_count++;
     }
     if (glyph_count > 1) w += (glyph_count - 1) * _style.letter_spacing;
@@ -1828,7 +1849,10 @@ std::vector<text_layout::Line> TextRenderer::layoutUtf8Paragraph(const std::stri
     auto measure = [](void *context, uint32_t codepoint) -> int {
         return static_cast<TextRenderer *>(context)->measureCodepointForLayout(codepoint);
     };
-    return text_layout::break_utf8(text, options, measure, this);
+    auto measure_kerning = [](void *context, uint32_t left, uint32_t right) -> int {
+        return static_cast<TextRenderer *>(context)->measureKerningForLayout(left, right);
+    };
+    return text_layout::break_utf8(text, options, measure, this, measure_kerning);
 }
 
 std::vector<std::string> TextRenderer::wrapUtf8Line(const std::string &line, int max_width)
@@ -1910,6 +1934,65 @@ void TextRenderer::drawGlyphRuns(lgfx::LGFXBase &gfx, const Glyph &glyph, int x,
 void TextRenderer::drawUtf8Line(lgfx::LGFXBase &gfx, const std::string &text, int x, int y,
                                 uint16_t color, int justify_width)
 {
+    static const std::vector<inline_style::Span> no_styles;
+    drawStyledUtf8Line(gfx, text, no_styles, x, y, color, justify_width);
+}
+
+void TextRenderer::drawGlyphStyled(lgfx::LGFXBase &gfx, const Glyph &glyph,
+                                   int x, int baseline_y, uint16_t color,
+                                   uint8_t style_flags)
+{
+    if (!inline_style::has(style_flags, inline_style::Bold) &&
+        !inline_style::has(style_flags, inline_style::Italic)) {
+        drawGlyph(gfx, glyph, x, baseline_y, color);
+        return;
+    }
+    if (glyph.data_size == 0 || glyph.width <= 0 || glyph.height <= 0) return;
+    if (glyph.data_offset + glyph.data_size > _glyph_pool_used) return;
+
+    const int gx = x + glyph.bitmap_left;
+    const int gy = baseline_y - glyph.bitmap_top;
+    const int bold_px = inline_style::has(style_flags, inline_style::Bold) ? 1 : 0;
+    const int italic_px = inline_style::has(style_flags, inline_style::Italic)
+                        ? std::max(2, std::min(5, _style.font_size / 10)) : 0;
+    for (int row = 0; row < glyph.height; ++row) {
+        const uint8_t *src = _glyph_pool + glyph.data_offset + row * glyph.pitch;
+        const int shear = italic_px > 0
+                        ? ((glyph.height - 1 - row) * italic_px) / std::max(1, glyph.height - 1)
+                        : 0;
+        int run_start = -1;
+        uint8_t run_level = 0;
+        auto flush_run = [&](int end) {
+            if (run_start < 0) return;
+            const uint8_t v = color == TFT_WHITE ? (uint8_t)(run_level * 17)
+                                                  : (uint8_t)(255 - run_level * 17);
+            const uint16_t draw_color = (color == TFT_BLACK || color == TFT_WHITE) ? gray565(v) : color;
+            gfx.writeFastHLine(gx + run_start + shear, gy + row,
+                               end - run_start + bold_px, draw_color);
+            run_start = -1;
+        };
+        for (int col = 0; col < glyph.width; ++col) {
+            const uint8_t packed = src[col >> 1];
+            const uint8_t level = (col & 1) ? (packed & 0x0F) : (packed >> 4);
+            if (level == 0) {
+                flush_run(col);
+            } else if (run_start < 0) {
+                run_start = col;
+                run_level = level;
+            } else if (level != run_level) {
+                flush_run(col);
+                run_start = col;
+                run_level = level;
+            }
+        }
+        flush_run(glyph.width);
+    }
+}
+
+void TextRenderer::drawStyledUtf8Line(lgfx::LGFXBase &gfx, const std::string &text,
+                                      const std::vector<inline_style::Span> &styles,
+                                      int x, int y, uint16_t color, int justify_width)
+{
     if (!_ft_ready && !_bin_ready && !_lv_ready) {
         ESP_LOGE(TAG, "drawUtf8Line skipped: font not ready");
         return;
@@ -1938,44 +2021,61 @@ void TextRenderer::drawUtf8Line(lgfx::LGFXBase &gfx, const std::string &text, in
     }
     const int glyph_count = (int)codepoints.size();
     std::vector<int> gap_extra(glyph_count > 1 ? (size_t)glyph_count - 1 : 0, 0);
-    // Expand only suitable CJK gaps. Punctuation-adjacent gaps, whitespace,
-    // and paired dashes/ellipses remain untouched so justification does not
-    // create conspicuous holes around marks.
-    if (justify_width > 0 && glyph_count > 1 && cjk_count * 2 >= glyph_count) {
+    if (justify_width > 0 && glyph_count > 1) {
         int natural_width = measureUtf8(text);
         int requested_extra = std::max(0, justify_width - natural_width);
-        std::vector<int> eligible;
-        eligible.reserve((size_t)glyph_count - 1);
+        std::vector<int> word_gaps;
+        std::vector<int> cjk_gaps;
+        word_gaps.reserve((size_t)glyph_count / 4 + 1);
+        cjk_gaps.reserve((size_t)glyph_count - 1);
         for (int i = 0; i + 1 < glyph_count; ++i) {
-            uint32_t left = codepoints[(size_t)i];
-            uint32_t right = codepoints[(size_t)i + 1];
-            bool left_cjk = is_cjk_or_fullwidth(left) || is_cjk_punctuation(left);
-            bool right_cjk = is_cjk_or_fullwidth(right) || is_cjk_punctuation(right);
-            bool whitespace = left == ' ' || left == '\t' || right == ' ' || right == '\t';
-            bool paired_mark = (left == right) &&
-                               (left == 0x2014 || left == 0x2025 || left == 0x2026);
+            const uint32_t left = codepoints[(size_t)i];
+            const uint32_t right = codepoints[(size_t)i + 1];
+            if ((left == ' ' || left == '\t') && right != ' ' && right != '\t') {
+                word_gaps.push_back(i);
+            }
+
+            if (cjk_count * 2 < glyph_count) continue;
+            const bool left_cjk = is_cjk_or_fullwidth(left) || is_cjk_punctuation(left);
+            const bool right_cjk = is_cjk_or_fullwidth(right) || is_cjk_punctuation(right);
+            const bool whitespace = left == ' ' || left == '\t' || right == ' ' || right == '\t';
+            const bool paired_mark = (left == right) &&
+                                     (left == 0x2014 || left == 0x2025 || left == 0x2026);
             if (left_cjk && right_cjk && !whitespace && !paired_mark &&
                 !text_layout::prohibited_at_line_end(left) &&
                 !text_layout::prohibited_at_line_start(right)) {
-                eligible.push_back(i);
+                cjk_gaps.push_back(i);
             }
         }
-        if (!eligible.empty() && requested_extra > 0) {
-            int max_per_gap = std::max(1, _style.font_size / 4);
-            int distributed = std::min(requested_extra,
-                                       max_per_gap * (int)eligible.size());
-            int per_gap = distributed / (int)eligible.size();
-            int remainder = distributed % (int)eligible.size();
-            for (size_t i = 0; i < eligible.size(); ++i) {
-                gap_extra[(size_t)eligible[i]] = per_gap + ((int)i < remainder ? 1 : 0);
+
+        auto distribute = [&gap_extra, &requested_extra](const std::vector<int> &gaps,
+                                                          int max_per_gap) {
+            if (gaps.empty() || requested_extra <= 0) return;
+            const int distributed = std::min(requested_extra,
+                                             max_per_gap * (int)gaps.size());
+            const int per_gap = distributed / (int)gaps.size();
+            const int remainder = distributed % (int)gaps.size();
+            for (size_t i = 0; i < gaps.size(); ++i) {
+                gap_extra[(size_t)gaps[i]] += per_gap + ((int)i < remainder ? 1 : 0);
             }
-        }
+            requested_extra -= distributed;
+        };
+
+        // Mixed lines prefer word separators. Individual Latin glyphs are
+        // never spread; CJK gaps absorb only the remaining adjustment.
+        distribute(word_gaps, std::max(2, measureCodepointForLayout(' ')));
+        distribute(cjk_gaps, std::max(1, _style.font_size / 4));
     }
     int glyph_index = 0;
+    uint32_t previous_cp = 0;
+    size_t style_index = 0;
     for (size_t pos = 0; pos < text.size();) {
+        const size_t byte_pos = pos;
         uint32_t cp = 0;
         pos = nextUtf8(text, pos, cp);
         if (cp == '\r' || cp == '\n') continue;
+
+        if (previous_cp != 0) cursor += measureKerningForLayout(previous_cp, cp);
 
         const Glyph *glyph = getGlyph(cp);
         if (!glyph) {
@@ -1986,15 +2086,25 @@ void TextRenderer::drawUtf8Line(lgfx::LGFXBase &gfx, const std::string &text, in
                 cursor += _style.letter_spacing + gap_extra[(size_t)glyph_index];
             }
             ++glyph_index;
+            previous_cp = cp;
             continue;
         }
 
-        drawGlyph(gfx, *glyph, cursor, baseline_y, color);
+        while (style_index < styles.size() && styles[style_index].byte_end <= byte_pos) {
+            ++style_index;
+        }
+        uint8_t style_flags = inline_style::None;
+        for (size_t si = style_index; si < styles.size(); ++si) {
+            if (styles[si].byte_start > byte_pos) break;
+            if (byte_pos < styles[si].byte_end) style_flags |= styles[si].flags;
+        }
+        drawGlyphStyled(gfx, *glyph, cursor, baseline_y, color, style_flags);
         cursor += glyph->advance;
         if (glyph_index + 1 < glyph_count) {
             cursor += _style.letter_spacing + gap_extra[(size_t)glyph_index];
         }
         ++glyph_index;
+        previous_cp = cp;
     }
 }
 

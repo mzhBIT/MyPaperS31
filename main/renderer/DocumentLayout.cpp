@@ -79,6 +79,16 @@ struct Builder {
             line_ref.content = ref.content;
             item.footnotes.push_back(std::move(line_ref));
         }
+        for (const auto &span : block.styles) {
+            const size_t start = std::max(span.byte_start, line.byte_start);
+            const size_t end = std::min(span.byte_end, line.byte_end);
+            if (start >= end || span.flags == inline_style::None) continue;
+            inline_style::Span line_span;
+            line_span.byte_start = start - line.byte_start;
+            line_span.byte_end = end - line.byte_start;
+            line_span.flags = span.flags;
+            item.styles.push_back(line_span);
+        }
         // Exact touch geometry for a justified substring would require the
         // renderer's per-gap expansion map. Footnote lines are rare; retain
         // their natural spacing so the visible marker and hit box agree.

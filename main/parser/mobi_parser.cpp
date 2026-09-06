@@ -11,6 +11,7 @@
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <sys/stat.h>
+#include <unordered_map>
 
 namespace {
 
@@ -19,7 +20,7 @@ static constexpr uint64_t TARGET_SECTION_BYTES = 96 * 1024;
 static constexpr uint64_t MIN_SECTION_BYTES = 4 * 1024;
 static constexpr size_t MAX_RECORD_BYTES = 2 * 1024 * 1024;
 static constexpr uint32_t META_MAGIC = 0x4d424331; // MBC1
-static constexpr uint32_t META_VERSION = 1;
+static constexpr uint32_t META_VERSION = 2;
 
 uint16_t read_be16(const uint8_t *p)
 {
@@ -202,6 +203,14 @@ bool parse_decimal_attr(const std::string &tag, const char *attribute, uint32_t 
     return true;
 }
 
+int base32_digit(unsigned char c)
+{
+    c = static_cast<unsigned char>(std::toupper(c));
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'A' && c <= 'V') return c - 'A' + 10;
+    return -1;
+}
+
 } // namespace
 
 struct MobiBook::HuffState {
@@ -343,16 +352,20 @@ bool MobiBook::load_metadata_cache()
     auto read_value = [fp](auto *value) {
         return std::fread(value, 1, sizeof(*value), fp) == sizeof(*value);
     };
-    uint32_t magic = 0, version = 0, text_count = 0, section_count = 0;
+    uint32_t magic = 0, version = 0, text_count = 0, section_count = 0, cache_format = 0;
     uint64_t file_size = 0;
     int64_t modified = 0;
     uint64_t decoded_length = 0;
     bool ok = read_value(&magic) && read_value(&version) && read_value(&file_size) &&
               read_value(&modified) && read_value(&decoded_length) && read_value(&text_count) &&
-              magic == META_MAGIC && version == META_VERSION &&
+              magic == META_MAGIC && (version == 1 || version == META_VERSION) &&
               file_size == static_cast<uint64_t>(source.st_size) &&
               modified == static_cast<int64_t>(source.st_mtime) &&
               text_count == _text_record_count;
+    if (ok && version >= 2) ok = read_value(&cache_format);
+    // Version 1 is the original contiguous KF7 cache. Keep accepting it so a
+    // firmware upgrade does not force large existing MOBI books to re-index.
+    if (ok) ok = cache_format == (_is_kf8 ? 1u : 0u) && (version >= 2 || !_is_kf8);
     std::vector<TextRecord> text_records;
     if (ok) {
         text_records.reserve(text_count);
@@ -400,12 +413,50 @@ bool MobiBook::load_metadata_cache()
             toc.push_back(std::move(entry));
         }
     }
+    std::vector<Kf8Part> kf8_parts;
+    if (ok && _is_kf8) {
+        kf8_parts.reserve(section_count);
+        for (uint32_t i = 0; i < section_count; ++i) {
+            Kf8Part part;
+            uint32_t fragment_count = 0;
+            if (!read_value(&part.skeleton_start) || !read_value(&part.skeleton_length) ||
+                !read_value(&part.assembled_length) || !read_value(&fragment_count) ||
+                part.skeleton_start > decoded_length ||
+                part.skeleton_length > decoded_length - part.skeleton_start ||
+                part.assembled_length < part.skeleton_length || fragment_count > 100000) {
+                ok = false;
+                break;
+            }
+            uint64_t current_length = part.skeleton_length;
+            part.fragments.reserve(fragment_count);
+            for (uint32_t n = 0; n < fragment_count; ++n) {
+                Kf8Fragment fragment;
+                if (!read_value(&fragment.insert_offset) || !read_value(&fragment.raw_start) ||
+                    !read_value(&fragment.length) || fragment.insert_offset > current_length ||
+                    fragment.raw_start > decoded_length ||
+                    fragment.length > decoded_length - fragment.raw_start ||
+                    current_length + fragment.length > 0xffffffffu) {
+                    ok = false;
+                    break;
+                }
+                current_length += fragment.length;
+                part.fragments.push_back(fragment);
+            }
+            if (!ok || current_length != part.assembled_length) {
+                ok = false;
+                break;
+            }
+            kf8_parts.push_back(std::move(part));
+        }
+    }
     std::fclose(fp);
-    if (!ok || text_records.size() != text_count || sections.size() != section_count) return false;
+    if (!ok || text_records.size() != text_count || sections.size() != section_count ||
+        (_is_kf8 && kf8_parts.size() != section_count)) return false;
     _decoded_text_length = decoded_length;
     _text_records.swap(text_records);
     _sections.swap(sections);
     _toc.swap(toc);
+    _kf8_parts.swap(kf8_parts);
     ESP_LOGI(TAG, "metadata cache loaded text_records=%u sections=%u",
              static_cast<unsigned>(_text_records.size()), static_cast<unsigned>(_sections.size()));
     return true;
@@ -428,8 +479,10 @@ void MobiBook::save_metadata_cache() const
     int64_t modified = static_cast<int64_t>(source.st_mtime);
     uint32_t text_count = static_cast<uint32_t>(_text_records.size());
     uint32_t section_count = static_cast<uint32_t>(_sections.size());
+    const uint32_t cache_format = _is_kf8 ? 1u : 0u;
     bool ok = write_value(META_MAGIC) && write_value(META_VERSION) && write_value(file_size) &&
-              write_value(modified) && write_value(_decoded_text_length) && write_value(text_count);
+              write_value(modified) && write_value(_decoded_text_length) && write_value(text_count) &&
+              write_value(cache_format);
     for (const auto &item : _text_records) {
         if (!ok) break;
         ok = write_value(item.record_index) && write_value(item.start) && write_value(item.length);
@@ -439,6 +492,18 @@ void MobiBook::save_metadata_cache() const
         uint32_t label_size = i < _toc.size() ? static_cast<uint32_t>(_toc[i].title.size()) : 0;
         ok = write_value(_sections[i].start) && write_value(_sections[i].end) && write_value(label_size) &&
              (label_size == 0 || std::fwrite(_toc[i].title.data(), 1, label_size, fp) == label_size);
+    }
+    if (_is_kf8 && _kf8_parts.size() != _sections.size()) ok = false;
+    for (const auto &part : _kf8_parts) {
+        if (!ok) break;
+        const uint32_t fragment_count = static_cast<uint32_t>(part.fragments.size());
+        ok = write_value(part.skeleton_start) && write_value(part.skeleton_length) &&
+             write_value(part.assembled_length) && write_value(fragment_count);
+        for (const auto &fragment : part.fragments) {
+            if (!ok) break;
+            ok = write_value(fragment.insert_offset) && write_value(fragment.raw_start) &&
+                 write_value(fragment.length);
+        }
     }
     if (std::fclose(fp) != 0) ok = false;
     if (ok) {
@@ -469,10 +534,16 @@ void MobiBook::close()
     _extra_data_flags = 0;
     _encoding = 65001;
     _mobi_version = 0;
+    _is_kf8 = false;
+    _fdst_record_index = 0xffffffffu;
+    _fdst_flow_count = 0;
+    _fragment_index = 0xffffffffu;
+    _skeleton_index = 0xffffffffu;
     _first_image_record = 0xffffffffu;
     _huff_record_index = 0xffffffffu;
     _huff_record_count = 0;
     _decoded_text_length = 0;
+    _kf8_parts.clear();
     _huff.reset();
 }
 
@@ -547,7 +618,11 @@ bool MobiBook::parse_record_zero(const std::vector<uint8_t> &record)
     _encryption = read_be16(record.data() + 12);
     uint32_t header_length = read_be32(record.data() + 20);
     _encoding = read_be32(record.data() + 28);
-    _mobi_version = record.size() >= 108 ? read_be32(record.data() + 104) : 0;
+    // MOBI version is at absolute record-zero offset 0x24. The old code read
+    // 0x68 (minimum reader version), which happens to look like 6 for many
+    // MOBI files but cannot reliably distinguish KF8/AZW3.
+    _mobi_version = record.size() >= 40 ? read_be32(record.data() + 36) : 0;
+    _is_kf8 = _mobi_version >= 8;
     _first_image_record = record.size() >= 112 ? read_be32(record.data() + 108) : 0xffffffffu;
     _huff_record_index = record.size() >= 116 ? read_be32(record.data() + 112) : 0xffffffffu;
     _huff_record_count = record.size() >= 120 ? read_be32(record.data() + 116) : 0;
@@ -561,9 +636,15 @@ bool MobiBook::parse_record_zero(const std::vector<uint8_t> &record)
         _last_error = "Unsupported MOBI compression";
         return false;
     }
-    if (_mobi_version >= 8) {
-        _last_error = "Pure KF8 reconstruction is not enabled yet";
-        return false;
+    if (_is_kf8) {
+        if (record.size() < 256 || header_length < 240) {
+            _last_error = "Truncated KF8 MOBI header";
+            return false;
+        }
+        _fdst_record_index = read_be32(record.data() + 0xc0);
+        _fdst_flow_count = read_be32(record.data() + 0xc4);
+        _fragment_index = read_be32(record.data() + 0xf8);
+        _skeleton_index = read_be32(record.data() + 0xfc);
     }
     if (_text_record_count == 0 || static_cast<size_t>(_text_record_count) >= _records.size()) {
         _last_error = "Invalid MOBI text record count";
@@ -746,8 +827,291 @@ bool MobiBook::decode_text_record(size_t index, std::string *out) const
     return true;
 }
 
+bool MobiBook::build_kf8_index()
+{
+    struct TagDefinition {
+        uint8_t id = 0;
+        uint8_t values_per_entry = 0;
+        uint8_t mask = 0;
+        uint8_t end_flag = 0;
+    };
+    struct IndexEntry {
+        std::string text;
+        std::unordered_map<uint8_t, std::vector<uint32_t>> tags;
+    };
+
+    _text_records.clear();
+    _decoded_text_length = 0;
+    for (uint16_t i = 1; i <= _text_record_count; ++i) {
+        std::string decoded;
+        if (!decode_text_record(i, &decoded)) {
+            _last_error = "Failed to decompress KF8 text record " + std::to_string(i);
+            return false;
+        }
+        _text_records.push_back({i, _decoded_text_length, static_cast<uint32_t>(decoded.size())});
+        _decoded_text_length += decoded.size();
+    }
+    if (_decoded_text_length == 0) {
+        _last_error = "KF8 document has no text";
+        return false;
+    }
+
+    uint64_t main_flow_start = 0;
+    uint64_t main_flow_end = _decoded_text_length;
+    if (_fdst_record_index != 0xffffffffu && _fdst_flow_count > 1) {
+        std::vector<uint8_t> fdst;
+        if (!read_record(_fdst_record_index, &fdst) || fdst.size() < 20 ||
+            std::memcmp(fdst.data(), "FDST", 4) != 0) {
+            _last_error = "Invalid KF8 FDST record";
+            return false;
+        }
+        const uint32_t count = read_be32(fdst.data() + 8);
+        if (count == 0 || count > 65536 || 12ULL + static_cast<uint64_t>(count) * 8ULL > fdst.size()) {
+            _last_error = "Invalid KF8 FDST flow table";
+            return false;
+        }
+        main_flow_start = read_be32(fdst.data() + 12);
+        main_flow_end = read_be32(fdst.data() + 16);
+        if (main_flow_start >= main_flow_end || main_flow_end > _decoded_text_length) {
+            _last_error = "KF8 main flow is outside decoded text";
+            return false;
+        }
+    }
+
+    auto read_vwi = [](const std::vector<uint8_t> &data, size_t *position,
+                       size_t limit, uint32_t *value) -> bool {
+        if (!position || !value) return false;
+        uint32_t result = 0;
+        for (unsigned i = 0; i < 5 && *position < limit; ++i) {
+            const uint8_t byte = data[(*position)++];
+            if (result > (0xffffffffu >> 7)) return false;
+            result = (result << 7) | (byte & 0x7fu);
+            if (byte & 0x80u) {
+                *value = result;
+                return true;
+            }
+        }
+        return false;
+    };
+
+    auto parse_index = [&](uint32_t record_index, std::vector<IndexEntry> *entries) -> bool {
+        if (!entries || record_index == 0xffffffffu || record_index >= _records.size()) return false;
+        entries->clear();
+        std::vector<uint8_t> main;
+        if (!read_record(record_index, &main) || main.size() < 0x38 ||
+            std::memcmp(main.data(), "INDX", 4) != 0) return false;
+        const uint32_t header_length = read_be32(main.data() + 4);
+        const uint32_t record_count = read_be32(main.data() + 0x18);
+        if (header_length > main.size() || record_count == 0 || record_count > 65535 ||
+            static_cast<uint64_t>(record_index) + record_count >= _records.size() ||
+            header_length + 12 > main.size() ||
+            std::memcmp(main.data() + header_length, "TAGX", 4) != 0) return false;
+        const uint32_t tagx_length = read_be32(main.data() + header_length + 4);
+        const uint32_t control_bytes = read_be32(main.data() + header_length + 8);
+        if (tagx_length < 12 || header_length + tagx_length > main.size() ||
+            control_bytes == 0 || control_bytes > 64) return false;
+
+        std::vector<TagDefinition> definitions;
+        for (size_t pos = header_length + 12; pos + 4 <= header_length + tagx_length; pos += 4) {
+            definitions.push_back({main[pos], main[pos + 1], main[pos + 2], main[pos + 3]});
+        }
+
+        for (uint32_t record_number = 1; record_number <= record_count; ++record_number) {
+            std::vector<uint8_t> data;
+            if (!read_record(record_index + record_number, &data) || data.size() < 0x1c ||
+                std::memcmp(data.data(), "INDX", 4) != 0) return false;
+            const uint32_t idxt = read_be32(data.data() + 0x14);
+            const uint32_t entry_count = read_be32(data.data() + 0x18);
+            if (idxt > 0xffffu || idxt + 4ULL + entry_count * 2ULL > data.size() ||
+                std::memcmp(data.data() + idxt, "IDXT", 4) != 0) return false;
+            std::vector<uint16_t> positions;
+            positions.reserve(entry_count + 1);
+            for (uint32_t i = 0; i < entry_count; ++i) {
+                const uint16_t offset = read_be16(data.data() + idxt + 4 + i * 2);
+                if (offset >= idxt) return false;
+                positions.push_back(offset);
+            }
+            positions.push_back(static_cast<uint16_t>(std::min<uint32_t>(idxt, 0xffffu)));
+
+            for (uint32_t i = 0; i < entry_count; ++i) {
+                size_t pos = positions[i];
+                const size_t end = positions[i + 1];
+                if (pos >= end || end > idxt) return false;
+                const uint8_t text_length = data[pos++];
+                if (pos + text_length > end || pos + text_length + control_bytes > end) return false;
+                IndexEntry entry;
+                entry.text.assign(reinterpret_cast<const char *>(data.data() + pos), text_length);
+                pos += text_length;
+                const size_t control_start = pos;
+                size_t value_pos = control_start + control_bytes;
+                size_t control_index = 0;
+                struct PendingTag { uint8_t id; uint32_t count; uint32_t bytes; uint8_t values_per; };
+                std::vector<PendingTag> pending;
+                for (const auto &definition : definitions) {
+                    if (definition.end_flag == 1) {
+                        ++control_index;
+                        continue;
+                    }
+                    if (control_index >= control_bytes) return false;
+                    uint8_t masked = data[control_start + control_index] & definition.mask;
+                    if (!masked) continue;
+                    if (masked == definition.mask && (definition.mask & (definition.mask - 1u))) {
+                        uint32_t byte_count = 0;
+                        if (!read_vwi(data, &value_pos, end, &byte_count)) return false;
+                        pending.push_back({definition.id, 0, byte_count, definition.values_per_entry});
+                    } else {
+                        uint8_t mask = definition.mask;
+                        while ((mask & 1u) == 0) { mask >>= 1; masked >>= 1; }
+                        pending.push_back({definition.id, masked, 0, definition.values_per_entry});
+                    }
+                }
+                for (const auto &item : pending) {
+                    auto &values = entry.tags[item.id];
+                    if (item.bytes) {
+                        const size_t target = value_pos + item.bytes;
+                        if (target > end) return false;
+                        while (value_pos < target) {
+                            uint32_t value = 0;
+                            if (!read_vwi(data, &value_pos, target, &value)) return false;
+                            values.push_back(value);
+                        }
+                    } else {
+                        const uint32_t value_count = item.count * item.values_per;
+                        for (uint32_t n = 0; n < value_count; ++n) {
+                            uint32_t value = 0;
+                            if (!read_vwi(data, &value_pos, end, &value)) return false;
+                            values.push_back(value);
+                        }
+                    }
+                }
+                entries->push_back(std::move(entry));
+            }
+        }
+        return !entries->empty();
+    };
+
+    std::vector<IndexEntry> skeletons;
+    std::vector<IndexEntry> fragments;
+    if (!parse_index(_skeleton_index, &skeletons) || !parse_index(_fragment_index, &fragments)) {
+        _last_error = "Could not parse KF8 SKEL/FRAG indexes";
+        return false;
+    }
+
+    _kf8_parts.clear();
+    _sections.clear();
+    _toc.clear();
+    _kf8_parts.reserve(skeletons.size());
+    _sections.reserve(skeletons.size());
+    size_t fragment_cursor = 0;
+    uint64_t assembled_position = 0;
+    for (const auto &skeleton : skeletons) {
+        const auto count_it = skeleton.tags.find(1);
+        const auto range_it = skeleton.tags.find(6);
+        if (count_it == skeleton.tags.end() || count_it->second.empty() ||
+            range_it == skeleton.tags.end() || range_it->second.size() < 2) {
+            _last_error = "Invalid KF8 skeleton entry";
+            return false;
+        }
+        const uint32_t fragment_count = count_it->second[0];
+        const uint64_t skeleton_start = range_it->second[0];
+        const uint32_t skeleton_length = range_it->second[1];
+        if (skeleton_start < main_flow_start || skeleton_start + skeleton_length > main_flow_end ||
+            fragment_cursor + fragment_count > fragments.size()) {
+            _last_error = "KF8 skeleton range is outside the main flow";
+            return false;
+        }
+        Kf8Part part;
+        part.skeleton_start = skeleton_start;
+        part.skeleton_length = skeleton_length;
+        uint64_t fragment_data = skeleton_start + skeleton_length;
+        uint64_t assembled_length = skeleton_length;
+        part.fragments.reserve(fragment_count);
+        for (uint32_t n = 0; n < fragment_count; ++n, ++fragment_cursor) {
+            const IndexEntry &fragment = fragments[fragment_cursor];
+            const auto fragment_range = fragment.tags.find(6);
+            if (fragment_range == fragment.tags.end() || fragment_range->second.size() < 2) {
+                _last_error = "Invalid KF8 fragment entry";
+                return false;
+            }
+            char *end = nullptr;
+            const uint64_t absolute_insert = std::strtoull(fragment.text.c_str(), &end, 10);
+            const uint32_t length = fragment_range->second[1];
+            const uint64_t relative_insert = absolute_insert >= skeleton_start
+                                                 ? absolute_insert - skeleton_start
+                                                 : UINT64_MAX;
+            // Fragment positions are relative to the progressively assembled
+            // skeleton. A later fragment may therefore be inserted beyond the
+            // original skeleton length, but never beyond the current result.
+            if (!end || end == fragment.text.c_str() || *end != '\0' ||
+                fragment_data + length > main_flow_end ||
+                relative_insert > assembled_length || relative_insert > 0xffffffffu) {
+                _last_error = "Invalid KF8 fragment range";
+                return false;
+            }
+            part.fragments.push_back({static_cast<uint32_t>(relative_insert),
+                                      fragment_data, length});
+            fragment_data += length;
+            assembled_length += length;
+        }
+        if (assembled_length > 0xffffffffu) {
+            _last_error = "KF8 section is too large";
+            return false;
+        }
+        part.assembled_length = static_cast<uint32_t>(assembled_length);
+        _kf8_parts.push_back(std::move(part));
+
+        MobiSectionItem section;
+        section.id = "section-" + std::to_string(_sections.size());
+        section.href = section.id + ".html";
+        section.start = assembled_position;
+        section.end = assembled_position + assembled_length;
+        section.uncompressed_size = static_cast<uint32_t>(assembled_length);
+        assembled_position = section.end;
+        _sections.push_back(std::move(section));
+    }
+    if (_kf8_parts.empty()) {
+        _last_error = "KF8 document has no reconstructed sections";
+        return false;
+    }
+
+    for (size_t i = 0; i < _kf8_parts.size(); ++i) {
+        MobiTocItem item;
+        // Reconstructing every section here would decompress most of the book
+        // a second time during open. The real heading is available when that
+        // section is loaded; keep first-open indexing bounded and predictable.
+        item.title = "Section " + std::to_string(i + 1);
+        item.href = _sections[i].href;
+        item.spine_index = static_cast<int>(i);
+        _toc.push_back(std::move(item));
+    }
+    ESP_LOGI(TAG, "KF8 reconstructed sections=%u fragments=%u raw=%llu assembled=%llu",
+             static_cast<unsigned>(_kf8_parts.size()), static_cast<unsigned>(fragments.size()),
+             static_cast<unsigned long long>(_decoded_text_length),
+             static_cast<unsigned long long>(assembled_position));
+    return true;
+}
+
+bool MobiBook::read_kf8_part(size_t index, std::string *out) const
+{
+    if (!out || index >= _kf8_parts.size()) return false;
+    const Kf8Part &part = _kf8_parts[index];
+    if (!read_text_range(part.skeleton_start, part.skeleton_start + part.skeleton_length, out)) return false;
+    out->reserve(part.assembled_length);
+    for (const auto &fragment : part.fragments) {
+        std::string bytes;
+        if (!read_text_range(fragment.raw_start, fragment.raw_start + fragment.length, &bytes)) return false;
+        // KF8 insert offsets are applied to the progressively rebuilt
+        // skeleton exactly as stored by the fragment table.
+        const uint64_t position = fragment.insert_offset;
+        if (position > out->size()) return false;
+        out->insert(static_cast<size_t>(position), bytes);
+    }
+    return !out->empty();
+}
+
 bool MobiBook::build_text_index()
 {
+    if (_is_kf8) return build_kf8_index();
     std::vector<uint64_t> boundaries{0};
     uint64_t last_boundary = 0;
     std::string tail;
@@ -845,13 +1209,21 @@ bool MobiBook::read_text_range(uint64_t start, uint64_t end, std::string *out) c
 bool MobiBook::read_section_to_string(const std::string &href, std::string *out) const
 {
     const MobiSectionItem *section = nullptr;
-    for (const auto &candidate : _sections) {
+    size_t section_index = 0;
+    for (size_t i = 0; i < _sections.size(); ++i) {
+        const auto &candidate = _sections[i];
         if (candidate.href == href) {
             section = &candidate;
+            section_index = i;
             break;
         }
     }
-    if (!section || !read_text_range(section->start, section->end, out)) return false;
+    if (!section) return false;
+    if (_is_kf8) {
+        if (!read_kf8_part(section_index, out)) return false;
+    } else if (!read_text_range(section->start, section->end, out)) {
+        return false;
+    }
 
     std::string normalized;
     normalized.reserve(out->size() + 128);
@@ -870,6 +1242,41 @@ bool MobiBook::read_section_to_string(const std::string &href, std::string *out)
         }
         std::string tag = out->substr(start + 1, end - start - 1);
         std::string lower = lower_ascii(tag);
+        // Some AZW/hybrid generators leave KF8-style image URIs in the
+        // MOBI7-facing markup as well, so normalize these based on the URI
+        // itself rather than gating the conversion on the header version.
+        {
+            size_t embed = 0;
+            while ((embed = lower.find("kindle:embed:", embed)) != std::string::npos) {
+                const size_t digits = embed + 13;
+                size_t digit_end = digits;
+                uint32_t number = 0;
+                while (digit_end < tag.size()) {
+                    const int value = base32_digit(static_cast<unsigned char>(tag[digit_end]));
+                    if (value < 0 || number > (0xffffffffu - static_cast<uint32_t>(value)) / 32u) break;
+                    number = number * 32u + static_cast<uint32_t>(value);
+                    ++digit_end;
+                }
+                if (digit_end == digits || number == 0) {
+                    embed = digits;
+                    continue;
+                }
+                size_t uri_end = digit_end;
+                if (uri_end < tag.size() && tag[uri_end] == '?') {
+                    while (uri_end < tag.size() && tag[uri_end] != '\'' && tag[uri_end] != '"' &&
+                           tag[uri_end] != ')' &&
+                           !std::isspace(static_cast<unsigned char>(tag[uri_end]))) ++uri_end;
+                }
+                const std::string replacement = resource_href(number);
+                if (replacement.empty()) {
+                    embed = digit_end;
+                    continue;
+                }
+                tag.replace(embed, uri_end - embed, replacement);
+                lower = lower_ascii(tag);
+                embed += replacement.size();
+            }
+        }
         if (lower.find("mbp:pagebreak") == 0) {
             normalized += "<pagebreak/>";
         } else if (!lower.empty() && lower[0] == 'a' &&
@@ -972,6 +1379,25 @@ std::string MobiBook::resource_href(uint32_t resource_index) const
     char name[40];
     std::snprintf(name, sizeof(name), "res/%05lu%s", static_cast<unsigned long>(resource_index), ext.c_str());
     return name;
+}
+
+std::string MobiBook::normalize_resource_href(const std::string &href) const
+{
+    std::string lower = lower_ascii(href);
+    const size_t prefix = lower.find("kindle:embed:");
+    if (prefix == std::string::npos) return href;
+
+    size_t pos = prefix + 13;
+    uint32_t number = 0;
+    const size_t digits = pos;
+    while (pos < href.size()) {
+        const int value = base32_digit(static_cast<unsigned char>(href[pos]));
+        if (value < 0 || number > (0xffffffffu - static_cast<uint32_t>(value)) / 32u) break;
+        number = number * 32u + static_cast<uint32_t>(value);
+        ++pos;
+    }
+    if (pos == digits || number == 0) return href;
+    return resource_href(number);
 }
 
 bool MobiBook::extract_resource_to_file(const std::string &href, const std::string &out_path) const

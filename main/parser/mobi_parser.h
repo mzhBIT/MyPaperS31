@@ -41,6 +41,7 @@ public:
 
     bool read_section_to_string(const std::string &href, std::string *out) const;
     bool resolve_filepos_footnote(uint64_t position, std::string *out) const;
+    std::string normalize_resource_href(const std::string &href) const;
     bool extract_resource_to_file(const std::string &href, const std::string &out_path) const;
 
 private:
@@ -54,6 +55,19 @@ private:
         uint16_t record_index = 0;
         uint64_t start = 0;
         uint32_t length = 0;
+    };
+
+    struct Kf8Fragment {
+        uint32_t insert_offset = 0;
+        uint64_t raw_start = 0;
+        uint32_t length = 0;
+    };
+
+    struct Kf8Part {
+        uint64_t skeleton_start = 0;
+        uint32_t skeleton_length = 0;
+        uint32_t assembled_length = 0;
+        std::vector<Kf8Fragment> fragments;
     };
 
     std::string _path;
@@ -70,15 +84,23 @@ private:
     uint16_t _extra_data_flags = 0;
     uint32_t _encoding = 65001;
     uint32_t _mobi_version = 0;
+    bool _is_kf8 = false;
+    uint32_t _fdst_record_index = 0xffffffffu;
+    uint32_t _fdst_flow_count = 0;
+    uint32_t _fragment_index = 0xffffffffu;
+    uint32_t _skeleton_index = 0xffffffffu;
     uint32_t _first_image_record = 0xffffffffu;
     uint32_t _huff_record_index = 0xffffffffu;
     uint32_t _huff_record_count = 0;
     uint64_t _decoded_text_length = 0;
+    std::vector<Kf8Part> _kf8_parts;
     std::shared_ptr<HuffState> _huff;
 
     bool parse_container();
     bool parse_record_zero(const std::vector<uint8_t> &record);
     bool build_text_index();
+    bool build_kf8_index();
+    bool read_kf8_part(size_t index, std::string *out) const;
     bool load_huff_dictionary();
     bool load_metadata_cache();
     void save_metadata_cache() const;

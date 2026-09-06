@@ -6,6 +6,8 @@ set(srcs
     "deepseek/DeepSeekConfig.cpp"
     "deepseek/DeepSeekSessionStore.cpp"
     "deepseek/DeepSeekClient.cpp"
+    "zhihu/ZhihuConfig.cpp"
+    "zhihu/ZhihuClient.cpp"
     "weread/WereadCrypto.cpp"
     "weread/WereadSession.cpp"
     "weread/WereadHttpClient.cpp"
@@ -18,6 +20,7 @@ set(srcs
     "ui/reader_font.cpp"
     "ui/reader_style.cpp"
     "ui/reader_background.cpp"
+    "ui/reader_book_cover.cpp"
     "ui/SystemFont.cpp"
     "ui/Utf8Text.cpp"
     "ui/VirtualKeyboard.cpp"
@@ -48,6 +51,7 @@ set(srcs
     "activities/EpdDiagnosticActivity.cpp"
     "activities/DeepSeekActivity.cpp"
     "activities/WereadActivity.cpp"
+    "activities/ZhihuActivity.cpp"
     "activities/WifiTransferActivity.cpp"
     "activities/RssReaderActivity.cpp"
     "activities/recent_books.cpp"
@@ -64,6 +68,7 @@ set(srcs
         "parser/fb2_parser.cpp"
     "parser/epub_html.cpp"
     "parser/mobi_parser.cpp"
+    "parser/markdown_parser.cpp"
     "parser/reflow_book.cpp")
 
 idf_component_register(SRCS ${srcs}

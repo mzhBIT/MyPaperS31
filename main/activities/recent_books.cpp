@@ -1,7 +1,6 @@
 #include "recent_books.h"
 #include "parser/epub_parser.h"
 #include "storage/app_paths.h"
-#include "weread/WereadStore.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -11,7 +10,7 @@
 #include <sys/stat.h>
 #include <vector>
 
-static constexpr size_t RECENT_BOOK_LIMIT = 12;
+static constexpr size_t RECENT_BOOK_LIMIT = 20;
 static constexpr uint32_t TXT_PROGRESS_MAGIC = 0x54585032; // TXP2
 static constexpr uint32_t TXT_PROGRESS_VERSION = 1;
 static constexpr uint32_t EPUB_PROGRESS_MAGIC = 0x45504231; // EPB1
@@ -149,33 +148,6 @@ static RecentBookProgress fb2_progress(const char *path)
                               FB2_PROGRESS_MAGIC, FB2_PROGRESS_VERSION);
 }
 
-static RecentBookProgress weread_progress(const char *path)
-{
-    RecentBookProgress result;
-    std::string progress_path = std::string(app_paths::epub_progress_dir()) + "/" +
-                                recent_book_progress_key(path) + ".pos";
-    FILE *fp = std::fopen(progress_path.c_str(), "rb");
-    if (!fp) return result;
-    uint32_t magic = 0, version = 0, layout = 0, spine = 0;
-    uint64_t position = 0;
-    const bool ok = std::fread(&magic, 1, sizeof(magic), fp) == sizeof(magic) &&
-                    std::fread(&version, 1, sizeof(version), fp) == sizeof(version) &&
-                    std::fread(&layout, 1, sizeof(layout), fp) == sizeof(layout) &&
-                    std::fread(&spine, 1, sizeof(spine), fp) == sizeof(spine) &&
-                    std::fread(&position, 1, sizeof(position), fp) == sizeof(position);
-    std::fclose(fp);
-    if (!ok || magic != EPUB_PROGRESS_MAGIC || version != EPUB_PROGRESS_VERSION) return result;
-    weread::Book book;
-    std::vector<weread::Chapter> chapters;
-    std::string format;
-    if (!weread::store::load_manifest(path, &book, &chapters, &format) || chapters.empty()) return result;
-    spine = std::min<uint32_t>(spine, static_cast<uint32_t>(chapters.size() - 1));
-    result.chapter = static_cast<int>(spine + 1);
-    result.chapter_count = static_cast<int>(chapters.size());
-    result.percent = static_cast<int>((static_cast<uint64_t>(spine) * 100) / chapters.size());
-    return result;
-}
-
 RecentBookProgress recent_book_progress(const RecentBook &book)
 {
     if (strcasecmp(book.type.c_str(), "epub") == 0) {
@@ -183,7 +155,10 @@ RecentBookProgress recent_book_progress(const RecentBook &book)
     }
     if (strcasecmp(book.type.c_str(), "mobi") == 0) return mobi_progress(book.path.c_str());
     if (strcasecmp(book.type.c_str(), "fb2") == 0) return fb2_progress(book.path.c_str());
-    if (strcasecmp(book.type.c_str(), "weread") == 0) return weread_progress(book.path.c_str());
+    if (strcasecmp(book.type.c_str(), "markdown") == 0) {
+        return sectioned_progress(book.path.c_str(), app_paths::epub_progress_dir(),
+                                  EPUB_PROGRESS_MAGIC, EPUB_PROGRESS_VERSION);
+    }
     RecentBookProgress result;
     result.percent = txt_progress_percent(book.path.c_str());
     return result;
@@ -203,6 +178,16 @@ static bool file_exists(const std::string &path)
     return !path.empty() && stat(path.c_str(), &st) == 0 && !S_ISDIR(st.st_mode);
 }
 
+static bool is_weread_record(const RecentBook &book)
+{
+    if (strcasecmp(book.type.c_str(), "weread") == 0) return true;
+    const std::string root = app_paths::weread_books_dir();
+    return book.path == root ||
+           (book.path.size() > root.size() &&
+            book.path.compare(0, root.size(), root) == 0 &&
+            book.path[root.size()] == '/');
+}
+
 static void normalize_book(RecentBook *book)
 {
     if (!book) return;
@@ -214,8 +199,10 @@ static void normalize_book(RecentBook *book)
     if (book->type.empty()) {
         const char *dot = strrchr(book->path.c_str(), '.');
         if (dot && strcasecmp(dot, ".epub") == 0) book->type = "epub";
-        else if (dot && (strcasecmp(dot, ".mobi") == 0 || strcasecmp(dot, ".prc") == 0)) book->type = "mobi";
+        else if (dot && (strcasecmp(dot, ".mobi") == 0 || strcasecmp(dot, ".prc") == 0 ||
+                         strcasecmp(dot, ".azw") == 0 || strcasecmp(dot, ".azw3") == 0)) book->type = "mobi";
         else if (dot && strcasecmp(dot, ".fb2") == 0) book->type = "fb2";
+        else if (dot && (strcasecmp(dot, ".md") == 0 || strcasecmp(dot, ".markdown") == 0)) book->type = "markdown";
         else book->type = "txt";
     }
     // EPUB package titles are often extended with edition or promotional
@@ -224,7 +211,8 @@ static void normalize_book(RecentBook *book)
     // OPF title.
     if (strcasecmp(book->type.c_str(), "epub") == 0 ||
         strcasecmp(book->type.c_str(), "mobi") == 0 ||
-        strcasecmp(book->type.c_str(), "fb2") == 0 || book->title.empty()) {
+        strcasecmp(book->type.c_str(), "fb2") == 0 ||
+        strcasecmp(book->type.c_str(), "markdown") == 0 || book->title.empty()) {
         book->title = recent_book_file_stem(book->path.c_str());
     }
 }
@@ -254,6 +242,9 @@ size_t recent_books_load(std::vector<RecentBook> *books)
         if (!read_line(fp, &book.path)) break;
         if (!read_line(fp, &book.type) || !read_line(fp, &book.title) || !read_line(fp, &book.cover_path)) break;
         normalize_book(&book);
+        // WeRead owns its shelf and progress independently. Also reject legacy
+        // entries by storage path in case an older build saved the wrong type.
+        if (is_weread_record(book)) continue;
         if (book.path.empty() || !file_exists(book.path)) continue;
 
         bool duplicate = false;
@@ -282,6 +273,11 @@ bool recent_book_load(RecentBook *book)
 bool recent_book_save(const char *path, const char *type, const char *title, const char *cover_path)
 {
     if (!path || !path[0] || !type || !type[0]) return false;
+
+    RecentBook candidate;
+    candidate.path = path;
+    candidate.type = type;
+    if (is_weread_record(candidate)) return true;
 
     std::vector<RecentBook> books;
     recent_books_load(&books);

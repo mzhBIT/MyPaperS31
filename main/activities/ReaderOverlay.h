@@ -26,6 +26,7 @@ public:
         Close,
         OpenFont,
         OpenBackground,
+        OpenBookCover,
         ChapterOpened,
     };
 
@@ -48,7 +49,7 @@ public:
 
 private:
     static constexpr int SETTING_COUNT = 7;
-    static constexpr int BEAUTY_COUNT = 6;
+    static constexpr int BEAUTY_COUNT = 7;
 
     struct Geometry {
         int x = 0;

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <string>
 #include <vector>
+#include "renderer/InlineStyle.h"
 
 struct EpubFootnoteRef {
     size_t byte_start = 0;
@@ -39,6 +40,7 @@ struct EpubContentBlock {
     int heading_level = 0;
     bool page_break_before = false;
     std::vector<EpubFootnoteRef> footnotes;
+    std::vector<inline_style::Span> styles;
 };
 
 bool epub_parse_xhtml_text_blocks(const std::string &xhtml, std::vector<EpubTextBlock> *blocks);

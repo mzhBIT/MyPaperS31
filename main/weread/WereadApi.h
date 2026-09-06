@@ -43,6 +43,14 @@ struct ChapterPayload {
     OwnedBuffer content;
 };
 
+struct Review {
+    std::string id;
+    std::string author;
+    std::string content;
+    int create_time = 0;
+    int rating = 0;
+};
+
 class Api {
 public:
     explicit Api(HttpClient *client) : _client(client) {}
@@ -54,6 +62,8 @@ public:
                       std::string *format, std::string *error);
     bool get_chapter(const std::string &book_id, const Chapter &chapter,
                      ChapterPayload *payload, std::string *error);
+    bool get_book_reviews(const std::string &book_id, int list_type, int count,
+                          std::vector<Review> *reviews, std::string *error);
     bool upload_progress(const std::string &book_id, const Chapter &chapter,
                          int progress_percent, std::string *error);
 

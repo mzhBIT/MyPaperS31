@@ -1,0 +1,408 @@
+<!DOCTYPE html>
+<!-- saved from url=(0041)http://106.54.226.30:19120/zhihu-api#auth -->
+<html lang="zh-CN"><head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">
+
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>知乎开放平台 API 文档</title>
+<style>
+:root {
+  --page-bg: #0f1117;
+  --surface-card: #1a1d26;
+  --surface-nested: #232733;
+  --border: #2a2f3d;
+  --border-input: #3a4154;
+  --text: #e8ecf4;
+  --text-secondary: #8892a8;
+  --text-tertiary: #5a6478;
+  --accent: #6d8bff;
+  --accent-muted: rgba(109,139,255,.15);
+  --module-1: #4ecdc4;
+  --module-2: #6d8bff;
+  --module-3: #ffd93d;
+  --module-5: #a78bfa;
+  --danger: #ff6b6b;
+  --mono: "JetBrains Mono", "Cascadia Code", "Fira Code", monospace;
+}
+* { margin:0; padding:0; box-sizing:border-box; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+  background: var(--page-bg);
+  color: var(--text);
+  line-height: 1.7;
+  font-size: 15px;
+}
+.layout { display: flex; min-height: 100vh; }
+.toc {
+  width: 240px;
+  background: var(--surface-card);
+  border-right: 1px solid var(--border);
+  padding: 1.5rem 1rem;
+  position: fixed;
+  top: 0; bottom: 0; left: 0;
+  overflow-y: auto;
+  z-index: 50;
+}
+.toc-back {
+  display: inline-flex; align-items: center; gap: 0.4rem;
+  color: var(--accent); text-decoration: none;
+  font-size: 0.85rem; font-weight: 600;
+  margin-bottom: 1rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 8px;
+  background: var(--accent-muted);
+}
+.toc h3 {
+  font-size: 0.7rem; text-transform: uppercase;
+  letter-spacing: 0.1em; color: var(--text-tertiary);
+  padding: 0.75rem 0.75rem 0.35rem;
+  font-weight: 600;
+}
+.toc a {
+  display: block;
+  padding: 0.35rem 0.75rem;
+  color: var(--text-secondary);
+  text-decoration: none;
+  font-size: 0.83rem;
+  border-radius: 6px;
+  transition: all .12s;
+}
+.toc a:hover { background: var(--surface-nested); color: var(--text); }
+.toc a.active { color: var(--accent); font-weight: 600; background: var(--accent-muted); }
+.doc {
+  margin-left: 240px;
+  padding: 3rem;
+  max-width: 900px;
+}
+.doc h1 {
+  font-size: 2rem; font-weight: 700;
+  margin-bottom: 0.5rem;
+  background: linear-gradient(135deg, var(--accent), var(--module-5));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+.doc .subtitle { color: var(--text-secondary); font-size: 1rem; margin-bottom: 2rem; }
+.doc h2 {
+  font-size: 1.35rem; font-weight: 700;
+  margin: 2.5rem 0 1rem;
+  padding-bottom: 0.5rem;
+  border-bottom: 2px solid var(--accent);
+  display: inline-block;
+}
+.doc h3 {
+  font-size: 1.1rem; font-weight: 600;
+  margin: 1.5rem 0 0.6rem;
+  color: var(--module-5);
+}
+.doc h4 {
+  font-size: 0.95rem; font-weight: 600;
+  margin: 1rem 0 0.4rem;
+  color: var(--accent);
+}
+.doc p { margin-bottom: 0.8rem; }
+.doc ul, .doc ol { padding-left: 1.5rem; margin-bottom: 0.8rem; }
+.doc li { margin-bottom: 0.3rem; }
+.doc code {
+  font-family: var(--mono);
+  background: var(--surface-nested);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.85em;
+  color: var(--module-3);
+}
+.doc pre {
+  background: var(--surface-nested);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 1rem;
+  overflow-x: auto;
+  margin: 0.8rem 0;
+}
+.doc pre code { background: none; padding: 0; font-size: 0.82rem; line-height: 1.6; color: var(--text); }
+.doc table {
+  width: 100%; border-collapse: collapse;
+  margin: 0.8rem 0;
+  font-size: 0.88rem;
+}
+.doc th {
+  background: var(--surface-nested);
+  padding: 0.6rem 0.8rem;
+  text-align: left;
+  border-bottom: 2px solid var(--border-input);
+  font-weight: 600;
+  white-space: nowrap;
+}
+.doc td {
+  padding: 0.5rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-secondary);
+  vertical-align: top;
+}
+.doc td:first-child { color: var(--text); font-weight: 500; }
+.doc blockquote {
+  border-left: 3px solid var(--accent);
+  padding: 0.5rem 1rem;
+  margin: 0.8rem 0;
+  background: var(--accent-muted);
+  border-radius: 0 8px 8px 0;
+  color: var(--text);
+}
+.badge {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 10px;
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+.badge-get { background: rgba(78,205,196,.15); color: var(--module-1); }
+.badge-post { background: rgba(109,139,255,.15); color: var(--accent); }
+@media (max-width: 900px) {
+  .toc { display: none; }
+  .doc { margin-left: 0; padding: 2rem 1.25rem; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<aside class="toc">
+  <a class="toc-back" href="http://106.54.226.30:19120/">← 返回工作台</a>
+  <h3>基础</h3>
+  <a href="http://106.54.226.30:19120/zhihu-api#auth" class="active">Bearer 鉴权</a>
+  <a href="http://106.54.226.30:19120/zhihu-api#errors" class="">错误码</a>
+  <h3>内容接口</h3>
+  <a href="http://106.54.226.30:19120/zhihu-api#hot-list" class="">热榜 API</a>
+  <a href="http://106.54.226.30:19120/zhihu-api#zhihu-search" class="">知乎搜索 API</a>
+  <a href="http://106.54.226.30:19120/zhihu-api#global-search" class="">全网搜索 API</a>
+  <a href="http://106.54.226.30:19120/zhihu-api#zhida" class="">直答 API</a>
+  <h3>用户接口</h3>
+  <a href="http://106.54.226.30:19120/zhihu-api#user-contents" class="">我的创作 API</a>
+  <a href="http://106.54.226.30:19120/zhihu-api#user-other" class="">关注/收藏 API</a>
+  <h3>工具接口</h3>
+  <a href="http://106.54.226.30:19120/zhihu-api#pdf" class="">PDF 解析 API</a>
+  <a href="http://106.54.226.30:19120/zhihu-api#ppt">PPT 生成 API</a>
+</aside>
+
+<main class="doc">
+
+<h1>知乎开放平台 API 文档</h1>
+<p class="subtitle">整理自官网 · 已在本项目接入（热榜/搜索/直答/我的创作）· 2026-08-04</p>
+
+<!-- ============ 鉴权 ============ -->
+<h2 id="auth">一、Bearer 鉴权</h2>
+<p>所有数据接口统一使用 <code>Authorization: Bearer &lt;access_secret&gt;</code> 鉴权，同时要求 <code>X-Request-Timestamp</code>（秒级 Unix 时间戳）。</p>
+<table>
+  <tbody><tr><th>Header</th><th>示例值</th><th>说明</th></tr>
+  <tr><td>Authorization</td><td><code>Bearer &lt;your_access_secret&gt;</code></td><td>Bearer 鉴权头</td></tr>
+  <tr><td>X-Request-Timestamp</td><td><code>1742822400</code></td><td>秒级 Unix 时间戳</td></tr>
+  <tr><td>Content-Type</td><td><code>application/json</code></td><td>JSON 接口固定值</td></tr>
+</tbody></table>
+<p><strong>Access Secret 获取</strong>：<a href="https://developer.zhihu.com/profile" target="_blank">知乎开放平台个人中心</a> 登录后生成。</p>
+<pre><code>curl -G 'https://developer.zhihu.com/api/v1/content/zhihu_search' \
+  --data-urlencode 'Query=怎么理解rave文化' \
+  -H 'Authorization: Bearer &lt;your_access_secret&gt;' \
+  -H "X-Request-Timestamp: $(date +%s)" \
+  -H 'Content-Type: application/json'</code></pre>
+<div class="callout" style="border-left:4px solid var(--module-1);background:var(--surface-card);border-radius:8px;padding:1rem 1.25rem;margin:1rem 0;">
+  <strong>本项目接入状态</strong>：已在 app.py 中封装统一鉴权（<code>_zhihu_headers()</code>），key 通过环境变量 <code>ZHIHU_OPEN_API_KEY</code> 或本地文件配置。
+</div>
+
+<h2 id="errors">二、错误码</h2>
+<table>
+  <tbody><tr><th>错误码</th><th>说明</th></tr>
+  <tr><td>0</td><td>成功</td></tr>
+  <tr><td>10001</td><td>参数错误</td></tr>
+  <tr><td>20001</td><td>鉴权失败或无权限访问</td></tr>
+  <tr><td>30001</td><td>请求过于频繁（频率限制）</td></tr>
+  <tr><td>30002</td><td>配额限制 / 额度不足</td></tr>
+  <tr><td>40001</td><td>幂等键与请求参数冲突</td></tr>
+  <tr><td>40002</td><td>文件不存在、已过期或不可访问</td></tr>
+  <tr><td>40003</td><td>活跃任务数超限</td></tr>
+  <tr><td>90001</td><td>服务内部错误</td></tr>
+</tbody></table>
+
+<!-- ============ 热榜 ============ -->
+<h2 id="hot-list">三、热榜 API <span class="badge badge-get">GET</span></h2>
+<p>获取当前知乎热榜，返回结构化的标题、链接、缩略图与摘要。</p>
+<p><code>https://developer.zhihu.com/api/v1/content/hot_list?Limit=30</code></p>
+<h4>Query 参数</h4>
+<table>
+  <tbody><tr><th>名称</th><th>类型</th><th>必填</th><th>说明</th></tr>
+  <tr><td>Limit</td><td>Int32</td><td>否</td><td>返回数量，默认 30，最大 30</td></tr>
+</tbody></table>
+<h4>响应 Data</h4>
+<table>
+  <tbody><tr><th>字段</th><th>类型</th><th>说明</th></tr>
+  <tr><td>Total</td><td>Int64</td><td>实际返回的热榜条数</td></tr>
+  <tr><td>Items[].Title</td><td>String</td><td>热榜标题</td></tr>
+  <tr><td>Items[].Url</td><td>String</td><td>热榜对应的知乎链接</td></tr>
+  <tr><td>Items[].ThumbnailUrl</td><td>String</td><td>缩略图 URL，无封面时为空字符串</td></tr>
+  <tr><td>Items[].Summary</td><td>String</td><td>内容摘要，无摘要时为空字符串</td></tr>
+</tbody></table>
+<pre><code>curl 'https://developer.zhihu.com/api/v1/content/hot_list?Limit=10' \
+  -H 'Authorization: Bearer &lt;your_access_secret&gt;' \
+  -H "X-Request-Timestamp: $(date +%s)"</code></pre>
+<p><strong>本项目对接</strong>：<code>GET /api/hotlist</code>（每日缓存一次，返回 title/link/thumbnail/summary）。</p>
+
+<!-- ============ 知乎搜索 ============ -->
+<h2 id="zhihu-search">四、知乎搜索 API <span class="badge badge-get">GET</span></h2>
+<p>知乎站内内容搜索，返回与查询相关的问题、回答或文章。</p>
+<p><code>https://developer.zhihu.com/api/v1/content/zhihu_search?Query=xxx&amp;Count=10</code></p>
+<h4>Query 参数</h4>
+<table>
+  <tbody><tr><th>名称</th><th>类型</th><th>必填</th><th>说明</th></tr>
+  <tr><td>Query</td><td>String</td><td>是</td><td>查询关键词，不能为空</td></tr>
+  <tr><td>Count</td><td>Int32</td><td>否</td><td>请求数量，默认 10，最大 10</td></tr>
+</tbody></table>
+<h4>响应 Data.Items[]</h4>
+<table>
+  <tbody><tr><th>字段</th><th>说明</th></tr>
+  <tr><td>Title</td><td>内容标题</td></tr>
+  <tr><td>ContentType</td><td>内容类型（Answer/Article 等）</td></tr>
+  <tr><td>ContentID</td><td>内容标识</td></tr>
+  <tr><td>ContentText</td><td>内容摘要，可能含 <code>&lt;em&gt;</code> 高亮标签</td></tr>
+  <tr><td>Url</td><td>内容链接（带溯源 utm 参数）</td></tr>
+  <tr><td>CommentCount</td><td>评论数</td></tr>
+  <tr><td>VoteUpCount</td><td>赞同数</td></tr>
+  <tr><td>AuthorName</td><td>作者昵称</td></tr>
+  <tr><td>EditTime</td><td>发布时间或更新时间戳</td></tr>
+  <tr><td>RankingScore</td><td>排序分数</td></tr>
+</tbody></table>
+<pre><code>curl -G 'https://developer.zhihu.com/api/v1/content/zhihu_search' \
+  --data-urlencode 'Query=怎么理解rave文化' \
+  -d 'Count=5' \
+  -H 'Authorization: Bearer &lt;your_access_secret&gt;' \
+  -H "X-Request-Timestamp: $(date +%s)"</code></pre>
+<p><strong>本项目对接</strong>：<code>GET /api/zhihu-search?query=xxx&amp;count=10</code></p>
+
+<!-- ============ 全网搜索 ============ -->
+<h2 id="global-search">五、全网搜索 API <span class="badge badge-get">GET</span></h2>
+<p>全网内容搜索，用于补充新闻、官网及外部资料。</p>
+<p><code>https://developer.zhihu.com/api/v1/content/global_search?Query=xxx&amp;Count=20</code></p>
+<h4>Query 参数</h4>
+<table>
+  <tbody><tr><th>名称</th><th>类型</th><th>必填</th><th>说明</th></tr>
+  <tr><td>Query</td><td>String</td><td>是</td><td>查询关键词</td></tr>
+  <tr><td>Count</td><td>Int32</td><td>否</td><td>请求数量，默认 10，最大 20</td></tr>
+  <tr><td>Filter</td><td>String</td><td>否</td><td>高级筛选表达式（如 <code>host=="example.com" AND publish_time&gt;=1778494631</code>），需 URL 编码</td></tr>
+  <tr><td>SearchDB</td><td>String</td><td>否</td><td>索引库：all / realtime / static，默认 all</td></tr>
+</tbody></table>
+<h4>Filter 高级语法</h4>
+<ul>
+  <li><strong>host</strong>：站点域名，支持 <code>==</code>、<code>!=</code>，如 <code>host=="example.com"</code></li>
+  <li><strong>publish_time</strong>：发布时间（秒级时间戳），支持 <code>== != &gt; &gt;= &lt; &lt;=</code></li>
+  <li><strong>逻辑符</strong>：AND / OR 必须大写，AND 优先级高于 OR，可用括号控制</li>
+</ul>
+<pre><code>curl -G 'https://developer.zhihu.com/api/v1/content/global_search' \
+  --data-urlencode 'Query=怎么理解rave文化' \
+  --data-urlencode 'Filter=host=="example.com" AND publish_time&gt;=1778494631' \
+  -d 'Count=5' \
+  -H 'Authorization: Bearer &lt;your_access_secret&gt;' \
+  -H "X-Request-Timestamp: $(date +%s)"</code></pre>
+<p><strong>本项目对接</strong>：<code>GET /api/global-search?query=xxx&amp;count=10&amp;filter_expr=&amp;search_db=all</code></p>
+
+<!-- ============ 直答 ============ -->
+<h2 id="zhida">六、直答 API <span class="badge badge-post">POST</span></h2>
+<p>知乎直答，3 个模型档位：快速回答、深度思考、智能思考。</p>
+<p><code>https://developer.zhihu.com/v1/chat/completions</code></p>
+<h4>Body 参数</h4>
+<table>
+  <tbody><tr><th>名称</th><th>类型</th><th>必填</th><th>说明</th></tr>
+  <tr><td>model</td><td>String</td><td>是</td><td><code>zhida-fast-1p5</code>（快速）/ <code>zhida-thinking-1p5</code>（深度思考）/ <code>zhida-agent</code>（智能检索）</td></tr>
+  <tr><td>messages</td><td>Array</td><td>是</td><td>对话消息 <code>[{role, content}]</code></td></tr>
+  <tr><td>stream</td><td>Bool</td><td>否</td><td>是否流式返回，默认 false</td></tr>
+</tbody></table>
+<h4>响应</h4>
+<pre><code>{
+  "model": "zhida-thinking-1p5",
+  "choices": [{
+    "message": {
+      "role": "assistant",
+      "reasoning_content": "先给出分析过程...",
+      "content": "最终回答..."
+    },
+    "finish_reason": "stop"
+  }]
+}</code></pre>
+<p><strong>本项目对接</strong>：<code>POST /api/zhida</code>，body <code>{"query": "问题", "model": "zhida-fast-1p5"}</code></p>
+
+<!-- ============ 用户内容 ============ -->
+<h2 id="user-contents">七、我的创作 API <span class="badge badge-get">GET</span></h2>
+<p>获取当前账号公开范围内的创作内容（回答/文章/视频/想法/问题），无需 OAuth。</p>
+<p><code>https://developer.zhihu.com/api/v1/user/contents?ContentType=all&amp;Limit=20</code></p>
+<h4>Query 参数</h4>
+<table>
+  <tbody><tr><th>名称</th><th>类型</th><th>必填</th><th>说明</th></tr>
+  <tr><td>ContentType</td><td>String</td><td>是</td><td>all / answer / article / zvideo / pin / question</td></tr>
+  <tr><td>Offset</td><td>Int64</td><td>否</td><td>分页偏移量，默认 0</td></tr>
+  <tr><td>Limit</td><td>Int64</td><td>否</td><td>返回数量，默认 20，最大 50</td></tr>
+  <tr><td>SortField</td><td>String</td><td>否</td><td>like_count / ts，默认 ts</td></tr>
+  <tr><td>SortOrder</td><td>String</td><td>否</td><td>asc / desc，默认 desc</td></tr>
+</tbody></table>
+<h4>响应 Data.Items[]</h4>
+<table>
+  <tbody><tr><th>字段</th><th>说明</th></tr>
+  <tr><td>ContentType</td><td>内容类型</td></tr>
+  <tr><td>Url</td><td>内容链接</td></tr>
+  <tr><td>Title</td><td>内容标题</td></tr>
+  <tr><td>Summary</td><td>内容摘要</td></tr>
+  <tr><td>LikeCount / CommentCount / FavoriteCount</td><td>点赞 / 评论 / 收藏数</td></tr>
+  <tr><td>CreatedAt</td><td>创建时间（秒级时间戳）</td></tr>
+</tbody></table>
+<pre><code>curl -G 'https://developer.zhihu.com/api/v1/user/contents' \
+  -d 'ContentType=all' -d 'Limit=20' \
+  -H 'Authorization: Bearer &lt;your_access_secret&gt;' \
+  -H "X-Request-Timestamp: $(date +%s)"</code></pre>
+<p><strong>本项目对接</strong>：<code>GET /api/my-contents?content_type=all&amp;limit=20</code>（可追踪发布后的数据表现）</p>
+
+<!-- ============ 用户关注/收藏 ============ -->
+<h2 id="user-other">八、关注 / 收藏 API</h2>
+<table>
+  <tbody><tr><th>接口</th><th>URL</th><th>说明</th></tr>
+  <tr><td>用户关注</td><td><code>/api/v1/user/followees</code></td><td>关注列表（Limit 默认 20，最大 50）</td></tr>
+  <tr><td>用户收藏</td><td><code>/api/v1/user/collections</code></td><td>近期收藏内容</td></tr>
+  <tr><td>收藏夹列表</td><td><code>/api/v1/user/favlists</code></td><td>收藏夹列表</td></tr>
+  <tr><td>收藏夹内容</td><td><code>/api/v1/user/favlist_contents</code></td><td>指定收藏夹内容（需 FavlistUrlToken）</td></tr>
+</tbody></table>
+<p>以上接口均支持 <code>X-OAuth-Token</code> 查询已授权用户数据；不传则查询本人。</p>
+
+<!-- ============ PDF ============ -->
+<h2 id="pdf">九、PDF 解析 API（异步）</h2>
+<p>三步调用：上传文件 → 创建任务 → 轮询状态。</p>
+<table>
+  <tbody><tr><th>步骤</th><th>URL</th><th>方法</th><th>说明</th></tr>
+  <tr><td>1. 上传文件</td><td><code>/resources/v1/files</code></td><td>POST</td><td>multipart/form-data，file 字段，最大 100MB</td></tr>
+  <tr><td>2. 创建任务</td><td><code>/api/v1/pdf-parse/tasks</code></td><td>POST</td><td>body: <code>{"file_id": "..."}</code></td></tr>
+  <tr><td>3. 查询任务</td><td><code>/api/v1/pdf-parse/tasks/{task_id}</code></td><td>GET</td><td>task_status: pending/running/succeeded/failed</td></tr>
+</tbody></table>
+<p>任务成功时 <code>result.url</code> 为解析结果下载链接（JSON 格式，含 pages/blocks）。</p>
+
+<!-- ============ PPT ============ -->
+<h2 id="ppt">十、PPT 生成 API（异步）</h2>
+<p>根据知乎回答/文章链接异步生成 PPT。</p>
+<table>
+  <tbody><tr><th>步骤</th><th>URL</th><th>方法</th><th>说明</th></tr>
+  <tr><td>1. 创建任务</td><td><code>/api/v1/ppt-generation/tasks</code></td><td>POST</td><td>body: <code>{"resource_url": "...", "num_pages": 12}</code>（页数 6-21）</td></tr>
+  <tr><td>2. 查询任务</td><td><code>/api/v1/ppt-generation/tasks/{task_id}</code></td><td>GET</td><td>成功时 result.url 为 PPTX 下载链接</td></tr>
+</tbody></table>
+<p>支持链接：知乎回答、知乎专栏文章。</p>
+
+<div style="margin-top:3rem;padding-top:1rem;border-top:1px solid var(--border);color:var(--text-tertiary);font-size:0.8rem;">
+  本文档整理自知乎开放平台官网文档 · 部分接口已在本项目接入
+</div>
+</main>
+</div>
+<script>
+const sections = document.querySelectorAll('main.doc h2[id]');
+const tocLinks = document.querySelectorAll('.toc a[href^="#"]');
+const observer = new IntersectionObserver((entries) => {
+  entries.forEach(entry => {
+    if (entry.isIntersecting) {
+      const id = entry.target.id;
+      tocLinks.forEach(link => link.classList.toggle('active', link.getAttribute('href') === '#' + id));
+    }
+  });
+}, { rootMargin: '-80px 0px -70% 0px' });
+sections.forEach(s => observer.observe(s));
+</script>
+
+
+</body></html>

@@ -383,6 +383,53 @@ bool Api::get_chapters(const std::string &book_id, std::vector<Chapter> *chapter
     return !chapters->empty();
 }
 
+bool Api::get_book_reviews(const std::string &book_id, int list_type, int count,
+                           std::vector<Review> *reviews, std::string *error)
+{
+    if (!_client || !reviews || book_id.empty()) return false;
+    reviews->clear();
+    list_type = list_type == 2 ? 2 : 3;
+    count = std::clamp(count, 1, 30);
+    const std::string url = std::string(WEB_HOST) + "/web/review/list?bookId=" +
+                            url_encode(book_id) + "&listType=" + std::to_string(list_type) +
+                            "&maxIdx=0&count=" + std::to_string(count);
+    HttpResponse response = _client->get(url, std::string(WEB_HOST) + "/web/bookDetail/" + book_id);
+    if (!response.ok()) {
+        if (error) *error = request_error("review/list", response);
+        return false;
+    }
+    const std::string_view root = response_view(response);
+    const int errcode = field_int(root, "errCode", field_int(root, "errcode"));
+    if (errcode != 0) {
+        if (error) *error = "review/list errCode=" + std::to_string(errcode);
+        return false;
+    }
+    std::string_view array;
+    if (!field_view(root, "reviews", &array)) {
+        if (error) *error = "review/list has no reviews";
+        return false;
+    }
+    json::ObjectIterator iterator(array);
+    std::string_view outer;
+    while (iterator.next(&outer)) {
+        std::string_view object = outer;
+        std::string_view nested;
+        if (field_view(outer, "review", &nested)) object = nested;
+        Review review;
+        field_string(object, "reviewId", &review.id);
+        field_string(object, "content", &review.content);
+        review.create_time = field_int(object, "createTime");
+        review.rating = field_int(object, "star");
+        std::string_view author;
+        if (field_view(object, "author", &author)) field_string(author, "name", &review.author);
+        if (review.author.empty()) review.author = "Anonymous";
+        if (!review.content.empty()) reviews->push_back(std::move(review));
+    }
+    ESP_LOGI(TAG, "book reviews loaded book=%s type=%d count=%u",
+             book_id.c_str(), list_type, static_cast<unsigned>(reviews->size()));
+    return true;
+}
+
 bool Api::fetch_psvts(const std::string &book_id, const std::string &chapter_uid,
                       std::string *reader_url, std::string *psvts, std::string *error,
                       bool allow_cache)

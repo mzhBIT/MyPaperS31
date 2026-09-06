@@ -8,6 +8,7 @@
 #include "reader_font.h"
 #include "ui/SystemFont.h"
 #include "ui/reader_background.h"
+#include "ui/reader_book_cover.h"
 #include <M5Unified.h>
 #include <string>
 #include <vector>
@@ -49,8 +50,10 @@ static bool is_supported(const char *n, bool is_dir) {
     if (is_dir) return true;
     const char *ext = strrchr(n, '.');
     if (!ext) return false;
-    return (strcasecmp(ext, ".txt") == 0 || strcasecmp(ext, ".epub") == 0 ||
+    return (strcasecmp(ext, ".txt") == 0 || strcasecmp(ext, ".md") == 0 ||
+            strcasecmp(ext, ".markdown") == 0 || strcasecmp(ext, ".epub") == 0 ||
             strcasecmp(ext, ".mobi") == 0 || strcasecmp(ext, ".prc") == 0 ||
+            strcasecmp(ext, ".azw") == 0 || strcasecmp(ext, ".azw3") == 0 ||
             strcasecmp(ext, ".fb2") == 0 ||
             strcasecmp(ext, ".bmp") == 0 || strcasecmp(ext, ".png") == 0 ||
             strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0 ||
@@ -72,12 +75,18 @@ static bool is_epub_file(const char *n) {
 
 static bool is_mobi_file(const char *n) {
     const char *ext = strrchr(n, '.');
-    return ext && (strcasecmp(ext, ".mobi") == 0 || strcasecmp(ext, ".prc") == 0);
+    return ext && (strcasecmp(ext, ".mobi") == 0 || strcasecmp(ext, ".prc") == 0 ||
+                   strcasecmp(ext, ".azw") == 0 || strcasecmp(ext, ".azw3") == 0);
 }
 
 static bool is_fb2_file(const char *n) {
     const char *ext = strrchr(n, '.');
     return ext && strcasecmp(ext, ".fb2") == 0;
+}
+
+static bool is_markdown_file(const char *n) {
+    const char *ext = strrchr(n, '.');
+    return ext && (strcasecmp(ext, ".md") == 0 || strcasecmp(ext, ".markdown") == 0);
 }
 
 static bool is_image_file(const char *n) {
@@ -328,6 +337,9 @@ public:
         } else if (is_fb2_file(full.c_str())) {
             extern void launch_fb2_reader(const char*);
             launch_fb2_reader(full.c_str());
+        } else if (is_markdown_file(full.c_str())) {
+            extern void launch_markdown_reader(const char*);
+            launch_markdown_reader(full.c_str());
         } else if (is_image_file(full.c_str())) {
             extern void launch_image_viewer(const char*);
             launch_image_viewer(full.c_str());
@@ -469,6 +481,7 @@ public:
 
         recent_books_rename_path(old_path.c_str(), new_path.c_str());
         reader_background_file_renamed(old_path.c_str(), new_path.c_str());
+        reader_book_cover_file_renamed(old_path.c_str(), new_path.c_str());
         ESP_LOGI(TAG, "renamed: %s -> %s", old_path.c_str(), new_path.c_str());
         load_dir(g_path);
         for (size_t i = 0; i < g_entries.size(); ++i) {
@@ -618,6 +631,7 @@ public:
         int old_focus = g_focus;
         if (unlink(path.c_str()) == 0) {
             reader_background_file_deleted(path.c_str());
+            reader_book_cover_file_deleted(path.c_str());
             ESP_LOGI(TAG, "deleted: %s", path.c_str());
             load_dir(g_path);
             if (!g_entries.empty()) {

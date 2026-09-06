@@ -4,6 +4,7 @@
 #include "reader_style.h"
 #include "ui/SystemFont.h"
 #include "ui/reader_background.h"
+#include "ui/reader_book_cover.h"
 
 #include <M5Unified.h>
 #include <algorithm>
@@ -91,14 +92,20 @@ void beauty_text(int index, std::string *name, std::string *value)
                    : "Off";
         break;
     case 3:
+        *name = "Book cover";
+        *value = reader_book_cover_enabled()
+                   ? base_name(reader_book_cover_path())
+                   : "Off";
+        break;
+    case 4:
         *name = "Refresh";
         *value = reader_style_refresh_mode_name(style.refresh_mode);
         break;
-    case 4:
+    case 5:
         *name = "Show images";
         *value = style.show_images ? "On" : "Off";
         break;
-    case 5:
+    case 6:
         *name = "Full refresh";
         snprintf(buf, sizeof(buf), "%d", style.full_refresh_pages);
         *value = buf;
@@ -131,8 +138,9 @@ ReaderOverlay::Geometry ReaderOverlay::geometry() const
     g.x = screen_w / 100;
     g.y = screen_h * 10 / 100;
     g.w = screen_w * 98 / 100;
-    g.h = screen_h * 80 / 100;
-    g.tab_h = 60;
+    const int bottom_gap = std::max(8, screen_h * 2 / 100);
+    g.h = screen_h - g.y - bottom_gap;
+    g.tab_h = std::max(72, screen_h * 12 / 100);
     g.body_y = g.y;
     g.tab_y = g.y + g.h - g.tab_h;
     g.body_h = g.tab_y - g.body_y;
@@ -232,12 +240,14 @@ void ReaderOverlay::adjust_setting(int delta)
         case 2:
             return;
         case 3:
+            return;
+        case 4:
             style.refresh_mode = reader_style_next_refresh_mode(style.refresh_mode, delta);
             break;
-        case 4:
+        case 5:
             style.show_images = style.show_images ? 0 : 1;
             break;
-        case 5:
+        case 6:
             style.full_refresh_pages += delta * 5;
             break;
         default:
@@ -282,12 +292,12 @@ int ReaderOverlay::hit_setting(int x, int y, int *direction) const
     int cell_w = inner_w;
     if (index < 0 || index >= count || x < cell_x || x >= cell_x + cell_w) return -1;
     bool navigation_row = (m_tab == Tab::Settings && index == 0) ||
-                          (m_tab == Tab::Beauty && index == 2);
+                          (m_tab == Tab::Beauty && (index == 2 || index == 3));
     bool has_controls = !navigation_row;
     if (has_controls && direction) {
         int plus_x = cell_x + cell_w - STEP_BOX_W;
         int minus_x = plus_x - STEP_BOX_GAP - VALUE_W - STEP_BOX_GAP - STEP_BOX_W;
-        bool toggle = m_tab == Tab::Beauty && (index <= 1 || index == 3 || index == 4);
+        bool toggle = m_tab == Tab::Beauty && (index <= 1 || index == 4 || index == 5);
         if (toggle && x >= minus_x && x < plus_x + STEP_BOX_W) {
             *direction = 1;
         } else if (x >= minus_x && x < minus_x + STEP_BOX_W) *direction = -1;
@@ -310,6 +320,7 @@ ReaderOverlay::Action ReaderOverlay::activate_setting()
 {
     if (m_tab == Tab::Settings && m_setting_focus == 0) return Action::OpenFont;
     if (m_tab == Tab::Beauty && m_setting_focus == 2) return Action::OpenBackground;
+    if (m_tab == Tab::Beauty && m_setting_focus == 3) return Action::OpenBookCover;
     adjust_setting(1);
     redraw();
     return Action::None;
@@ -399,6 +410,7 @@ ReaderOverlay::Action ReaderOverlay::on_touch(const TouchEvent &event)
         m_setting_focus = index;
         if (m_tab == Tab::Settings && index == 0) return Action::OpenFont;
         if (m_tab == Tab::Beauty && index == 2) return Action::OpenBackground;
+        if (m_tab == Tab::Beauty && index == 3) return Action::OpenBookCover;
         if (direction != 0) adjust_setting(direction);
         redraw();
         return Action::None;
@@ -436,7 +448,7 @@ void ReaderOverlay::draw_settings(const Geometry &g)
         system_font::draw_left(M5.Display, name, x + 12, text_y, fg);
 
         if ((m_tab == Tab::Settings && index == 0) ||
-            (m_tab == Tab::Beauty && index == 2)) {
+            (m_tab == Tab::Beauty && (index == 2 || index == 3))) {
             int max_value_w = std::max(40, w - system_font::measure(name) - 70);
             value = system_font::ellipsize(value, max_value_w);
             system_font::draw_right(M5.Display, value + "  >", x + w - 12, text_y, fg);
@@ -448,7 +460,7 @@ void ReaderOverlay::draw_settings(const Geometry &g)
             int box_h = std::max(28, row_h - 12);
             int control_text_y = box_y + std::max(0, (box_h - system_font::line_height()) / 2);
             bool toggle = m_tab == Tab::Beauty &&
-                          (index <= 1 || index == 3 || index == 4);
+                          (index <= 1 || index == 4 || index == 5);
             if (toggle) {
                 int toggle_w = plus_x + STEP_BOX_W - minus_x;
                 M5.Display.drawRoundRect(minus_x, box_y, toggle_w, box_h, 4, fg);

@@ -24,6 +24,7 @@ static constexpr size_t MAX_COMPRESSED_BYTES = 12 * 1024 * 1024;
 static constexpr size_t MAX_DECODED_BYTES = 12 * 1024 * 1024;
 static constexpr size_t MIN_FREE_PSRAM_RESERVE = 8 * 1024 * 1024;
 static constexpr float PPA_SCALE_STEP = 1.0f / 16.0f;
+static jpeg_decoder_handle_t s_decoder = nullptr;
 
 static uint32_t align_up(uint32_t value, uint32_t alignment)
 {
@@ -79,6 +80,27 @@ static uint8_t *alloc_jpeg_buffer(size_t requested,
 
 } // namespace
 
+bool prepare()
+{
+    if (s_decoder) return true;
+    jpeg_decode_engine_cfg_t engine_cfg = {};
+    engine_cfg.timeout_ms = 1000;
+    const size_t internal_free = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
+    const size_t internal_largest = heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL);
+    const esp_err_t err = jpeg_new_decoder_engine(&engine_cfg, &s_decoder);
+    if (err != ESP_OK) {
+        s_decoder = nullptr;
+        ESP_LOGW(TAG,
+                 "decoder reserve failed err=%s internal_free=%u largest=%u",
+                 esp_err_to_name(err), (unsigned)internal_free, (unsigned)internal_largest);
+        return false;
+    }
+    ESP_LOGI(TAG,
+             "decoder engine reserved internal_free=%u largest=%u",
+             (unsigned)internal_free, (unsigned)internal_largest);
+    return true;
+}
+
 bool draw_file(m5gfx::M5GFX &gfx,
                const char *path,
                int x,
@@ -97,6 +119,7 @@ bool draw_file(m5gfx::M5GFX &gfx,
     };
 
     if (!path || !path[0] || box_width <= 0 || box_height <= 0) return finish(false);
+    if (!prepare()) return finish(false);
 
     struct stat st = {};
     if (stat(path, &st) != 0 || st.st_size <= 0 || (size_t)st.st_size > MAX_COMPRESSED_BYTES) {
@@ -184,17 +207,6 @@ bool draw_file(m5gfx::M5GFX &gfx,
         return finish(false);
     }
 
-    jpeg_decoder_handle_t decoder = nullptr;
-    jpeg_decode_engine_cfg_t engine_cfg = {};
-    engine_cfg.timeout_ms = 1000;
-    err = jpeg_new_decoder_engine(&engine_cfg, &decoder);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "decoder init failed err=%s", esp_err_to_name(err));
-        free(decoded);
-        free(input);
-        return finish(false);
-    }
-
     jpeg_decode_cfg_t decode_cfg = {};
     decode_cfg.output_format = JPEG_DECODE_OUT_FORMAT_RGB565;
     // The default little-endian RGB565 byte layout matches lgfx::rgb565_t.
@@ -202,7 +214,7 @@ bool draw_file(m5gfx::M5GFX &gfx,
     decode_cfg.conv_std = JPEG_YUV_RGB_CONV_STD_BT601;
     uint32_t decoded_size = 0;
     started = esp_timer_get_time();
-    err = jpeg_decoder_process(decoder,
+    err = jpeg_decoder_process(s_decoder,
                                &decode_cfg,
                                input,
                                (uint32_t)st.st_size,
@@ -210,7 +222,6 @@ bool draw_file(m5gfx::M5GFX &gfx,
                                (uint32_t)decoded_capacity,
                                &decoded_size);
     local_stats.decode_ms = (esp_timer_get_time() - started) / 1000;
-    jpeg_del_decoder_engine(decoder);
     free(input);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "hardware decode failed path=%s err=%s", path, esp_err_to_name(err));

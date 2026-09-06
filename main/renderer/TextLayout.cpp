@@ -1,4 +1,5 @@
 #include "renderer/TextLayout.h"
+#include "renderer/EnglishHyphenationTrie.h"
 
 #include <algorithm>
 
@@ -61,44 +62,12 @@ static bool ascii_space(uint32_t cp)
     return cp == ' ' || cp == '\t';
 }
 
-static bool overflow_continues_ascii_word(const std::vector<Token> &tokens,
-                                          size_t last_space_index,
-                                          uint32_t overflow_cp)
-{
-    if (last_space_index == (size_t)-1 ||
-        last_space_index + 1 >= tokens.size() ||
-        overflow_cp >= 0x80 || ascii_space(overflow_cp)) {
-        return false;
-    }
-
-    // A remembered space is a useful word-break point only while the
-    // overflowing run after it is still ASCII.  In mixed text such as
-    // "《GTA 6》的在线模式...", a later CJK overflow must not rewind all
-    // the way to the space between GTA and 6 and leave most of the line empty.
-    for (size_t i = last_space_index + 1; i < tokens.size(); ++i) {
-        if (tokens[i].codepoint >= 0x80 || ascii_space(tokens[i].codepoint)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-static size_t skip_ascii_spaces(const std::string &text, size_t pos)
-{
-    while (pos < text.size()) {
-        uint32_t cp = 0;
-        size_t next = next_utf8(text, pos, &cp);
-        if (!ascii_space(cp)) break;
-        pos = next;
-    }
-    return pos;
-}
-
-static bool line_is_cjk_dominant(const std::vector<Token> &tokens, size_t count)
+static bool line_is_cjk_dominant(const std::vector<Token> &tokens, size_t start, size_t end)
 {
     int glyphs = 0;
     int cjk = 0;
-    for (size_t i = 0; i < count; ++i) {
+    end = std::min(end, tokens.size());
+    for (size_t i = start; i < end; ++i) {
         uint32_t cp = tokens[i].codepoint;
         if (cp == '\r' || cp == '\n') continue;
         ++glyphs;
@@ -166,10 +135,409 @@ bool prohibited_at_line_end(uint32_t cp)
     }
 }
 
+namespace {
+
+constexpr uint32_t SOFT_HYPHEN = 0x00AD;
+constexpr int64_t INF_COST = INT64_MAX / 8;
+
+struct BreakChoice {
+    size_t end = 0;
+    size_t next = 0;
+    bool append_hyphen = false;
+    bool valid = false;
+};
+
+static bool ascii_letter(uint32_t cp)
+{
+    return (cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z');
+}
+
+static char lower_ascii(uint32_t cp)
+{
+    return cp >= 'A' && cp <= 'Z' ? static_cast<char>(cp + ('a' - 'A'))
+                                  : static_cast<char>(cp);
+}
+
+struct EnglishTrieState {
+    size_t address = 0;
+    uint8_t stride = 1;
+    size_t child_count = 0;
+    const uint8_t *transitions = nullptr;
+    const uint8_t *targets = nullptr;
+    const uint8_t *levels = nullptr;
+    size_t levels_length = 0;
+    bool valid = false;
+};
+
+static EnglishTrieState decode_english_state(size_t address)
+{
+    EnglishTrieState state;
+    if (address >= en_patterns.size) return state;
+    const uint8_t *base = en_patterns.data + address;
+    const size_t remaining = en_patterns.size - address;
+    size_t pos = 0;
+    const uint8_t header = base[pos++];
+    const bool has_levels = (header & 0x80u) != 0;
+    uint8_t stride = static_cast<uint8_t>((header >> 5) & 0x03u);
+    if (stride == 0) stride = 1;
+    size_t child_count = header & 0x1Fu;
+    if (child_count == 31u) {
+        if (pos >= remaining) return EnglishTrieState();
+        child_count = base[pos++];
+    }
+
+    const uint8_t *levels = nullptr;
+    size_t levels_length = 0;
+    if (has_levels) {
+        if (pos + 1 >= remaining) return EnglishTrieState();
+        const uint8_t high = base[pos++];
+        const uint8_t low_and_length = base[pos++];
+        const size_t offset = (static_cast<size_t>(high) << 4) |
+                              (low_and_length >> 4);
+        levels_length = low_and_length & 0x0Fu;
+        if (offset < 4 || offset + levels_length > en_patterns.size) {
+            return EnglishTrieState();
+        }
+        levels = en_patterns.data + offset - 4;
+    }
+    if (pos + child_count > remaining) return EnglishTrieState();
+    const uint8_t *transitions = base + pos;
+    pos += child_count;
+    if (pos + child_count * stride > remaining) return EnglishTrieState();
+
+    state.address = address;
+    state.stride = stride;
+    state.child_count = child_count;
+    state.transitions = transitions;
+    state.targets = base + pos;
+    state.levels = levels;
+    state.levels_length = levels_length;
+    state.valid = true;
+    return state;
+}
+
+static int32_t decode_english_delta(const uint8_t *data, uint8_t stride)
+{
+    if (stride == 1) return static_cast<int8_t>(data[0]);
+    if (stride == 2) {
+        return static_cast<int16_t>((static_cast<uint16_t>(data[0]) << 8) |
+                                    static_cast<uint16_t>(data[1]));
+    }
+    const int32_t value = (static_cast<int32_t>(data[0]) << 16) |
+                          (static_cast<int32_t>(data[1]) << 8) |
+                          static_cast<int32_t>(data[2]);
+    return value - (1 << 23);
+}
+
+static bool english_transition(const EnglishTrieState &state, uint8_t letter,
+                               EnglishTrieState *output)
+{
+    if (!state.valid || !output) return false;
+    for (size_t index = 0; index < state.child_count; ++index) {
+        if (state.transitions[index] != letter) continue;
+        const int32_t delta = decode_english_delta(
+            state.targets + index * state.stride, state.stride);
+        const int64_t next = static_cast<int64_t>(state.address) + delta;
+        if (next < 0 || static_cast<size_t>(next) >= en_patterns.size) return false;
+        *output = decode_english_state(static_cast<size_t>(next));
+        return output->valid;
+    }
+    return false;
+}
+
+static void mark_english_word_hyphens(const std::vector<Token> &tokens,
+                                      size_t start, size_t end,
+                                      std::vector<uint8_t> &break_flags)
+{
+    // English patterns use a 3/3 minimum. Fixed arrays avoid per-word heap
+    // traffic while the serialized dictionary remains read-only in flash.
+    constexpr size_t MAX_WORD_CHARS = 70;
+    const size_t length = end - start;
+    if (length < 6 || length > MAX_WORD_CHARS) return;
+
+    uint8_t word[MAX_WORD_CHARS + 2] = {};
+    uint8_t scores[MAX_WORD_CHARS + 2] = {};
+    word[0] = '.';
+    for (size_t i = 0; i < length; ++i) {
+        word[i + 1] = static_cast<uint8_t>(lower_ascii(tokens[start + i].codepoint));
+    }
+    word[length + 1] = '.';
+    const size_t augmented_length = length + 2;
+    const EnglishTrieState root = decode_english_state(en_patterns.root_offset);
+    if (!root.valid) return;
+
+    for (size_t word_start = 0; word_start < augmented_length; ++word_start) {
+        EnglishTrieState state = root;
+        for (size_t cursor = word_start; cursor < augmented_length; ++cursor) {
+            EnglishTrieState next;
+            if (!english_transition(state, word[cursor], &next)) break;
+            state = next;
+            if (!state.levels || state.levels_length == 0) continue;
+            size_t offset = 0;
+            for (size_t i = 0; i < state.levels_length; ++i) {
+                const uint8_t packed = state.levels[i];
+                offset += packed / 10;
+                const size_t boundary = word_start + offset;
+                if (boundary < 2 || boundary + 2 > augmented_length ||
+                    boundary >= augmented_length) {
+                    continue;
+                }
+                scores[boundary] = std::max<uint8_t>(scores[boundary], packed % 10);
+            }
+        }
+    }
+
+    for (size_t split = 3; split + 3 <= length; ++split) {
+        if ((scores[split + 1] & 1u) != 0) break_flags[start + split] = 1;
+    }
+}
+
+static void mark_english_hyphens(const std::vector<Token> &tokens,
+                                 std::vector<uint8_t> &break_flags)
+{
+    size_t i = 0;
+    while (i < tokens.size()) {
+        if (!ascii_letter(tokens[i].codepoint)) {
+            ++i;
+            continue;
+        }
+        const size_t start = i;
+        while (i < tokens.size() && ascii_letter(tokens[i].codepoint)) ++i;
+        const size_t end = i;
+        mark_english_word_hyphens(tokens, start, end, break_flags);
+    }
+}
+
+static size_t skip_spaces(const std::vector<Token> &tokens, size_t index)
+{
+    while (index < tokens.size() && ascii_space(tokens[index].codepoint)) ++index;
+    return index;
+}
+
+static size_t trim_line_end(const std::vector<Token> &tokens, size_t start, size_t end)
+{
+    while (end > start && (ascii_space(tokens[end - 1].codepoint) ||
+                           tokens[end - 1].codepoint == SOFT_HYPHEN)) {
+        --end;
+    }
+    return end;
+}
+
+static size_t ascii_space_count(const std::vector<Token> &tokens, size_t start, size_t end)
+{
+    end = trim_line_end(tokens, start, end);
+    size_t count = 0;
+    for (size_t i = start; i < end; ++i) {
+        if (ascii_space(tokens[i].codepoint)) ++count;
+    }
+    return count;
+}
+
+static int64_t western_line_cost(const std::vector<Token> &tokens,
+                                 size_t start, size_t end,
+                                 int width, int max_width, bool last_line)
+{
+    if (last_line) return 0;
+    const int64_t remaining = std::max(0, max_width - width);
+    const size_t spaces = ascii_space_count(tokens, start, end);
+    if (spaces == 0) return remaining * remaining * 4;
+
+    // The renderer permits each word space to grow by approximately one
+    // natural space. Penalize candidates exceeding that capacity so the DP
+    // will prefer a later Liang breakpoint instead of leaving a ragged edge
+    // or creating telephone-pole-sized spaces.
+    int64_t stretch_capacity = 0;
+    for (size_t i = start; i < end; ++i) {
+        if (ascii_space(tokens[i].codepoint)) {
+            stretch_capacity += std::max(2, tokens[i].width);
+        }
+    }
+    const int64_t distributed = remaining * remaining /
+                                std::max<int64_t>(1, static_cast<int64_t>(spaces));
+    if (remaining <= stretch_capacity) return distributed;
+    const int64_t excess = remaining - stretch_capacity;
+    return distributed + excess * excess * 8;
+}
+
+static bool boundary_allowed(const std::vector<Token> &tokens,
+                             const std::vector<uint8_t> &english_hyphens,
+                             size_t boundary, const Options &options,
+                             bool *append_hyphen)
+{
+    if (append_hyphen) *append_hyphen = false;
+    if (boundary == 0 || boundary > tokens.size()) return false;
+    if (boundary == tokens.size()) return true;
+    const uint32_t left = tokens[boundary - 1].codepoint;
+    const uint32_t right = tokens[boundary].codepoint;
+    if (ascii_space(left)) return true;
+    if (left == SOFT_HYPHEN) {
+        if (append_hyphen) *append_hyphen = true;
+        return true;
+    }
+    if (left == '-' || left == 0x2010 || left == 0x2012 || left == 0x2013) return true;
+    if (boundary < english_hyphens.size() && english_hyphens[boundary]) {
+        if (append_hyphen) *append_hyphen = true;
+        return true;
+    }
+    if ((is_cjk_or_fullwidth(left) || is_cjk_or_fullwidth(right) ||
+         is_cjk_punctuation(left) || is_cjk_punctuation(right))) {
+        return !options.apply_cjk_kinsoku ||
+               (!prohibited_at_line_end(left) && !prohibited_at_line_start(right));
+    }
+    return false;
+}
+
+static int range_width(const std::vector<Token> &tokens, size_t start, size_t end,
+                       bool append_hyphen, const Options &options,
+                       MeasureCodepointFn measure, MeasureKerningFn measure_kerning,
+                       void *context)
+{
+    end = trim_line_end(tokens, start, end);
+    int width = 0;
+    uint32_t previous = 0;
+    for (size_t i = start; i < end; ++i) {
+        const uint32_t cp = tokens[i].codepoint;
+        if (cp == SOFT_HYPHEN) continue;
+        if (previous != 0) {
+            width += options.letter_spacing;
+            if (measure_kerning) width += measure_kerning(context, previous, cp);
+        }
+        width += tokens[i].width;
+        previous = cp;
+    }
+    if (append_hyphen) {
+        if (previous != 0) {
+            width += options.letter_spacing;
+            if (measure_kerning) width += measure_kerning(context, previous, '-');
+        }
+        width += measure ? std::max(0, measure(context, '-')) : 0;
+    }
+    return width;
+}
+
+static std::string line_text(const std::string &text, const std::vector<Token> &tokens,
+                             size_t start, size_t end, bool append_hyphen,
+                             size_t *byte_start, size_t *byte_end)
+{
+    const size_t visible_end = trim_line_end(tokens, start, end);
+    *byte_start = start < tokens.size() ? tokens[start].start : text.size();
+    *byte_end = visible_end > start ? tokens[visible_end - 1].end : *byte_start;
+    std::string out;
+    if (*byte_end > *byte_start) out = text.substr(*byte_start, *byte_end - *byte_start);
+    for (size_t pos = 0; (pos = out.find("\xC2\xAD", pos)) != std::string::npos;) {
+        out.erase(pos, 2);
+    }
+    if (append_hyphen) out.push_back('-');
+    return out;
+}
+
+static bool western_dominant(const std::vector<Token> &tokens)
+{
+    size_t latin = 0;
+    size_t cjk = 0;
+    for (const auto &token : tokens) {
+        if (ascii_letter(token.codepoint)) ++latin;
+        else if (is_cjk_or_fullwidth(token.codepoint)) ++cjk;
+    }
+    return latin >= 4 && latin > cjk;
+}
+
+static BreakChoice farthest_fitting(const std::vector<Token> &tokens,
+                                    const std::vector<uint8_t> &english_hyphens,
+                                    size_t start, int available, const Options &options,
+                                    MeasureCodepointFn measure, MeasureKerningFn kerning,
+                                    void *context)
+{
+    BreakChoice best;
+    for (size_t end = start + 1; end <= tokens.size(); ++end) {
+        bool append_hyphen = false;
+        if (!boundary_allowed(tokens, english_hyphens, end, options, &append_hyphen)) continue;
+        const int width = range_width(tokens, start, end, append_hyphen, options, measure, kerning, context);
+        if (width <= available) {
+            best = {end, skip_spaces(tokens, end), append_hyphen, true};
+        } else if (best.valid) {
+            break;
+        }
+    }
+    if (best.valid) return best;
+
+    // An unbreakable URL/identifier or a glyph wider than the viewport must
+    // still make progress.  Split at the largest visible codepoint boundary.
+    size_t end = start;
+    for (size_t candidate = start + 1; candidate <= tokens.size(); ++candidate) {
+        int width = range_width(tokens, start, candidate, false, options, measure, kerning, context);
+        if (width > available && end > start) break;
+        end = candidate;
+        if (width > available) break;
+    }
+    return {end, end, false, true};
+}
+
+static void optimize_western_choices(const std::vector<Token> &tokens,
+                                     const std::vector<uint8_t> &english_hyphens,
+                                     int max_width, const Options &options,
+                                     MeasureCodepointFn measure, MeasureKerningFn kerning,
+                                     void *context, std::vector<BreakChoice> &choices,
+                                     std::vector<int64_t> &costs)
+{
+    const size_t count = tokens.size();
+    choices.assign(count + 1, BreakChoice());
+    costs.assign(count + 1, INF_COST);
+    costs[count] = 0;
+
+    // Only positions reached after a legal break can become a line start.
+    // Solving the dynamic program for every character in every word makes a
+    // long TXT paragraph needlessly expensive on the reader's CPU.
+    std::vector<uint8_t> legal_starts(count + 1, 0);
+    legal_starts[0] = 1;
+    for (size_t boundary = 1; boundary <= count; ++boundary) {
+        bool append_hyphen = false;
+        if (boundary_allowed(tokens, english_hyphens, boundary, options, &append_hyphen)) {
+            legal_starts[skip_spaces(tokens, boundary)] = 1;
+        }
+    }
+
+    const int64_t hyphen_penalty =
+        std::max<int64_t>(1, static_cast<int64_t>(max_width) * max_width / 48);
+    for (size_t reverse = count; reverse-- > 0;) {
+        const size_t start = reverse;
+        if (!legal_starts[start] || ascii_space(tokens[start].codepoint)) continue;
+        for (size_t end = start + 1; end <= count; ++end) {
+            bool append_hyphen = false;
+            if (!boundary_allowed(tokens, english_hyphens, end, options, &append_hyphen)) continue;
+            const int width = range_width(tokens, start, end, append_hyphen, options, measure, kerning, context);
+            if (width > max_width) {
+                if (choices[start].valid) break;
+                continue;
+            }
+            const size_t next = skip_spaces(tokens, end);
+            if (costs[next] == INF_COST) continue;
+            const int64_t line_cost = western_line_cost(
+                tokens, start, end, width, max_width, next == count);
+            // Automatic/soft hyphenation is a fallback for an otherwise loose
+            // line, not a mechanism for filling every line to its last pixel.
+            const int64_t total = line_cost + costs[next] +
+                                  (append_hyphen ? hyphen_penalty : 0);
+            if (!choices[start].valid || total <= costs[start]) {
+                costs[start] = total;
+                choices[start] = {end, next, append_hyphen, true};
+            }
+        }
+        if (!choices[start].valid) {
+            choices[start] = farthest_fitting(tokens, english_hyphens, start, max_width,
+                                              options, measure, kerning, context);
+            costs[start] = costs[choices[start].next] == INF_COST ? 0 : costs[choices[start].next];
+        }
+    }
+}
+
+} // namespace
+
 std::vector<Line> break_utf8(const std::string &text,
                              const Options &options,
                              MeasureCodepointFn measure,
-                             void *measure_context)
+                             void *measure_context,
+                             MeasureKerningFn measure_kerning)
 {
     std::vector<Line> result;
     if (text.empty()) {
@@ -180,111 +548,124 @@ std::vector<Line> break_utf8(const std::string &text,
     }
 
     const int max_width = std::max(1, options.max_width);
-    size_t line_start = 0;
-    // Reuse one line-sized scratch buffer for the whole paragraph. Constructing
-    // and freeing a vector for every output line fragments the small internal
-    // heap on ESP32-P4, even though the data is only temporary.
-    std::vector<Token> tokens;
-    tokens.reserve(64);
-    while (line_start < text.size()) {
-        const int line_indent = line_start == 0
-                              ? std::max(0, std::min(options.first_line_indent, max_width - 1))
-                              : 0;
-        const int line_max_width = std::max(1, max_width - line_indent);
-        tokens.clear();
-        size_t pos = line_start;
-        size_t last_space_index = (size_t)-1;
-        int width = 0;
+    size_t segment_start = 0;
+    bool first_output_line = true;
+    while (segment_start < text.size()) {
+        size_t segment_end = segment_start;
+        size_t next_segment = text.size();
         bool hard_break = false;
-        size_t hard_break_next = pos;
-        uint32_t overflow_cp = 0;
-        size_t overflow_start = pos;
+        while (segment_end < text.size()) {
+            uint32_t cp = 0;
+            const size_t next = next_utf8(text, segment_end, &cp);
+            if (cp == '\r' || cp == '\n') {
+                hard_break = true;
+                next_segment = next;
+                if (cp == '\r' && next_segment < text.size() && text[next_segment] == '\n') ++next_segment;
+                break;
+            }
+            segment_end = next;
+        }
 
-        while (pos < text.size()) {
+        std::vector<Token> tokens;
+        tokens.reserve((segment_end - segment_start) / 2 + 1);
+        for (size_t pos = segment_start; pos < segment_end;) {
             Token token;
             token.start = pos;
             token.end = next_utf8(text, pos, &token.codepoint);
-            if (token.codepoint == '\r' || token.codepoint == '\n') {
-                hard_break = true;
-                hard_break_next = token.end;
-                if (token.codepoint == '\r' && hard_break_next < text.size() &&
-                    text[hard_break_next] == '\n') {
-                    ++hard_break_next;
-                }
-                break;
-            }
-            token.width = measure ? std::max(0, measure(measure_context, token.codepoint)) : 0;
-            int spacing = tokens.empty() ? 0 : options.letter_spacing;
-            if (!tokens.empty() && width + spacing + token.width > line_max_width) {
-                overflow_cp = token.codepoint;
-                overflow_start = token.start;
-                break;
-            }
-            width += spacing + token.width;
-            tokens.push_back(token);
-            if (ascii_space(token.codepoint)) last_space_index = tokens.size() - 1;
-            pos = token.end;
-        }
-
-        // A single over-wide glyph still has to make progress.
-        if (tokens.empty() && !hard_break) {
-            Token token;
-            token.start = line_start;
-            token.end = next_utf8(text, line_start, &token.codepoint);
-            token.width = measure ? std::max(0, measure(measure_context, token.codepoint)) : 0;
+            token.width = token.codepoint == SOFT_HYPHEN
+                        ? 0
+                        : (measure ? std::max(0, measure(measure_context, token.codepoint)) : 0);
             tokens.push_back(token);
             pos = token.end;
-            overflow_cp = 0;
         }
 
-        size_t take = tokens.size();
-        size_t next_start = hard_break ? hard_break_next : pos;
-        if (!hard_break && overflow_cp != 0) {
-            next_start = overflow_start;
-            if (ascii_space(overflow_cp)) {
-                // The current line is already full. Consume the separator so
-                // the next line does not begin with visible ASCII whitespace.
-                next_start = skip_ascii_spaces(text, overflow_start);
-            } else if (options.prefer_word_break && last_space_index > 0 &&
-                       overflow_continues_ascii_word(tokens, last_space_index, overflow_cp)) {
-                take = last_space_index;
-                next_start = skip_ascii_spaces(text, tokens[last_space_index].start);
-            } else if (options.apply_cjk_kinsoku) {
-                // Move one or more characters to the next line until neither
-                // side of the boundary violates the Chinese line-break rules.
-                while (take > 1) {
-                    uint32_t next_cp = take < tokens.size() ? tokens[take].codepoint : overflow_cp;
-                    uint32_t prev_cp = tokens[take - 1].codepoint;
-                    if (!prohibited_at_line_start(next_cp) && !prohibited_at_line_end(prev_cp)) break;
-                    --take;
-                    next_start = tokens[take].start;
+        if (tokens.empty()) {
+            Line empty;
+            empty.byte_start = segment_start;
+            empty.byte_end = segment_start;
+            empty.hard_break = hard_break;
+            empty.x_offset = first_output_line ? std::max(0, options.first_line_indent) : 0;
+            result.push_back(std::move(empty));
+            first_output_line = false;
+        } else {
+            std::vector<uint8_t> english_hyphens(tokens.size() + 1, 0);
+            if (options.hyphenate_english) mark_english_hyphens(tokens, english_hyphens);
+            const bool optimize = options.optimize_western_lines && western_dominant(tokens);
+            std::vector<BreakChoice> choices;
+            std::vector<int64_t> costs;
+            if (optimize) {
+                optimize_western_choices(tokens, english_hyphens, max_width, options,
+                                         measure, measure_kerning, measure_context, choices, costs);
+            }
+
+            size_t start = skip_spaces(tokens, 0);
+            while (start < tokens.size()) {
+                const int indent = first_output_line
+                                 ? std::max(0, std::min(options.first_line_indent, max_width - 1)) : 0;
+                const int available = std::max(1, max_width - indent);
+                BreakChoice choice;
+                if (optimize && !first_output_line && start < choices.size()) choice = choices[start];
+                if (optimize && first_output_line) {
+                    int64_t best_cost = INF_COST;
+                    for (size_t end = start + 1; end <= tokens.size(); ++end) {
+                        bool append_hyphen = false;
+                        if (!boundary_allowed(tokens, english_hyphens, end, options, &append_hyphen)) continue;
+                        const int width = range_width(tokens, start, end, append_hyphen, options,
+                                                      measure, measure_kerning, measure_context);
+                        if (width > available) {
+                            if (choice.valid) break;
+                            continue;
+                        }
+                        const size_t next = skip_spaces(tokens, end);
+                        if (next >= costs.size() || costs[next] == INF_COST) continue;
+                        const int64_t line_cost = western_line_cost(
+                            tokens, start, end, width, available, next == tokens.size());
+                        const int64_t total = line_cost + costs[next] +
+                                              (append_hyphen
+                                                   ? std::max<int64_t>(1,
+                                                         static_cast<int64_t>(max_width) * max_width / 48)
+                                                   : 0);
+                        if (!choice.valid || total <= best_cost) {
+                            best_cost = total;
+                            choice = {end, next, append_hyphen, true};
+                        }
+                    }
                 }
+                if (!choice.valid) {
+                    choice = farthest_fitting(tokens, english_hyphens, start, available,
+                                              options, measure, measure_kerning, measure_context);
+                }
+
+                Line line;
+                line.text = line_text(text, tokens, start, choice.end, choice.append_hyphen,
+                                      &line.byte_start, &line.byte_end);
+                line.x_offset = indent;
+                line.hard_break = hard_break && choice.next >= tokens.size();
+                const size_t visible_end = trim_line_end(tokens, start, choice.end);
+                line.justify = choice.next < tokens.size() &&
+                               (line_is_cjk_dominant(tokens, start, visible_end) ||
+                                ascii_space_count(tokens, start, visible_end) > 0);
+                result.push_back(std::move(line));
+                first_output_line = false;
+                if (choice.next <= start) choice.next = start + 1;
+                start = skip_spaces(tokens, choice.next);
             }
         }
 
-        size_t byte_end = take > 0 ? tokens[take - 1].end : line_start;
-        while (take > 0 && ascii_space(tokens[take - 1].codepoint)) {
-            --take;
-            byte_end = take > 0 ? tokens[take - 1].end : line_start;
+        if (!hard_break) break;
+        segment_start = next_segment;
+        if (segment_start == text.size()) {
+            Line empty;
+            empty.byte_start = segment_start;
+            empty.byte_end = segment_start;
+            empty.hard_break = true;
+            result.push_back(std::move(empty));
         }
-
-        Line line;
-        line.byte_start = line_start;
-        line.byte_end = byte_end;
-        line.text = text.substr(line.byte_start, line.byte_end - line.byte_start);
-        line.hard_break = hard_break;
-        line.paragraph_last = next_start >= text.size();
-        line.justify = !line.paragraph_last && !line.hard_break && line_is_cjk_dominant(tokens, take);
-        line.x_offset = line_indent;
-        result.push_back(line);
-
-        if (next_start <= line_start) {
-            uint32_t ignored = 0;
-            next_start = next_utf8(text, line_start, &ignored);
-        }
-        line_start = next_start;
     }
 
+    if (result.empty()) result.push_back(Line());
+    for (auto &line : result) line.paragraph_last = false;
+    result.back().paragraph_last = true;
     return result;
 }
 

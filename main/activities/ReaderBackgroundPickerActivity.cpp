@@ -4,6 +4,7 @@
 #include "activities/ActivityManager.h"
 #include "ui/SystemFont.h"
 #include "ui/reader_background.h"
+#include "ui/reader_book_cover.h"
 
 #include <M5Unified.h>
 
@@ -38,11 +39,19 @@ bool is_image(const char *name)
 
 class ReaderBackgroundPickerActivity final : public Activity {
 public:
+    explicit ReaderBackgroundPickerActivity(bool book_cover = false)
+        : m_book_cover(book_cover)
+    {
+    }
+
     void on_create() override
     {
         std::string initial = ROOT;
-        if (reader_background_enabled()) {
-            initial = reader_background_path();
+        const bool enabled = m_book_cover ? reader_book_cover_enabled()
+                                          : reader_background_enabled();
+        if (enabled) {
+            initial = m_book_cover ? reader_book_cover_path()
+                                   : reader_background_path();
             size_t slash = initial.find_last_of('/');
             initial = slash == std::string::npos || slash == 0
                         ? ROOT : initial.substr(0, slash);
@@ -103,6 +112,7 @@ public:
     }
 
 private:
+    bool m_book_cover = false;
     std::string m_path = ROOT;
     std::vector<Entry> m_entries;
     int m_focus = 0;
@@ -173,9 +183,12 @@ private:
     {
         m_notice.clear();
         if (index == 0) {
-            if (reader_background_clear()) ActivityManager::instance().pop();
+            const bool cleared = m_book_cover ? reader_book_cover_clear()
+                                              : reader_background_clear();
+            if (cleared) ActivityManager::instance().pop();
             else {
-                m_notice = "Failed to disable background";
+                m_notice = m_book_cover ? "Failed to disable book cover"
+                                        : "Failed to disable background";
                 redraw();
             }
             return;
@@ -187,8 +200,11 @@ private:
             redraw();
             return;
         }
-        if (reader_background_set(full.c_str(), M5.Display.width(), M5.Display.height(),
-                                  &m_notice) == ReaderBackgroundResult::Ok) {
+        const bool selected = m_book_cover
+            ? reader_book_cover_set(full.c_str(), &m_notice)
+            : reader_background_set(full.c_str(), M5.Display.width(), M5.Display.height(),
+                                    &m_notice) == ReaderBackgroundResult::Ok;
+        if (selected) {
             ActivityManager::instance().pop();
         } else {
             redraw();
@@ -206,7 +222,9 @@ private:
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
         system_font::draw_left(M5.Display, "<", 16, 7, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Reading Background", width / 2, 7, TFT_BLACK);
+        system_font::draw_center(M5.Display,
+                                 m_book_cover ? "Lock-screen Book Cover" : "Reading Background",
+                                 width / 2, 7, TFT_BLACK);
         M5.Display.drawFastHLine(0, TOP_H - 1, width, TFT_BLACK);
 
         int top = TOP_H + 6;
@@ -220,7 +238,7 @@ private:
             M5.Display.fillRect(PAD, y, width - PAD * 2, ROW_H - 2, bg);
             M5.Display.drawFastHLine(PAD, y + ROW_H - 2, width - PAD * 2, TFT_BLACK);
             std::string label;
-            if (index == 0) label = "Off (white background)";
+            if (index == 0) label = m_book_cover ? "Off" : "Off (white background)";
             else {
                 const Entry &entry = m_entries[(size_t)index - 1];
                 label = entry.name + (entry.directory ? "/" : "");
@@ -249,4 +267,9 @@ private:
 void launch_reader_background_picker()
 {
     ActivityManager::instance().push(new ReaderBackgroundPickerActivity());
+}
+
+void launch_reader_book_cover_picker()
+{
+    ActivityManager::instance().push(new ReaderBackgroundPickerActivity(true));
 }

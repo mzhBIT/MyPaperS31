@@ -1,6 +1,7 @@
 #pragma once
 
 #include "renderer/TextLayout.h"
+#include "renderer/InlineStyle.h"
 
 #include <cstdint>
 #include <string>
@@ -8,7 +9,7 @@
 
 namespace document_layout {
 
-static constexpr uint32_t ALGORITHM_VERSION = 5;
+static constexpr uint32_t ALGORITHM_VERSION = 6;
 
 enum class BlockType {
     Paragraph,
@@ -38,6 +39,7 @@ struct Block {
         std::string content;
     };
     std::vector<FootnoteRef> footnotes;
+    std::vector<inline_style::Span> styles;
 };
 
 struct ImageInfo {
@@ -70,6 +72,7 @@ struct PageItem {
         std::string content;
     };
     std::vector<FootnoteRef> footnotes;
+    std::vector<inline_style::Span> styles;
 
     // Image layout diagnostics retained for format-specific logging.
     int source_width = 0;

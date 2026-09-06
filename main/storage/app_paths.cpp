@@ -23,6 +23,7 @@ static const char *DEEPSEEK_SESSIONS_DIR = "/sdcard/.reader/deepseek";
 static const char *WEREAD_DIR = "/sdcard/.reader/weread";
 static const char *WEREAD_BOOKS_DIR = "/sdcard/.reader/weread/books";
 static const char *WEREAD_COVERS_DIR = "/sdcard/.reader/weread/covers";
+static const char *ZHIHU_HOT_LIST_FILE = "/sdcard/.reader/zhihu_hot_list.json";
 
 const char *data_dir() { return APP_DATA_DIR; }
 const char *recent_books_file() { return RECENT_BOOKS_FILE; }
@@ -43,6 +44,7 @@ const char *deepseek_sessions_dir() { return DEEPSEEK_SESSIONS_DIR; }
 const char *weread_dir() { return WEREAD_DIR; }
 const char *weread_books_dir() { return WEREAD_BOOKS_DIR; }
 const char *weread_covers_dir() { return WEREAD_COVERS_DIR; }
+const char *zhihu_hot_list_file() { return ZHIHU_HOT_LIST_FILE; }
 
 void ensure_data_dir()
 {

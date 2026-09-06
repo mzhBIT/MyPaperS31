@@ -24,6 +24,10 @@ struct DrawStats {
     int64_t total_ms = 0;
 };
 
+// Reserves the small internal-DMA control structures while internal RAM is
+// still contiguous. The engine is reused by subsequent synchronous decodes.
+bool prepare();
+
 // Decodes a baseline color JPEG with the ESP32-P4 JPEG engine, scales/crops
 // it into the requested box with PPA, and pushes RGB565 pixels to M5GFX.
 // Returns false for unsupported images or resource failures so callers can

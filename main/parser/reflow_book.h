@@ -25,7 +25,7 @@ struct ReflowTocItem {
 
 class ReflowBook {
 public:
-    enum class Format { None, Epub, Mobi, Fb2, Weread };
+    enum class Format { None, Epub, Mobi, Fb2, Markdown, Weread };
 
     std::string title;
 
@@ -34,12 +34,13 @@ public:
     Format format() const { return _format; }
     bool is_mobi() const { return _format == Format::Mobi; }
     bool is_fb2() const { return _format == Format::Fb2; }
+    bool is_markdown() const { return _format == Format::Markdown; }
     bool is_weread() const { return _format == Format::Weread; }
     const char *type_name() const {
-        return is_weread() ? "weread" : (is_mobi() ? "mobi" : (is_fb2() ? "fb2" : "epub"));
+        return is_weread() ? "weread" : (is_mobi() ? "mobi" : (is_fb2() ? "fb2" : (is_markdown() ? "markdown" : "epub")));
     }
     const char *display_name() const {
-        return is_weread() ? "WeRead" : (is_mobi() ? "MOBI" : (is_fb2() ? "FB2" : "EPUB"));
+        return is_weread() ? "WeRead" : (is_mobi() ? "MOBI" : (is_fb2() ? "FB2" : (is_markdown() ? "Markdown" : "EPUB")));
     }
     const std::string &last_error() const { return _last_error; }
 
@@ -57,6 +58,7 @@ public:
 
     bool read_item_to_string(const std::string &href, std::string *out);
     bool resolve_footnote(const std::string &target, std::string *out);
+    std::string normalize_resource_href(const std::string &href) const;
     bool extract_item_to_file(const std::string &href, const std::string &out_path);
 
 private:

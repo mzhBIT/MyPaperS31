@@ -10,18 +10,18 @@ renderer, reader overlay, image decoders, bookshelf and progress UI.
 
 Supported by the first reader pipeline:
 
-- `.mobi` and `.prc` Palm database containers;
+- `.mobi`, `.prc`, `.azw`, and `.azw3` Palm database containers;
 - MOBI6/KF7 text records;
 - uncompressed, PalmDOC-compressed and HUFF/CDIC-compressed text;
 - UTF-8 and Windows-1252 source text;
 - EXTH title, author and cover metadata;
 - embedded JPEG, PNG and BMP resources;
 - generated sections, chapter navigation and persistent progress;
+- KF8 FDST main-flow selection and SKEL/FRAG reconstruction;
 - explicit rejection of DRM-protected documents.
 
-Pure KF8 reconstruction is a separate compatibility stage. A hybrid MOBI may
-use its KF7 part while the KF8 reconstruction stage is not yet enabled. KFX and
-fixed-layout Print Replica files are out of scope.
+Pure KF8/AZW3 and the KF7 side of hybrid containers are supported. KFX and
+fixed-layout Print Replica files remain out of scope.
 
 ## Architecture
 
@@ -64,4 +64,4 @@ TOC labels and resource metadata, not a second copy of the whole book.
 1. Container, metadata, DRM detection, uncompressed/PalmDOC text.
 2. Reader integration, images, cover, sections, progress and bookshelf.
 3. INDX/NCX navigation refinement.
-4. Pure KF8 skeleton/fragment reconstruction and AZW3 exposure.
+4. Pure KF8 skeleton/fragment reconstruction and AZW3 exposure. (Implemented)

@@ -1,5 +1,6 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "activities/RssReaderActivity.h"
 #include "activities/ReaderBackgroundPickerActivity.h"
 #include "activities/ReaderOverlay.h"
 #include "activities/SettingActivity.h"
@@ -90,6 +91,7 @@ static int g_page = 0;
 static std::vector<ArticleImage> g_article_images;
 static document_layout::Pages g_article_pages;
 static std::string g_status;
+static RssItem g_external_article;
 
 extern void launch_reader_font_picker();
 
@@ -965,6 +967,9 @@ static void load_feeds()
 
 class RssReaderActivity : public Activity {
 public:
+    explicit RssReaderActivity(bool external_article = false)
+        : _external_article(external_article) {}
+
     ~RssReaderActivity() override
     {
         stop_article_image_loader();
@@ -979,6 +984,15 @@ public:
     {
         _reader_overlay.set_chapters_enabled(false);
         _image_result_queue = xQueueCreate(1, sizeof(ArticleImageLoadResult *));
+        if (_external_article) {
+            g_items.clear();
+            g_items.push_back(g_external_article);
+            g_focus = 0;
+            g_scroll = 0;
+            _view = View::Items;
+            open_item();
+            return;
+        }
         load_feeds();
         draw_status("RSS", "Loading WiFi...");
         _wifi_ok = connect_wifi();
@@ -1145,6 +1159,7 @@ private:
 
     View _view = View::Feeds;
     bool _seen_show = false;
+    bool _external_article = false;
     bool _wifi_ok = false;
     bool _current_feed_is_bing = false;
     bool _confirm_wallpaper_save = false;
@@ -1172,6 +1187,10 @@ private:
         }
         if (action == ReaderOverlay::Action::OpenBackground) {
             launch_reader_background_picker();
+            return;
+        }
+        if (action == ReaderOverlay::Action::OpenBookCover) {
+            launch_reader_book_cover_picker();
             return;
         }
 
@@ -2549,6 +2568,10 @@ private:
             return true;
         }
         if (key == APP_KEY_BACK) {
+            if (_external_article) {
+                ActivityManager::instance().pop();
+                return true;
+            }
             _view = View::Items;
             redraw_list();
             return true;
@@ -2588,4 +2611,16 @@ void launch_rss_reader()
 {
     if (!ensure_wifi_configured_or_show_guide()) return;
     ActivityManager::instance().push(new RssReaderActivity());
+}
+
+void launch_rss_article(const std::string &title,
+                        const std::string &text,
+                        const std::string &source_url)
+{
+    if (title.empty() || text.empty()) return;
+    g_external_article = {};
+    g_external_article.title = title;
+    g_external_article.text = text;
+    g_external_article.link = source_url;
+    ActivityManager::instance().push(new RssReaderActivity(true));
 }

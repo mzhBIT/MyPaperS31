@@ -8,11 +8,12 @@ MyPaperP4 是一套面向自定义 **ESP32-P4 单色墨水屏设备**的阅读�
 
 ### 阅读
 
-- TXT、EPUB、FB2 与无 DRM MOBI/PRC 阅读。
+- TXT、Markdown、EPUB、FB2 与无 DRM MOBI/PRC/AZW/AZW3 阅读。
 - TXT 支持 UTF-8、UTF-16LE、GBK 和 Latin-1 回退。
 - EPUB2/EPUB3 目录、封面、正文图片和阅读进度。
 - EPUB ZIP 索引与元数据持久化缓存，加快再次打开速度。
 - MOBI6/KF7 支持无压缩、PalmDOC 与 HUFF/CDIC 文本，按记录流式读取并缓存解析索引。
+- AZW3/KF8 支持 FDST 主内容流与 SKEL/FRAG 章节重建；不支持 KFX、Print Replica 和 DRM 内容。
 - 书架按最近打开顺序展示书籍，并支持 EPUB/MOBI/FB2 封面缩略图缓存。
 - 共用分页与排版框架：
   - 字号与行距
@@ -134,7 +135,7 @@ idf.py -p /dev/ttyUSB0 flash monitor
 建议使用 FAT32，并在卡根目录准备以下结构。应用会在需要时创建大部分目录：
 
 ```text
-/books/                 TXT、EPUB、MOBI、PRC、FB2
+/books/                 TXT、Markdown、EPUB、MOBI、PRC、AZW、AZW3、FB2
 /images/                JPG、JPEG、PNG、BMP
 /fonts/                 TTF、OTF、EDCBook BIN 字体
 /music/                 MP3、FLAC、WAV、M4A、AAC、OGG、OPUS
@@ -180,7 +181,7 @@ Bing Wallpaper|https://rsshub.app/bing
 
 | 文件类型 | 目标目录 |
 | --- | --- |
-| TXT、EPUB、MOBI、PRC、FB2 | `/sdcard/books` |
+| TXT、Markdown、EPUB、MOBI、PRC、AZW、AZW3、FB2 | `/sdcard/books` |
 | JPG、JPEG、PNG、BMP | `/sdcard/images` |
 | TTF、OTF、BIN | `/sdcard/fonts` |
 | 支持的音频格式 | `/sdcard/music` |

@@ -1,5 +1,6 @@
 #include "parser/reflow_book.h"
 #include "parser/epub_html.h"
+#include "parser/markdown_parser.h"
 #include "weread/WereadContentSource.h"
 #include "weread/WereadStore.h"
 
@@ -29,6 +30,48 @@ std::string lower_extension(const char *path)
         return static_cast<char>(std::tolower(c));
     });
     return value;
+}
+
+std::string file_stem(const std::string &path)
+{
+    size_t slash = path.find_last_of("/\\");
+    size_t first = slash == std::string::npos ? 0 : slash + 1;
+    size_t dot = path.find_last_of('.');
+    if (dot == std::string::npos || dot < first) dot = path.size();
+    return path.substr(first, dot - first);
+}
+
+bool read_regular_file(const std::string &path, std::string *out)
+{
+    if (!out) return false;
+    out->clear();
+    struct stat info = {};
+    if (stat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode) || info.st_size <= 0) return false;
+    FILE *fp = std::fopen(path.c_str(), "rb");
+    if (!fp) return false;
+    out->resize(static_cast<size_t>(info.st_size));
+    const bool ok = std::fread(&(*out)[0], 1, out->size(), fp) == out->size();
+    std::fclose(fp);
+    if (!ok) out->clear();
+    if (ok && out->size() >= 3 && (uint8_t)(*out)[0] == 0xEF &&
+        (uint8_t)(*out)[1] == 0xBB && (uint8_t)(*out)[2] == 0xBF) out->erase(0, 3);
+    return ok;
+}
+
+bool copy_regular_file(const std::string &source_path, const std::string &target_path)
+{
+    FILE *source = std::fopen(source_path.c_str(), "rb");
+    FILE *target = source ? std::fopen(target_path.c_str(), "wb") : nullptr;
+    bool ok = source && target;
+    char buffer[4096];
+    while (ok) {
+        const size_t count = std::fread(buffer, 1, sizeof(buffer), source);
+        if (count && std::fwrite(buffer, 1, count, target) != count) ok = false;
+        if (count < sizeof(buffer)) { if (std::ferror(source)) ok = false; break; }
+    }
+    if (target) std::fclose(target);
+    if (source) std::fclose(source);
+    return ok;
 }
 
 } // namespace
@@ -66,7 +109,7 @@ bool ReflowBook::open(const char *path)
         }
         return !_sections.empty();
     }
-    if (ext == ".mobi" || ext == ".prc") {
+    if (ext == ".mobi" || ext == ".prc" || ext == ".azw" || ext == ".azw3") {
         if (!_mobi.open(path)) {
             _last_error = _mobi.last_error();
             return false;
@@ -103,6 +146,27 @@ bool ReflowBook::open(const char *path)
             _sections.push_back({source.id, source.href, "application/xhtml+xml", size});
             _toc.push_back({source.title, source.href, i, 0});
         }
+        return true;
+    }
+    if (ext == ".md" || ext == ".markdown") {
+        std::string markdown;
+        if (!read_regular_file(path, &markdown)) {
+            _last_error = "Could not read Markdown file";
+            return false;
+        }
+        std::vector<EpubContentBlock> parsed;
+        std::vector<MarkdownTocItem> headings;
+        if (!markdown_parse_blocks(markdown, path, &parsed, &headings)) {
+            _last_error = "Markdown document has no readable content";
+            return false;
+        }
+        _format = Format::Markdown;
+        title = !headings.empty() ? headings.front().title : file_stem(path);
+        _sections.push_back({"markdown", _path, "text/markdown", static_cast<uint32_t>(std::min<size_t>(markdown.size(), UINT32_MAX))});
+        // Navigation currently addresses sections, not offsets inside a
+        // section. Keep one valid entry rather than listing headings that
+        // would all jump back to the first page.
+        _toc.push_back({title, _path, 0, 0});
         return true;
     }
 
@@ -149,6 +213,7 @@ bool ReflowBook::read_item_to_string(const std::string &href, std::string *out)
     if (_format == Format::Mobi) return _mobi.read_section_to_string(href, out);
     if (_format == Format::Fb2) return _fb2.read_section_to_string(href, out);
     if (_format == Format::Epub) return _epub.read_item_to_string(href, out);
+    if (_format == Format::Markdown) return read_regular_file(_path, out);
     if (_format == Format::Weread) {
         if (_weread_epub.spine_count() > 0) return _weread_epub.read_item_to_string(href, out);
         const std::string prefix = "wrchapter/";
@@ -188,11 +253,19 @@ bool ReflowBook::resolve_footnote(const std::string &target, std::string *out)
            epub_resolve_footnote(xhtml, href, target, out);
 }
 
+std::string ReflowBook::normalize_resource_href(const std::string &href) const
+{
+    return _format == Format::Mobi ? _mobi.normalize_resource_href(href) : href;
+}
+
 bool ReflowBook::extract_item_to_file(const std::string &href, const std::string &out_path)
 {
-    if (_format == Format::Mobi) return _mobi.extract_resource_to_file(href, out_path);
+    if (_format == Format::Mobi) {
+        return _mobi.extract_resource_to_file(_mobi.normalize_resource_href(href), out_path);
+    }
     if (_format == Format::Fb2) return _fb2.extract_resource_to_file(href, out_path);
     if (_format == Format::Epub) return _epub.extract_item_to_file(href, out_path);
+    if (_format == Format::Markdown) return copy_regular_file(href, out_path);
     if (_format == Format::Weread) {
         if (href == _cover_href) {
             FILE *source = std::fopen(href.c_str(), "rb");
