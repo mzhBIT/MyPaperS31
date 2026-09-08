@@ -49,6 +49,11 @@ void VirtualKeyboard::set_input_visible(bool visible)
     _input_visible = visible;
 }
 
+void VirtualKeyboard::set_submit_visible(bool visible)
+{
+    _submit_visible = visible;
+}
+
 void VirtualKeyboard::set_text(const std::string &text)
 {
     _text = utf8::truncate_bytes(text, _max_length);
@@ -156,13 +161,15 @@ void VirtualKeyboard::draw(M5GFX &display) const
         x += special_widths[i] + _layout.key_gap;
     }
 
-    int submit_width = width - _layout.submit_horizontal_padding * 2;
-    display.fillRoundRect(_layout.submit_horizontal_padding, _layout.submit_y,
-                          submit_width, _layout.submit_height, 9, TFT_BLACK);
-    system_font::draw_center(display, _submit_label, width / 2,
-                             _layout.submit_y + std::max(
-                                 0, (_layout.submit_height - system_font::line_height()) / 2),
-                             TFT_WHITE);
+    if (_submit_visible) {
+        int submit_width = width - _layout.submit_horizontal_padding * 2;
+        display.fillRoundRect(_layout.submit_horizontal_padding, _layout.submit_y,
+                              submit_width, _layout.submit_height, 9, TFT_BLACK);
+        system_font::draw_center(display, _submit_label, width / 2,
+                                 _layout.submit_y + std::max(
+                                     0, (_layout.submit_height - system_font::line_height()) / 2),
+                                 TFT_WHITE);
+    }
 }
 
 bool VirtualKeyboard::character_at(int touch_x, int touch_y,
@@ -238,7 +245,8 @@ VirtualKeyboardAction VirtualKeyboard::handle_tap(int x, int y, int display_widt
         }
     }
 
-    if (y >= _layout.submit_y && y < _layout.submit_y + _layout.submit_height &&
+    if (_submit_visible &&
+        y >= _layout.submit_y && y < _layout.submit_y + _layout.submit_height &&
         x >= _layout.submit_horizontal_padding &&
         x < display_width - _layout.submit_horizontal_padding) {
         return VirtualKeyboardAction::Submit;

@@ -40,6 +40,7 @@ public:
     void set_submit_label(const std::string &label);
     void set_language_toggle(bool enabled, const std::string &label = "CN/EN");
     void set_input_visible(bool visible);
+    void set_submit_visible(bool visible);
     void set_text(const std::string &text);
 
     const std::string &text() const;
@@ -68,6 +69,7 @@ private:
     bool _language_toggle = false;
     std::string _language_label = "CN/EN";
     bool _input_visible = true;
+    bool _submit_visible = true;
 };
 
 }  // namespace ui

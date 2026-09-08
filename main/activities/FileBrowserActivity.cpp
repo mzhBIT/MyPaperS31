@@ -2,11 +2,11 @@
 #include "activities/ActivityManager.h"
 #include "activities/MusicActivity.h"
 #include "activities/PlaceholderActivity.h"
-#include "activities/TextInputActivity.h"
 #include "activities/recent_books.h"
 #include "audio/audio_file_formats.h"
 #include "reader_font.h"
 #include "ui/SystemFont.h"
+#include "ui/TextInputOverlay.h"
 #include "ui/reader_background.h"
 #include "ui/reader_book_cover.h"
 #include <M5Unified.h>
@@ -244,6 +244,7 @@ class FileBrowserActivity : public Activity {
     bool m_confirm_delete = false;
     int m_delete_choice = 0; // 0=cancel, 1=delete
     std::string m_notice;
+    ui::TextInputOverlay m_text_input;
 
 public:
     void on_create() override {
@@ -512,9 +513,10 @@ public:
         options.submit_label = "Rename";
         options.max_bytes = 255;
         options.start_in_chinese = true;
-        launch_text_input(options, [this, old_path](const std::string &name) {
+        m_text_input.open(options, [this, old_path](const std::string &name) {
             rename_entry(old_path, name);
-        });
+            redraw_all();
+        }, [this]() { redraw_all(); });
     }
 
     void handle_action(int choice) {
@@ -649,6 +651,7 @@ public:
     }
 
     bool on_touch(const TouchEvent &event) override {
+        if (m_text_input.visible()) return m_text_input.handle_touch(event);
         if (event.type == TouchEventType::Back) {
             if (!m_notice.empty()) { m_notice.clear(); redraw_all(); }
             else if (m_action_menu) { m_action_menu = false; redraw_all(); }
@@ -731,6 +734,7 @@ public:
     }
 
     bool on_key(int key) override {
+        if (m_text_input.visible()) return m_text_input.handle_key(key);
         if (!m_notice.empty()) {
             if (key != APP_KEY_NONE) { m_notice.clear(); redraw_all(); }
             return true;

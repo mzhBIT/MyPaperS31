@@ -4,6 +4,7 @@
 
 #include <M5Unified.h>
 #include <dirent.h>
+#include <esp_log.h>
 #include <esp_random.h>
 #include <sys/stat.h>
 
@@ -15,6 +16,8 @@
 #include <unistd.h>
 
 namespace {
+
+constexpr const char *TAG = "DEEPSEEK_STORE";
 
 std::string join_path(const std::string &left, const char *right)
 {
@@ -154,6 +157,31 @@ bool remove_file_if_present(const std::string &path)
     return errno == ENOENT;
 }
 
+bool replace_file_contents(const std::string &source, const std::string &target)
+{
+    FILE *input = fopen(source.c_str(), "rb");
+    if (!input) return false;
+    FILE *output = fopen(target.c_str(), "wb");
+    if (!output) {
+        fclose(input);
+        return false;
+    }
+
+    bool ok = true;
+    char buffer[256];
+    while (ok) {
+        const size_t count = fread(buffer, 1, sizeof(buffer), input);
+        if (count != 0 && fwrite(buffer, 1, count, output) != count) ok = false;
+        if (count < sizeof(buffer)) {
+            if (ferror(input)) ok = false;
+            break;
+        }
+    }
+    ok = fclose(output) == 0 && ok;
+    ok = fclose(input) == 0 && ok;
+    return ok;
+}
+
 }  // namespace
 
 bool DeepSeekSessionStore::list(std::vector<DeepSeekSessionMeta> *sessions) const
@@ -255,13 +283,22 @@ bool DeepSeekSessionStore::append_message(DeepSeekSessionMeta *session,
                                           const std::string &content) const
 {
     if (!session || session->id.empty() || role.empty()) return false;
-    FILE *file = fopen(join_path(session_dir(session->id), "messages.jsonl").c_str(), "ab");
-    if (!file) return false;
+    const std::string message_path = join_path(session_dir(session->id), "messages.jsonl");
+    FILE *file = fopen(message_path.c_str(), "ab");
+    if (!file) {
+        ESP_LOGE(TAG, "open messages failed path=%s errno=%d (%s)",
+                 message_path.c_str(), errno, strerror(errno));
+        return false;
+    }
     std::string line = "{\"role\":\"" + json_escape(role) +
                        "\",\"content\":\"" + json_escape(content) + "\"}\n";
     bool ok = fwrite(line.data(), 1, line.size(), file) == line.size();
     ok = fclose(file) == 0 && ok;
-    if (!ok) return false;
+    if (!ok) {
+        ESP_LOGE(TAG, "write messages failed path=%s errno=%d (%s)",
+                 message_path.c_str(), errno, strerror(errno));
+        return false;
+    }
     session->updated = rtc_stamp();
     if (session->title == "New Chat" && role == "user" && !content.empty()) {
         size_t bytes = std::min<size_t>(content.size(), 48);
@@ -269,7 +306,13 @@ bool DeepSeekSessionStore::append_message(DeepSeekSessionMeta *session,
                (static_cast<unsigned char>(content[bytes]) & 0xC0) == 0x80) --bytes;
         session->title = content.substr(0, bytes);
     }
-    return save_meta(*session);
+    if (!save_meta(*session)) {
+        // The message itself is already durable. A stale title/timestamp must
+        // not prevent sending the question or append a duplicate on retry.
+        ESP_LOGW(TAG, "message saved but metadata update failed session=%s",
+                 session->id.c_str());
+    }
+    return true;
 }
 
 bool DeepSeekSessionStore::set_model(DeepSeekSessionMeta *session, DeepSeekModel model) const
@@ -294,7 +337,11 @@ bool DeepSeekSessionStore::save_meta(const DeepSeekSessionMeta &session) const
     std::string path = join_path(dir, "meta.tsv");
     std::string temp = path + ".tmp";
     FILE *file = fopen(temp.c_str(), "wb");
-    if (!file) return false;
+    if (!file) {
+        ESP_LOGE(TAG, "open metadata temp failed path=%s errno=%d (%s)",
+                 temp.c_str(), errno, strerror(errno));
+        return false;
+    }
     int written = fprintf(file, "%s\n%s\n%s\n%llu\n%llu\n%d\n",
                           field_escape(session.id).c_str(),
                           field_escape(session.title).c_str(),
@@ -304,9 +351,32 @@ bool DeepSeekSessionStore::save_meta(const DeepSeekSessionMeta &session) const
                           session.thinking ? 1 : 0);
     bool ok = written > 0 && fclose(file) == 0;
     if (!ok) {
+        ESP_LOGE(TAG, "write metadata failed path=%s errno=%d (%s)",
+                 temp.c_str(), errno, strerror(errno));
         remove(temp.c_str());
         return false;
     }
-    remove(path.c_str());
-    return rename(temp.c_str(), path.c_str()) == 0;
+    if (remove(path.c_str()) != 0 && errno != ENOENT) {
+        ESP_LOGE(TAG, "remove old metadata failed path=%s errno=%d (%s)",
+                 path.c_str(), errno, strerror(errno));
+        remove(temp.c_str());
+        return false;
+    }
+    if (rename(temp.c_str(), path.c_str()) != 0) {
+        const int replace_errno = errno;
+        // ESP-IDF/FatFS may still return EEXIST after unlinking the old
+        // directory entry. Fall back to truncating the small metadata file;
+        // the durable messages.jsonl file is unaffected either way.
+        if (replace_file_contents(temp, path)) {
+            remove(temp.c_str());
+            ESP_LOGW(TAG, "metadata rename unavailable; replaced in place session=%s errno=%d",
+                     session.id.c_str(), replace_errno);
+            return true;
+        }
+        ESP_LOGE(TAG, "replace metadata failed path=%s errno=%d (%s)",
+                 path.c_str(), replace_errno, strerror(replace_errno));
+        remove(temp.c_str());
+        return false;
+    }
+    return true;
 }

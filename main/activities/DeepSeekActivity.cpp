@@ -3,11 +3,11 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "activities/SettingActivity.h"
-#include "activities/TextInputActivity.h"
 #include "deepseek/DeepSeekClient.h"
 #include "deepseek/DeepSeekConfig.h"
 #include "deepseek/DeepSeekSessionStore.h"
 #include "ui/SystemFont.h"
+#include "ui/TextInputOverlay.h"
 #include "wifi/wifi_setting.h"
 
 #include <M5Unified.h>
@@ -159,11 +159,7 @@ public:
             _seen_show = true;
             return;
         }
-        if (!_pending_question.empty() && !_busy) {
-            std::string question = std::move(_pending_question);
-            _pending_question.clear();
-            begin_request(question);
-        } else if (_view == View::Chat) {
+        if (_view == View::Chat) {
             draw_chat(false);
         } else {
             load_sessions();
@@ -173,6 +169,12 @@ public:
 
     void loop() override
     {
+        if (!_pending_question.empty() && !_busy && !M5.Display.displayBusy()) {
+            std::string question = std::move(_pending_question);
+            _pending_question.clear();
+            begin_request(question);
+            return;
+        }
         if (!_busy || !_event_queue || M5.Display.displayBusy()) return;
         ChatTaskEvent *raw_event = nullptr;
         if (xQueueReceive(_event_queue, &raw_event, 0) != pdTRUE) return;
@@ -207,6 +209,7 @@ public:
 
     bool on_touch(const TouchEvent &event) override
     {
+        if (_text_input.visible()) return _text_input.handle_touch(event);
         if (_view == View::Sessions && _confirm_delete) {
             if (event.type == TouchEventType::Back || header_back_hit(event)) {
                 cancel_session_delete();
@@ -224,6 +227,7 @@ public:
 
     bool on_key(int key) override
     {
+        if (_text_input.visible()) return _text_input.handle_key(key);
         if (_view == View::Sessions && _confirm_delete) {
             if (key == APP_KEY_BACK) cancel_session_delete();
             else if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
@@ -280,6 +284,7 @@ private:
     int _delete_index = -1;
     std::string _delete_title;
     std::string _session_notice;
+    ui::TextInputOverlay _text_input;
 
     bool ensure_wifi()
     {
@@ -442,7 +447,7 @@ private:
         _delete_choice = 0;
         _delete_index = -1;
         _delete_title.clear();
-        _session_notice = removed ? "Conversation deleted" : "Failed to delete conversation";
+        _session_notice = removed ? std::string() : "Failed to delete conversation";
         load_sessions();
         draw_sessions(false);
     }
@@ -531,23 +536,47 @@ private:
         draw_chat(false);
     }
 
-    std::vector<std::string> transcript_lines() const
+    struct TranscriptLine {
+        std::string text;
+        bool right_aligned = false;
+
+        bool operator==(const TranscriptLine &other) const
+        {
+            return right_aligned == other.right_aligned && text == other.text;
+        }
+        bool operator!=(const TranscriptLine &other) const { return !(*this == other); }
+    };
+
+    static void append_wrapped_lines(std::vector<TranscriptLine> *output,
+                                     const std::string &text,
+                                     int max_width,
+                                     bool right_aligned)
     {
-        std::vector<std::string> lines;
+        std::vector<std::string> wrapped;
+        wrap_text(text, max_width, &wrapped);
+        for (std::string &line : wrapped) {
+            output->push_back({std::move(line), right_aligned});
+        }
+    }
+
+    std::vector<TranscriptLine> transcript_lines() const
+    {
+        std::vector<TranscriptLine> lines;
         int max_width = M5.Display.width() - PAD * 2 - 12;
         for (const auto &message : _messages) {
-            lines.push_back(message.role == "user" ? "You" : "DeepSeek");
-            wrap_text(message.content, max_width, &lines);
-            lines.emplace_back();
+            const bool user = message.role == "user";
+            lines.push_back({user ? "You" : "DeepSeek", user});
+            append_wrapped_lines(&lines, message.content, max_width, user);
+            lines.push_back({});
         }
         if (_streaming_active || !_streaming_reply.empty()) {
-            lines.push_back("DeepSeek");
-            wrap_text(_streaming_reply, max_width, &lines);
-            lines.emplace_back();
+            lines.push_back({"DeepSeek", false});
+            append_wrapped_lines(&lines, _streaming_reply, max_width, false);
+            lines.push_back({});
         }
         if (!_status.empty() && !_busy) {
-            lines.push_back("Status");
-            wrap_text(_status, max_width, &lines);
+            lines.push_back({"Status", false});
+            append_wrapped_lines(&lines, _status, max_width, false);
         }
         return lines;
     }
@@ -576,24 +605,24 @@ private:
     {
         const int start = visible_line_start();
         const int visible = visible_chat_lines();
-        std::vector<std::string> before_page;
+        std::vector<TranscriptLine> before_page;
         before_page.reserve(static_cast<size_t>(visible));
         {
-            const std::vector<std::string> before = transcript_lines();
+            const std::vector<TranscriptLine> before = transcript_lines();
             for (int row = 0; row < visible; ++row) {
                 const int index = start + row;
                 before_page.push_back(index < static_cast<int>(before.size())
-                    ? before[static_cast<size_t>(index)] : std::string());
+                    ? before[static_cast<size_t>(index)] : TranscriptLine{});
             }
         }
         _streaming_reply += chunk;
         preserve_line_start(start);
-        const std::vector<std::string> after = transcript_lines();
+        const std::vector<TranscriptLine> after = transcript_lines();
         bool visible_changed = false;
         for (int row = 0; row < visible; ++row) {
             const int index = start + row;
-            const std::string new_line = index < static_cast<int>(after.size())
-                ? after[static_cast<size_t>(index)] : std::string();
+            const TranscriptLine new_line = index < static_cast<int>(after.size())
+                ? after[static_cast<size_t>(index)] : TranscriptLine{};
             if (before_page[static_cast<size_t>(row)] != new_line) {
                 visible_changed = true;
                 break;
@@ -609,7 +638,7 @@ private:
         int width = M5.Display.width();
         int height = M5.Display.height();
         int input_y = height - CHAT_INPUT_H - CHAT_INPUT_Y_MARGIN;
-        std::vector<std::string> lines = transcript_lines();
+        std::vector<TranscriptLine> lines = transcript_lines();
         int visible = visible_chat_lines();
         int max_scroll = std::max(0, static_cast<int>(lines.size()) - visible);
         _line_scroll = std::max(0, std::min(_line_scroll, max_scroll));
@@ -640,7 +669,14 @@ private:
         int y = CHAT_BODY_Y;
         for (int index = start; index < static_cast<int>(lines.size()) &&
                                   index < start + visible; ++index) {
-            system_font::draw_left(M5.Display, lines[index], PAD + 6, y, TFT_BLACK);
+            const TranscriptLine &line = lines[static_cast<size_t>(index)];
+            if (line.right_aligned) {
+                system_font::draw_right(M5.Display, line.text,
+                                        width - PAD - 6, y, TFT_BLACK);
+            } else {
+                system_font::draw_left(M5.Display, line.text,
+                                       PAD + 6, y, TFT_BLACK);
+            }
             y += system_font::line_height();
         }
 
@@ -741,9 +777,12 @@ private:
         options.submit_label = "Send";
         options.max_bytes = 2048;
         options.start_in_chinese = true;
-        launch_text_input(options, [this](const std::string &value) {
+        _text_input.open(options, [this](const std::string &value) {
+            // Wait for the keyboard overlay refresh to finish before touching
+            // the SD-backed session store. The old full-screen input path got
+            // this serialization naturally when its activity was popped.
             _pending_question = value;
-        });
+        }, [this]() { draw_chat(false); });
     }
 
     void begin_request(const std::string &question)
