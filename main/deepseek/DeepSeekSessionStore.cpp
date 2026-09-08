@@ -8,8 +8,11 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <cerrno>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <unistd.h>
 
 namespace {
 
@@ -137,6 +140,20 @@ bool read_line(FILE *file, std::string *line)
     return !line->empty();
 }
 
+bool valid_session_id(const std::string &id)
+{
+    if (id.empty()) return false;
+    return std::all_of(id.begin(), id.end(), [](unsigned char c) {
+        return std::isalnum(c) || c == '-' || c == '_';
+    });
+}
+
+bool remove_file_if_present(const std::string &path)
+{
+    if (unlink(path.c_str()) == 0) return true;
+    return errno == ENOENT;
+}
+
 }  // namespace
 
 bool DeepSeekSessionStore::list(std::vector<DeepSeekSessionMeta> *sessions) const
@@ -220,6 +237,17 @@ bool DeepSeekSessionStore::load_messages(const std::string &id,
     }
     fclose(file);
     return true;
+}
+
+bool DeepSeekSessionStore::remove(const std::string &id) const
+{
+    if (!valid_session_id(id)) return false;
+    const std::string dir = session_dir(id);
+    bool ok = remove_file_if_present(join_path(dir, "messages.jsonl"));
+    ok = remove_file_if_present(join_path(dir, "meta.tsv.tmp")) && ok;
+    ok = remove_file_if_present(join_path(dir, "meta.tsv")) && ok;
+    if (rmdir(dir.c_str()) != 0 && errno != ENOENT) ok = false;
+    return ok;
 }
 
 bool DeepSeekSessionStore::append_message(DeepSeekSessionMeta *session,

@@ -644,8 +644,12 @@ static esp_err_t audio_radio_init_player(void)
         .io_cfg = {
             .thread = {
                 .stack = AUDIO_RADIO_HLS_TASK_STACK,
-                .prio = 20,
-                .core = 1,
+                // Keep the HTTP producer (priority 10) ahead of the HLS
+                // consumer during segment reload so the old HTTP job can
+                // finish cleanup before HLS registers the next one.
+                .prio = 9,
+                // Core 1 is reserved for the EPD update/scan pipeline.
+                .core = 0,
                 .stack_in_ext = true,
             },
             .buffer_cfg = {

@@ -16,6 +16,8 @@
 #include "storage/app_paths.h"
 #include "ui/SystemFont.h"
 #include "ui/reader_background.h"
+#include "weread/WereadApi.h"
+#include "weread/WereadHttpClient.h"
 #include "weread/WereadStore.h"
 
 #include <M5Unified.h>
@@ -28,9 +30,12 @@
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 #include <sys/stat.h>
 #include <string>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -51,6 +56,50 @@ static constexpr bool READER_PREFETCH_FRAMEBUFFER_ENABLED = false;
 static constexpr bool READER_PREFETCH_FRAMEBUFFER_ENABLED = false;
 #endif
 static ReflowBook g_epub;
+
+namespace {
+
+struct AnnotationFetchJob {
+    std::string book_id;
+    weread::Chapter chapter;
+    weread::ChapterAnnotation annotation;
+    QueueHandle_t result_queue = nullptr;
+    SemaphoreHandle_t done = nullptr;
+    bool append = false;
+};
+
+struct AnnotationFetchResult {
+    std::string target;
+    weread::ChapterAnnotation annotation;
+    std::string error;
+    bool ok = false;
+};
+
+void annotation_fetch_task(void *argument)
+{
+    std::unique_ptr<AnnotationFetchJob> job(static_cast<AnnotationFetchJob *>(argument));
+    auto *result = new AnnotationFetchResult;
+    result->target = "#wrannotation-" + job->annotation.range;
+
+    weread::HttpClient client;
+    weread::Api api(&client);
+    result->annotation = std::move(job->annotation);
+    result->ok = api.get_annotation_comments(job->book_id, job->chapter,
+                                              &result->annotation, &result->error,
+                                              8, job->append);
+    client.close();
+    if (result->ok &&
+        !weread::store::update_annotation(job->book_id, job->chapter,
+                                          result->annotation)) {
+        ESP_LOGW(TAG, "annotation cache update failed chapter=%s range=%s",
+                 job->chapter.uid.c_str(), result->annotation.range.c_str());
+    }
+    if (xQueueSend(job->result_queue, &result, 0) != pdTRUE) delete result;
+    xSemaphoreGive(job->done);
+    vTaskDelete(nullptr);
+}
+
+}  // namespace
 
 extern void launch_reader_font_picker();
 
@@ -240,10 +289,17 @@ public:
         chapters.title = overlay_chapter_title;
         chapters.depth = overlay_chapter_depth;
         chapters.activate = overlay_activate_chapter;
+        chapters.progress = overlay_progress;
+        chapters.seek = overlay_seek_progress;
         _overlay.set_chapters(chapters);
 
         _ok = g_epub.open(path);
+        _overlay.set_weread_mode(_ok && g_epub.is_weread());
         if (_ok) {
+            if (g_epub.is_weread()) {
+                _annotation_result_queue = xQueueCreate(1, sizeof(AnnotationFetchResult *));
+                _annotation_done = xSemaphoreCreateBinary();
+            }
             // JPEG engine control descriptors require contiguous internal DMA
             // memory. Reserve them before font/image caches fragment SRAM.
             p4_jpeg::prepare();
@@ -282,6 +338,7 @@ public:
 
     ~EpubReaderActivity()
     {
+        finish_annotation_worker();
         flush_progress(true);
         release_runtime_cache();
         g_epub.close();
@@ -308,6 +365,8 @@ public:
 
     void loop() override
     {
+        poll_annotation_worker();
+        start_pending_annotation_fetch();
         run_page_prefetch();
         flush_progress(false);
     }
@@ -374,7 +433,15 @@ public:
 
         if (_footnote_popup_visible) {
             if (event.type == TouchEventType::SwipeUp || event.type == TouchEventType::SwipeLeft) {
-                ++_footnote_popup_page;
+                const int pages = footnote_popup_page_count();
+                if (_footnote_popup_page + 1 < pages) {
+                    ++_footnote_popup_page;
+                } else if (_footnote_popup_annotation &&
+                           _footnote_popup_annotation_data.has_more &&
+                           !_annotation_loading) {
+                    queue_annotation_fetch(_footnote_popup_target,
+                                           _footnote_popup_annotation_data, true);
+                }
                 redraw(w, h);
             } else if (event.type == TouchEventType::SwipeDown || event.type == TouchEventType::SwipeRight) {
                 _footnote_popup_page = std::max(0, _footnote_popup_page - 1);
@@ -451,10 +518,12 @@ private:
         EpubReaderActivity *reader = static_cast<EpubReaderActivity *>(context);
         int current_spine = reader ? reader->current_spine_index() : 0;
         int count = g_epub.toc_count();
+        int current = 0;
         for (int i = 0; i < count; ++i) {
-            if (g_epub.toc_item(i).spine_index >= current_spine) return i;
+            if (g_epub.toc_item(i).spine_index > current_spine) break;
+            current = i;
         }
-        return std::max(0, count - 1);
+        return current;
     }
 
     static std::string overlay_chapter_title(void *, int index)
@@ -476,6 +545,50 @@ private:
         return reader->jump_to_spine(g_epub.toc_item(index).spine_index);
     }
 
+    static int overlay_progress(void *context)
+    {
+        EpubReaderActivity *reader = static_cast<EpubReaderActivity *>(context);
+        if (!reader) return 0;
+        const int toc_count = g_epub.toc_count();
+        if (toc_count > 1) {
+            return overlay_current_chapter(context) * 100 / (toc_count - 1);
+        }
+        const int spine_count = g_epub.spine_count();
+        if (spine_count <= 0) return 0;
+        const int within = reader->_page_count > 1
+            ? reader->_page_index * 1000 / (reader->_page_count - 1)
+            : 0;
+        return std::clamp(
+            (reader->_spine_index * 1000 + within) * 100 / (spine_count * 1000),
+            0, 100);
+    }
+
+    static bool overlay_seek_progress(void *context, int percent)
+    {
+        EpubReaderActivity *reader = static_cast<EpubReaderActivity *>(context);
+        if (!reader || !reader->_ok) return false;
+        percent = std::clamp(percent, 0, 100);
+        const int toc_count = g_epub.toc_count();
+        if (toc_count > 0) {
+            const int index = toc_count == 1 ? 0
+                : (percent * (toc_count - 1) + 50) / 100;
+            return reader->jump_to_spine(g_epub.toc_item(index).spine_index);
+        }
+
+        const int spine_count = g_epub.spine_count();
+        if (spine_count <= 0) return false;
+        const int scaled = percent * spine_count * 1000 / 100;
+        const int spine = std::min(spine_count - 1, scaled / 1000);
+        const int within = percent >= 100 ? 1000 : scaled - spine * 1000;
+        if (!reader->load_spine(spine)) return false;
+        reader->_page_index = reader->_page_count > 1
+            ? std::clamp(within * (reader->_page_count - 1) / 1000,
+                         0, reader->_page_count - 1)
+            : 0;
+        reader->mark_progress_dirty();
+        return true;
+    }
+
     void handle_overlay_action(ReaderOverlay::Action action)
     {
         if (action == ReaderOverlay::Action::None) return;
@@ -492,6 +605,7 @@ private:
             return;
         }
 
+        if (action == ReaderOverlay::Action::Close) _overlay.commit_pending_seek();
         bool apply_layout = _overlay.settings_dirty();
         _overlay.close();
         if (apply_layout && _ok) {
@@ -585,8 +699,17 @@ private:
     std::unordered_map<std::string, std::string> _footnote_cache;
     std::unordered_set<std::string> _missing_footnotes;
     bool _footnote_popup_visible = false;
+    bool _footnote_popup_annotation = false;
     std::string _footnote_popup_text;
+    std::string _footnote_popup_target;
+    weread::ChapterAnnotation _footnote_popup_annotation_data;
     int _footnote_popup_page = 0;
+    QueueHandle_t _annotation_result_queue = nullptr;
+    SemaphoreHandle_t _annotation_done = nullptr;
+    TaskHandle_t _annotation_task = nullptr;
+    std::unique_ptr<AnnotationFetchJob> _pending_annotation_job;
+    bool _annotation_loading = false;
+    bool _annotation_redraw_pending = false;
     PagePrefetch _prefetch;
 
     void release_runtime_cache()
@@ -603,7 +726,10 @@ private:
         std::unordered_map<std::string, std::string>().swap(_footnote_cache);
         std::unordered_set<std::string>().swap(_missing_footnotes);
         _footnote_popup_text.clear();
+        _footnote_popup_target.clear();
+        _footnote_popup_annotation_data = weread::ChapterAnnotation();
         _footnote_popup_visible = false;
+        _footnote_popup_annotation = false;
         _footnote_popup_page = 0;
         _page_count = 0;
         _page_index = 0;
@@ -752,6 +878,17 @@ private:
             fwrite(&section_count, 1, sizeof(section_count), fp);
             fwrite(&section_size, 1, sizeof(section_size), fp);
         }
+        const uint32_t summary_magic = READER_PROGRESS_SUMMARY_MAGIC;
+        const uint32_t summary_percent = static_cast<uint32_t>(overlay_progress(this));
+        const int toc_count = g_epub.toc_count();
+        const uint32_t summary_chapter = toc_count > 0
+            ? static_cast<uint32_t>(overlay_current_chapter(this) + 1)
+            : 0;
+        const uint32_t summary_chapter_count = static_cast<uint32_t>(std::max(0, toc_count));
+        fwrite(&summary_magic, 1, sizeof(summary_magic), fp);
+        fwrite(&summary_percent, 1, sizeof(summary_percent), fp);
+        fwrite(&summary_chapter, 1, sizeof(summary_chapter), fp);
+        fwrite(&summary_chapter_count, 1, sizeof(summary_chapter_count), fp);
         fclose(fp);
         if (g_epub.is_weread()) {
             const weread::Chapter *chapter = g_epub.weread_chapter(static_cast<int>(spine));
@@ -1702,12 +1839,171 @@ private:
         }
 
         if (!g_epub.resolve_footnote(ref.target, content)) {
-            _missing_footnotes.insert(ref.target);
+            // A WeRead comment request may be temporarily rate-limited. Do not
+            // blacklist that target for the whole reader session; a later tap
+            // should be allowed to retry.
+            if (!is_annotation_ref(ref)) _missing_footnotes.insert(ref.target);
             ESP_LOGW(TAG, "footnote target unresolved: %s", ref.target.c_str());
             return false;
         }
         _footnote_cache[ref.target] = *content;
         return true;
+    }
+
+    static bool is_annotation_ref(const document_layout::PageItem::FootnoteRef &ref)
+    {
+        return ref.target.find("#wrannotation-") != std::string::npos;
+    }
+
+    static std::string annotation_range(const std::string &target)
+    {
+        static constexpr const char *MARKER = "#wrannotation-";
+        const size_t marker = target.find(MARKER);
+        return marker == std::string::npos ? std::string()
+                                           : target.substr(marker + std::strlen(MARKER));
+    }
+
+    struct FootnotePopupLine {
+        std::string text;
+        bool separator = false;
+    };
+
+    std::vector<FootnotePopupLine> footnote_popup_lines(int text_width)
+    {
+        std::vector<FootnotePopupLine> output;
+        const std::string separator = weread::ANNOTATION_COMMENT_SEPARATOR;
+        size_t begin = 0;
+        while (begin <= _footnote_popup_text.size()) {
+            const size_t end = _footnote_popup_annotation
+                ? _footnote_popup_text.find(separator, begin)
+                : std::string::npos;
+            const std::string part = _footnote_popup_text.substr(
+                begin, end == std::string::npos ? std::string::npos : end - begin);
+            const auto wrapped = reader_text_renderer().layoutUtf8Paragraph(part, text_width, 0);
+            for (const auto &line : wrapped) output.push_back({line.text, false});
+            if (end == std::string::npos) break;
+            output.push_back({{}, true});
+            begin = end + separator.size();
+        }
+        return output;
+    }
+
+    int footnote_popup_page_count()
+    {
+        if (_footnote_popup_text.empty()) return 1;
+        auto &renderer = reader_text_renderer();
+        const int line_h = std::max(42, renderer.lineHeight());
+        const int max_box_h = M5.Display.height() * 68 / 100;
+        const int max_lines = std::max(1, (max_box_h - 94) / line_h);
+        const auto lines = footnote_popup_lines(
+            std::max(40, static_cast<int>(M5.Display.width()) - 104));
+        return std::max(1, (static_cast<int>(lines.size()) + max_lines - 1) / max_lines);
+    }
+
+    void queue_annotation_fetch(const std::string &target,
+                                const weread::ChapterAnnotation &annotation,
+                                bool append)
+    {
+        if (!weread::store::public_comments_enabled()) return;
+        if (_annotation_loading || _annotation_task || _pending_annotation_job ||
+            !_annotation_result_queue || !_annotation_done) return;
+        const auto *chapter = g_epub.weread_chapter(_spine_index);
+        if (!chapter || g_epub.weread_book_id().empty()) return;
+        auto job = std::make_unique<AnnotationFetchJob>();
+        job->book_id = g_epub.weread_book_id();
+        job->chapter = *chapter;
+        job->annotation = annotation;
+        job->result_queue = _annotation_result_queue;
+        job->done = _annotation_done;
+        job->append = append;
+        _footnote_popup_target = target;
+        _annotation_loading = true;
+        _pending_annotation_job = std::move(job);
+        ESP_LOGI(TAG, "annotation fetch queued spine=%d range=%s append=%d",
+                 _spine_index + 1, annotation.range.c_str(), append ? 1 : 0);
+    }
+
+    void start_pending_annotation_fetch()
+    {
+        if (!weread::store::public_comments_enabled()) {
+            _pending_annotation_job.reset();
+            _annotation_loading = false;
+            return;
+        }
+        if (!_pending_annotation_job || _annotation_task || M5.Display.displayBusy()) return;
+        AnnotationFetchJob *job = _pending_annotation_job.release();
+        const BaseType_t created = xTaskCreatePinnedToCore(
+            annotation_fetch_task, "weread_comment", 8192, job, 4,
+            &_annotation_task, 0);
+        if (created != pdPASS) {
+            delete job;
+            _annotation_loading = false;
+            _footnote_popup_text = "Unable to start the comment loader.";
+            _annotation_redraw_pending = true;
+        } else {
+            ESP_LOGI(TAG, "annotation fetch started core=0");
+        }
+    }
+
+    void poll_annotation_worker()
+    {
+        AnnotationFetchResult *result = nullptr;
+        if (_annotation_result_queue &&
+            xQueueReceive(_annotation_result_queue, &result, 0) == pdTRUE) {
+            xSemaphoreTake(_annotation_done, portMAX_DELAY);
+            _annotation_task = nullptr;
+            _annotation_loading = false;
+            if (result) {
+                const bool current = _footnote_popup_visible &&
+                    annotation_range(_footnote_popup_target) == result->annotation.range;
+                if (result->ok) {
+                    _footnote_cache[_footnote_popup_target] = result->annotation.popup_text;
+                    if (current) {
+                        _footnote_popup_annotation_data = result->annotation;
+                        _footnote_popup_text = result->annotation.popup_text;
+                        _footnote_popup_page = std::min(
+                            _footnote_popup_page, footnote_popup_page_count() - 1);
+                        _annotation_redraw_pending = true;
+                    }
+                    ESP_LOGI(TAG,
+                             "annotation fetch ready range=%s loaded=%d total=%d more=%d",
+                             result->annotation.range.c_str(),
+                             result->annotation.comment_count,
+                             result->annotation.total_count,
+                             result->annotation.has_more ? 1 : 0);
+                } else if (current) {
+                    _footnote_popup_text = "Comments are temporarily unavailable.\n\n" +
+                                           result->error;
+                    _annotation_redraw_pending = true;
+                    ESP_LOGW(TAG, "annotation fetch failed range=%s error=%s",
+                             result->annotation.range.c_str(), result->error.c_str());
+                }
+                delete result;
+            }
+        }
+        if (_annotation_redraw_pending && !M5.Display.displayBusy()) {
+            _annotation_redraw_pending = false;
+            redraw(M5.Display.width(), M5.Display.height());
+        }
+    }
+
+    void finish_annotation_worker()
+    {
+        _pending_annotation_job.reset();
+        if (_annotation_task && _annotation_done) {
+            xSemaphoreTake(_annotation_done, portMAX_DELAY);
+            _annotation_task = nullptr;
+        }
+        AnnotationFetchResult *result = nullptr;
+        if (_annotation_result_queue) {
+            while (xQueueReceive(_annotation_result_queue, &result, 0) == pdTRUE) delete result;
+            vQueueDelete(_annotation_result_queue);
+            _annotation_result_queue = nullptr;
+        }
+        if (_annotation_done) {
+            vSemaphoreDelete(_annotation_done);
+            _annotation_done = nullptr;
+        }
     }
 
     bool footnote_at(int touch_x, int touch_y,
@@ -1724,6 +2020,8 @@ private:
                     text_x = content_x() + std::max(0, (content_width() - renderer.measureUtf8(item.text)) / 2);
                 }
                 for (const auto &ref : item.footnotes) {
+                    if (is_annotation_ref(ref) &&
+                        !weread::store::public_comments_enabled()) continue;
                     if (ref.byte_start >= ref.byte_end || ref.byte_end > item.text.size()) continue;
                     const int ref_x = text_x + renderer.measureUtf8(item.text.substr(0, ref.byte_start));
                     const int ref_w = std::max(12, renderer.measureUtf8(
@@ -1742,8 +2040,28 @@ private:
 
     void open_footnote(const document_layout::PageItem::FootnoteRef &ref)
     {
-        if (!resolve_footnote_content(ref, &_footnote_popup_text)) {
-            _footnote_popup_text = "Footnote content is unavailable.";
+        _footnote_popup_annotation = is_annotation_ref(ref);
+        _footnote_popup_target = ref.target;
+        if (_footnote_popup_annotation) {
+            const auto *chapter = g_epub.weread_chapter(_spine_index);
+            const std::string range = annotation_range(ref.target);
+            weread::ChapterAnnotation annotation;
+            const bool cached = chapter && !range.empty() &&
+                weread::store::load_annotation(g_epub.weread_book_id(), *chapter,
+                                               range, &annotation);
+            if (cached && annotation.comments_loaded && !annotation.popup_text.empty()) {
+                _footnote_popup_annotation_data = annotation;
+                _footnote_popup_text = annotation.popup_text;
+            } else {
+                annotation.range = range;
+                _footnote_popup_annotation_data = annotation;
+                _footnote_popup_text = "Loading comments...";
+                queue_annotation_fetch(ref.target, annotation, false);
+            }
+        } else if (!resolve_footnote_content(ref, &_footnote_popup_text)) {
+            _footnote_popup_text = _footnote_popup_annotation
+                ? "Comments for this underline are unavailable."
+                : "Footnote content is unavailable.";
         }
         _footnote_popup_page = 0;
         _footnote_popup_visible = true;
@@ -1758,7 +2076,7 @@ private:
         const int box_w = std::max(80, w - box_x * 2);
         const int text_x = box_x + 28;
         const int text_w = std::max(40, box_w - 56);
-        auto lines = renderer.layoutUtf8Paragraph(_footnote_popup_text, text_w, 0);
+        auto lines = footnote_popup_lines(text_w);
         const int max_box_h = h * 68 / 100;
         const int max_lines = std::max(1, (max_box_h - 94) / line_h);
         const int page_count = std::max(1, (static_cast<int>(lines.size()) + max_lines - 1) / max_lines);
@@ -1772,13 +2090,15 @@ private:
         gfx.fillRect(box_x, box_y, box_w, box_h, TFT_WHITE);
         gfx.drawRect(box_x, box_y, box_w, box_h, TFT_BLACK);
         gfx.drawFastHLine(box_x, box_y + 58, box_w, TFT_BLACK);
-        std::string title = "Footnote";
+        std::string title = _footnote_popup_annotation ? "Underline comments" : "Footnote";
+        if (_footnote_popup_annotation && _annotation_loading) title += " · Loading";
         if (page_count > 1) {
             title += " " + std::to_string(_footnote_popup_page + 1) + "/" + std::to_string(page_count);
         }
         system_font::draw_left(gfx, title.c_str(), text_x, box_y + 10, TFT_BLACK);
         std::string visible_text;
         for (size_t i = first_line; i < last_line; ++i) {
+            if (lines[i].separator) continue;
             visible_text += lines[i].text;
             visible_text.push_back('\n');
         }
@@ -1787,7 +2107,11 @@ private:
         for (size_t i = first_line; i < last_line; ++i) {
             const auto &line = lines[i];
             if (y + line_h > box_y + box_h) break;
-            renderer.drawUtf8Line(gfx, line.text, text_x, y, TFT_BLACK, 0);
+            if (line.separator) {
+                gfx.drawFastHLine(text_x, y + line_h / 2, text_w, TFT_DARKGRAY);
+            } else {
+                renderer.drawUtf8Line(gfx, line.text, text_x, y, TFT_BLACK, 0);
+            }
             y += line_h;
         }
     }
@@ -1884,6 +2208,8 @@ private:
         int line_h = reader_text_renderer().lineHeight();
         if (line_h <= 0) line_h = 48;
         const int underline_type = reader_style_get().underline_type;
+        const bool public_comments = !g_epub.is_weread() ||
+                                     weread::store::public_comments_enabled();
         auto draw_underline = [&](int ux, int uy, int uw) {
             if (underline_type <= 0 || uw <= 0) return;
             int underline_y = uy + std::max(1, line_h - 5);
@@ -1922,21 +2248,59 @@ private:
                         int text_width = reader_text_renderer().measureUtf8(item.text);
                         text_x = x + std::max(0, (content_width() - text_width) / 2);
                     }
-                    int underline_w = item.justify
-                        ? item.width
-                        : reader_text_renderer().measureUtf8(item.text);
                     reader_text_renderer().drawStyledUtf8Line(
                         gfx, item.text, item.styles, text_x, y, TFT_BLACK,
                         item.justify ? item.width : 0);
-                    draw_underline(text_x, y, underline_w);
+                    // Server annotations own their exact text range. The
+                    // optional Beauty underline is drawn only in the gaps, so
+                    // the two systems never stack on the same glyphs.
+                    if (underline_type > 0) {
+                        std::vector<std::pair<size_t, size_t>> excluded;
+                        excluded.reserve(item.footnotes.size());
+                        for (const auto &ref : item.footnotes) {
+                            if (is_annotation_ref(ref) && !public_comments) continue;
+                            if (ref.byte_start < ref.byte_end && ref.byte_end <= item.text.size()) {
+                                excluded.emplace_back(ref.byte_start, ref.byte_end);
+                            }
+                        }
+                        std::sort(excluded.begin(), excluded.end());
+                        size_t cursor = 0;
+                        for (const auto &[start, end] : excluded) {
+                            if (start > cursor) {
+                                const int gap_x = text_x + reader_text_renderer().measureUtf8(
+                                    item.text.substr(0, cursor));
+                                const int gap_w = reader_text_renderer().measureUtf8(
+                                    item.text.substr(cursor, start - cursor));
+                                draw_underline(gap_x, y, gap_w);
+                            }
+                            cursor = std::max(cursor, end);
+                        }
+                        if (cursor < item.text.size()) {
+                            const int gap_x = text_x + reader_text_renderer().measureUtf8(
+                                item.text.substr(0, cursor));
+                            draw_underline(gap_x, y, reader_text_renderer().measureUtf8(
+                                item.text.substr(cursor)));
+                        }
+                    }
                     for (const auto &ref : item.footnotes) {
+                        if (is_annotation_ref(ref) && !public_comments) continue;
                         if (ref.byte_start >= ref.byte_end || ref.byte_end > item.text.size()) continue;
                         const int ref_x = text_x + reader_text_renderer().measureUtf8(
                             item.text.substr(0, ref.byte_start));
                         const int ref_w = reader_text_renderer().measureUtf8(
                             item.text.substr(ref.byte_start, ref.byte_end - ref.byte_start));
                         if (ref_w > 0) {
-                            gfx.drawFastHLine(ref_x, y + std::max(1, line_h - 3), ref_w, TFT_BLACK);
+                            const int marker_y = y + std::max(1, line_h - 3);
+                            if (is_annotation_ref(ref)) {
+                                constexpr int dash = 7;
+                                constexpr int gap = 5;
+                                for (int dx = 0; dx < ref_w; dx += dash + gap) {
+                                    gfx.drawFastHLine(ref_x + dx, marker_y,
+                                                     std::min(dash, ref_w - dx), TFT_BLACK);
+                                }
+                            } else {
+                                gfx.drawFastHLine(ref_x, marker_y, ref_w, TFT_BLACK);
+                            }
                         }
                     }
                 }

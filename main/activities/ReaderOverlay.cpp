@@ -5,6 +5,7 @@
 #include "ui/SystemFont.h"
 #include "ui/reader_background.h"
 #include "ui/reader_book_cover.h"
+#include "weread/WereadStore.h"
 
 #include <M5Unified.h>
 #include <algorithm>
@@ -72,11 +73,29 @@ void setting_text(int index, std::string *name, std::string *value)
     }
 }
 
-void beauty_text(int index, std::string *name, std::string *value)
+void beauty_text(int index, bool weread_mode, std::string *name, std::string *value)
 {
     ReaderStyle style = reader_style_get();
     char buf[64] = {};
-    switch (index) {
+    if (weread_mode && index == 5) {
+        *name = "Public comments";
+        *value = weread::store::public_comments_enabled() ? "On" : "Off";
+        return;
+    }
+    static constexpr int kBeautyOrder[] = {
+        4, // Refresh
+        6, // Full refresh
+        5, // Show images
+        0, // Underline
+        1, // Hide header
+        2, // Background
+        3, // Book cover
+    };
+    const int ordered_index = weread_mode && index > 5 ? index - 1 : index;
+    const int base_index = ordered_index >= 0 && ordered_index < 7
+        ? kBeautyOrder[ordered_index]
+        : -1;
+    switch (base_index) {
     case 0:
         *name = "Underline";
         *value = reader_style_underline_name(style.underline_type);
@@ -130,6 +149,27 @@ void ReaderOverlay::set_chapters_enabled(bool enabled)
     if (!m_chapters_enabled) m_tab = Tab::Settings;
 }
 
+void ReaderOverlay::set_weread_mode(bool enabled)
+{
+    m_weread_mode = enabled;
+    m_setting_focus = std::max(0, std::min(active_setting_count() - 1, m_setting_focus));
+}
+
+int ReaderOverlay::beauty_base_index(int index) const
+{
+    static constexpr int kBeautyOrder[] = {4, 6, 5, 0, 1, 2, 3};
+    if (m_weread_mode && index == 5) return -1;
+    const int ordered_index = m_weread_mode && index > 5 ? index - 1 : index;
+    return ordered_index >= 0 && ordered_index < 7
+        ? kBeautyOrder[ordered_index]
+        : -1;
+}
+
+bool ReaderOverlay::is_public_comments_row(int index) const
+{
+    return m_weread_mode && index == 5;
+}
+
 ReaderOverlay::Geometry ReaderOverlay::geometry() const
 {
     int screen_w = M5.Display.width();
@@ -155,7 +195,7 @@ int ReaderOverlay::chapter_count() const
 int ReaderOverlay::visible_chapter_rows() const
 {
     Geometry g = geometry();
-    return std::max(1, (g.body_h - CHAPTER_INDEX_H) / 66);
+    return std::max(1, (g.body_h - CHAPTER_INDEX_H - PROGRESS_AREA_H) / 66);
 }
 
 void ReaderOverlay::clamp_chapter_scroll()
@@ -184,7 +224,13 @@ void ReaderOverlay::select_tab(Tab tab)
         m_setting_focus = std::max(0, std::min(active_setting_count() - 1, m_setting_focus));
     }
     if (m_tab != Tab::Chapters) return;
-    if (m_chapters.current) {
+    if (m_pending_progress >= 0 && chapter_count() > 0) {
+        const int count = chapter_count();
+        m_chapter_focus = count == 1 ? 0
+            : std::clamp((m_pending_progress * (count - 1) + 50) / 100,
+                         0, count - 1);
+        m_chapter_scroll = std::max(0, m_chapter_focus - visible_chapter_rows() / 2);
+    } else if (m_chapters.current) {
         m_chapter_focus = m_chapters.current(m_chapters.context);
         m_chapter_scroll = std::max(0, m_chapter_focus - visible_chapter_rows() / 2);
     }
@@ -193,6 +239,7 @@ void ReaderOverlay::select_tab(Tab tab)
 
 void ReaderOverlay::open(Tab tab)
 {
+    if (!m_visible) m_pending_progress = -1;
     m_visible = true;
     select_tab(tab);
 }
@@ -200,6 +247,15 @@ void ReaderOverlay::open(Tab tab)
 void ReaderOverlay::close()
 {
     m_visible = false;
+    m_pending_progress = -1;
+}
+
+bool ReaderOverlay::commit_pending_seek()
+{
+    if (m_pending_progress < 0 || !m_chapters.seek) return false;
+    const int percent = m_pending_progress;
+    m_pending_progress = -1;
+    return m_chapters.seek(m_chapters.context, percent);
 }
 
 void ReaderOverlay::adjust_setting(int delta)
@@ -230,7 +286,14 @@ void ReaderOverlay::adjust_setting(int delta)
             return;
         }
     } else if (m_tab == Tab::Beauty) {
-        switch (m_setting_focus) {
+        if (is_public_comments_row(m_setting_focus)) {
+            const bool enabled = !weread::store::public_comments_enabled();
+            if (weread::store::set_public_comments_enabled(enabled)) {
+                m_settings_dirty = true;
+            }
+            return;
+        }
+        switch (beauty_base_index(m_setting_focus)) {
         case 0:
             style.underline_type = reader_style_next_underline_type(style.underline_type, delta);
             break;
@@ -263,7 +326,7 @@ void ReaderOverlay::adjust_setting(int delta)
 
 int ReaderOverlay::active_setting_count() const
 {
-    return m_tab == Tab::Beauty ? BEAUTY_COUNT : SETTING_COUNT;
+    return m_tab == Tab::Beauty ? BEAUTY_COUNT + (m_weread_mode ? 1 : 0) : SETTING_COUNT;
 }
 
 void ReaderOverlay::move_setting_focus(int delta)
@@ -291,13 +354,16 @@ int ReaderOverlay::hit_setting(int x, int y, int *direction) const
     int cell_x = inner_x;
     int cell_w = inner_w;
     if (index < 0 || index >= count || x < cell_x || x >= cell_x + cell_w) return -1;
+    const int beauty_index = m_tab == Tab::Beauty ? beauty_base_index(index) : -1;
     bool navigation_row = (m_tab == Tab::Settings && index == 0) ||
-                          (m_tab == Tab::Beauty && (index == 2 || index == 3));
+                          (m_tab == Tab::Beauty && (beauty_index == 2 || beauty_index == 3));
     bool has_controls = !navigation_row;
     if (has_controls && direction) {
         int plus_x = cell_x + cell_w - STEP_BOX_W;
         int minus_x = plus_x - STEP_BOX_GAP - VALUE_W - STEP_BOX_GAP - STEP_BOX_W;
-        bool toggle = m_tab == Tab::Beauty && (index <= 1 || index == 4 || index == 5);
+        bool toggle = m_tab == Tab::Beauty &&
+                      (is_public_comments_row(index) || beauty_index <= 1 ||
+                       beauty_index == 4 || beauty_index == 5);
         if (toggle && x >= minus_x && x < plus_x + STEP_BOX_W) {
             *direction = 1;
         } else if (x >= minus_x && x < minus_x + STEP_BOX_W) *direction = -1;
@@ -310,17 +376,32 @@ int ReaderOverlay::hit_chapter(int y) const
 {
     Geometry g = geometry();
     int list_y = g.body_y + CHAPTER_INDEX_H;
-    int list_h = g.body_h - CHAPTER_INDEX_H;
-    if (y < list_y || y >= g.tab_y) return -1;
+    int list_h = std::max(1, g.body_h - CHAPTER_INDEX_H - PROGRESS_AREA_H);
+    if (y < list_y || y >= list_y + list_h) return -1;
     int index = m_chapter_scroll + (y - list_y) * visible_chapter_rows() / list_h;
     return index >= 0 && index < chapter_count() ? index : -1;
+}
+
+int ReaderOverlay::hit_progress(int x, int y) const
+{
+    if (!m_chapters.seek) return -1;
+    Geometry g = geometry();
+    const int area_y = g.tab_y - PROGRESS_AREA_H;
+    if (y < area_y || y >= g.tab_y) return -1;
+    const int bar_x = g.x + PANEL_PAD + 24;
+    const int bar_w = std::max(1, g.w - (PANEL_PAD + 24) * 2);
+    return std::clamp((x - bar_x) * 100 / bar_w, 0, 100);
 }
 
 ReaderOverlay::Action ReaderOverlay::activate_setting()
 {
     if (m_tab == Tab::Settings && m_setting_focus == 0) return Action::OpenFont;
-    if (m_tab == Tab::Beauty && m_setting_focus == 2) return Action::OpenBackground;
-    if (m_tab == Tab::Beauty && m_setting_focus == 3) return Action::OpenBookCover;
+    if (m_tab == Tab::Beauty && beauty_base_index(m_setting_focus) == 2) {
+        return Action::OpenBackground;
+    }
+    if (m_tab == Tab::Beauty && beauty_base_index(m_setting_focus) == 3) {
+        return Action::OpenBookCover;
+    }
     adjust_setting(1);
     redraw();
     return Action::None;
@@ -330,6 +411,7 @@ ReaderOverlay::Action ReaderOverlay::activate_chapter()
 {
     if (!m_chapters.activate || chapter_count() <= 0) return Action::None;
     if (m_chapters.activate(m_chapters.context, m_chapter_focus)) {
+        m_pending_progress = -1;
         m_visible = false;
         return Action::ChapterOpened;
     }
@@ -409,13 +491,29 @@ ReaderOverlay::Action ReaderOverlay::on_touch(const TouchEvent &event)
         if (index < 0) return Action::None;
         m_setting_focus = index;
         if (m_tab == Tab::Settings && index == 0) return Action::OpenFont;
-        if (m_tab == Tab::Beauty && index == 2) return Action::OpenBackground;
-        if (m_tab == Tab::Beauty && index == 3) return Action::OpenBookCover;
+        if (m_tab == Tab::Beauty && beauty_base_index(index) == 2) {
+            return Action::OpenBackground;
+        }
+        if (m_tab == Tab::Beauty && beauty_base_index(index) == 3) {
+            return Action::OpenBookCover;
+        }
         if (direction != 0) adjust_setting(direction);
         redraw();
         return Action::None;
     }
 
+    const int percent = hit_progress(event.x, event.y);
+    if (percent >= 0) {
+        m_pending_progress = percent;
+        const int count = chapter_count();
+        if (count > 0) {
+            m_chapter_focus = count == 1 ? 0
+                : std::clamp((percent * (count - 1) + 50) / 100, 0, count - 1);
+            clamp_chapter_scroll();
+        }
+        redraw();
+        return Action::None;
+    }
     int index = hit_chapter(event.y);
     if (index < 0) return Action::None;
     m_chapter_focus = index;
@@ -442,13 +540,14 @@ void ReaderOverlay::draw_settings(const Geometry &g)
 
         std::string name;
         std::string value;
-        if (m_tab == Tab::Beauty) beauty_text(index, &name, &value);
+        if (m_tab == Tab::Beauty) beauty_text(index, m_weread_mode, &name, &value);
         else setting_text(index, &name, &value);
         int text_y = row_y0 + std::max(1, (row_h - system_font::line_height()) / 2);
         system_font::draw_left(M5.Display, name, x + 12, text_y, fg);
 
+        const int beauty_index = m_tab == Tab::Beauty ? beauty_base_index(index) : -1;
         if ((m_tab == Tab::Settings && index == 0) ||
-            (m_tab == Tab::Beauty && (index == 2 || index == 3))) {
+            (m_tab == Tab::Beauty && (beauty_index == 2 || beauty_index == 3))) {
             int max_value_w = std::max(40, w - system_font::measure(name) - 70);
             value = system_font::ellipsize(value, max_value_w);
             system_font::draw_right(M5.Display, value + "  >", x + w - 12, text_y, fg);
@@ -460,7 +559,8 @@ void ReaderOverlay::draw_settings(const Geometry &g)
             int box_h = std::max(28, row_h - 12);
             int control_text_y = box_y + std::max(0, (box_h - system_font::line_height()) / 2);
             bool toggle = m_tab == Tab::Beauty &&
-                          (index <= 1 || index == 4 || index == 5);
+                          (is_public_comments_row(index) || beauty_index <= 1 ||
+                           beauty_index == 4 || beauty_index == 5);
             if (toggle) {
                 int toggle_w = plus_x + STEP_BOX_W - minus_x;
                 M5.Display.drawRoundRect(minus_x, box_y, toggle_w, box_h, 4, fg);
@@ -486,23 +586,18 @@ void ReaderOverlay::draw_beauty(const Geometry &g)
 void ReaderOverlay::draw_chapters(const Geometry &g)
 {
     int count = chapter_count();
-    if (count <= 0) {
-        system_font::draw_center(M5.Display, "No chapter directory", g.x + g.w / 2,
-                                 g.body_y + g.body_h / 2 - system_font::line_height() / 2);
-        return;
-    }
-
     clamp_chapter_scroll();
     int rows = visible_chapter_rows();
     int list_y = g.body_y + CHAPTER_INDEX_H;
-    int list_h = g.body_h - CHAPTER_INDEX_H;
+    int list_h = std::max(1, g.body_h - CHAPTER_INDEX_H - PROGRESS_AREA_H);
     char position[40] = {};
-    snprintf(position, sizeof(position), "Chapter  %d / %d", m_chapter_focus + 1, count);
+    if (count > 0) snprintf(position, sizeof(position), "Chapter  %d / %d", m_chapter_focus + 1, count);
+    else snprintf(position, sizeof(position), "No chapter directory");
     int index_text_y = g.body_y + std::max(1, (CHAPTER_INDEX_H - system_font::line_height()) / 2);
     system_font::draw_center(M5.Display, position, g.x + g.w / 2, index_text_y, TFT_BLACK);
     M5.Display.drawFastHLine(g.x + PANEL_PAD, list_y, g.w - PANEL_PAD * 2, TFT_BLACK);
 
-    for (int i = 0; i < rows; ++i) {
+    for (int i = 0; count > 0 && i < rows; ++i) {
         int index = m_chapter_scroll + i;
         if (index >= count) break;
         int row_y0 = list_y + i * list_h / rows;
@@ -523,6 +618,28 @@ void ReaderOverlay::draw_chapters(const Geometry &g)
         system_font::draw_left(M5.Display, title, text_x, text_y, fg);
     }
 
+    const int progress_y = g.tab_y - PROGRESS_AREA_H;
+    M5.Display.drawFastHLine(g.x + PANEL_PAD, progress_y,
+                             g.w - PANEL_PAD * 2, TFT_BLACK);
+    const int percent = m_pending_progress >= 0
+        ? m_pending_progress
+        : std::clamp(m_chapters.progress ? m_chapters.progress(m_chapters.context) : 0,
+                     0, 100);
+    char progress_label[32] = {};
+    snprintf(progress_label, sizeof(progress_label), "Progress  %d%%", percent);
+    system_font::draw_center(M5.Display, progress_label, g.x + g.w / 2,
+                             progress_y + 10, TFT_BLACK);
+    const int bar_x = g.x + PANEL_PAD + 24;
+    const int bar_w = std::max(1, g.w - (PANEL_PAD + 24) * 2);
+    const int bar_y = progress_y + 76;
+    M5.Display.drawFastHLine(bar_x, bar_y, bar_w, TFT_DARKGRAY);
+    M5.Display.drawFastHLine(bar_x, bar_y + 1, bar_w, TFT_DARKGRAY);
+    const int filled = bar_w * percent / 100;
+    if (filled > 0) {
+        M5.Display.fillRect(bar_x, bar_y - 1, filled, 4, TFT_BLACK);
+    }
+    const int knob_x = bar_x + std::min(bar_w - 1, filled);
+    M5.Display.fillCircle(knob_x, bar_y, 7, TFT_BLACK);
 }
 
 void ReaderOverlay::draw_tabs(const Geometry &g)

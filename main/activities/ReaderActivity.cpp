@@ -161,6 +161,11 @@ class ReaderActivity : public Activity {
     int m_non_quality_refresh_count = 0;
 public:
     ReaderActivity(const char *path) {
+        ReaderOverlayChapters chapters;
+        chapters.context = this;
+        chapters.progress = overlay_progress;
+        chapters.seek = overlay_seek_progress;
+        m_overlay.set_chapters(chapters);
         if (g_book.open(path)) recent_book_save(path, "txt", g_book.title.c_str());
         g_history.clear();
         g_offset = g_book.load_progress(&g_history);
@@ -347,6 +352,24 @@ public:
     }
 
 private:
+    static int overlay_progress(void *)
+    {
+        const uint32_t size = g_book.file_size();
+        if (size == 0) return 0;
+        return std::clamp(static_cast<int>(
+            (static_cast<uint64_t>(g_page.start_offset) * 100 + size / 2) / size),
+            0, 100);
+    }
+
+    static bool overlay_seek_progress(void *, int percent)
+    {
+        percent = std::clamp(percent, 0, 100);
+        g_history.clear();
+        g_offset = g_book.seek_percent(static_cast<uint8_t>(percent));
+        g_page = g_book.read_page(g_offset);
+        return true;
+    }
+
     epd_mode_t select_page_refresh_mode()
     {
         ReaderStyle style = reader_style_get();
@@ -394,6 +417,7 @@ private:
             return;
         }
 
+        if (action == ReaderOverlay::Action::Close) m_overlay.commit_pending_seek();
         bool apply_layout = m_overlay.settings_dirty();
         m_overlay.close();
         if (apply_layout) {

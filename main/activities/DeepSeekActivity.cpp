@@ -8,6 +8,7 @@
 #include "deepseek/DeepSeekConfig.h"
 #include "deepseek/DeepSeekSessionStore.h"
 #include "ui/SystemFont.h"
+#include "wifi/wifi_setting.h"
 
 #include <M5Unified.h>
 #include <esp_heap_caps.h>
@@ -86,26 +87,42 @@ void wrap_text(const std::string &text, int max_width, std::vector<std::string> 
     if (!line.empty() || text.empty()) lines->push_back(line);
 }
 
+struct ChatTaskEvent {
+    bool complete = false;
+    std::string chunk;
+    DeepSeekClientResult result;
+};
+
 struct ChatTaskJob {
     DeepSeekConfig config;
     DeepSeekModel model = DeepSeekModel::Flash;
     bool thinking = false;
     std::vector<DeepSeekMessage> messages;
-    QueueHandle_t result_queue = nullptr;
+    QueueHandle_t event_queue = nullptr;
     const volatile bool *cancel_requested = nullptr;
     bool external_stack = false;
 };
+
+bool post_stream_chunk(void *context, const std::string &chunk)
+{
+    auto *job = static_cast<ChatTaskJob *>(context);
+    auto *event = new ChatTaskEvent;
+    event->chunk = chunk;
+    if (xQueueSend(job->event_queue, &event, portMAX_DELAY) == pdTRUE) return true;
+    delete event;
+    return false;
+}
 
 void chat_task(void *argument)
 {
     std::unique_ptr<ChatTaskJob> job(static_cast<ChatTaskJob *>(argument));
     const bool external_stack = job->external_stack;
-    auto *result = new DeepSeekClientResult(
-        DeepSeekClient::chat(job->config, job->model, job->thinking, job->messages,
-                             job->cancel_requested));
-    if (xQueueSend(job->result_queue, &result, pdMS_TO_TICKS(100)) != pdTRUE) {
-        delete result;
-    }
+    auto *event = new ChatTaskEvent;
+    event->complete = true;
+    event->result = DeepSeekClient::chat(
+        job->config, job->model, job->thinking, job->messages,
+        job->cancel_requested, post_stream_chunk, job.get());
+    if (xQueueSend(job->event_queue, &event, portMAX_DELAY) != pdTRUE) delete event;
     if (external_stack) {
         vTaskDeleteWithCaps(nullptr);
     } else {
@@ -117,14 +134,23 @@ class DeepSeekActivity final : public Activity {
 public:
     ~DeepSeekActivity() override
     {
-        if (_result_queue) vQueueDelete(_result_queue);
+        release_wifi();
+        if (_event_queue) {
+            ChatTaskEvent *event = nullptr;
+            while (xQueueReceive(_event_queue, &event, 0) == pdTRUE) delete event;
+            vQueueDelete(_event_queue);
+        }
     }
 
     void on_create() override
     {
-        _result_queue = xQueueCreate(1, sizeof(DeepSeekClientResult *));
+        _event_queue = xQueueCreate(2, sizeof(ChatTaskEvent *));
         load_sessions();
         draw_sessions(true);
+        M5.Display.waitDisplay();
+        if (!ensure_wifi()) {
+            ESP_LOGW(TAG, "Wi-Fi unavailable on DeepSeek entry");
+        }
     }
 
     void on_show() override
@@ -147,32 +173,47 @@ public:
 
     void loop() override
     {
-        if (!_busy || !_result_queue) return;
-        DeepSeekClientResult *result = nullptr;
-        if (xQueueReceive(_result_queue, &result, 0) != pdTRUE) return;
+        if (!_busy || !_event_queue || M5.Display.displayBusy()) return;
+        ChatTaskEvent *raw_event = nullptr;
+        if (xQueueReceive(_event_queue, &raw_event, 0) != pdTRUE) return;
+        std::unique_ptr<ChatTaskEvent> event(raw_event);
+        if (!event->complete) {
+            if (!_exit_when_done) append_stream_chunk(event->chunk);
+            return;
+        }
         _busy = false;
         _task = nullptr;
-        std::unique_ptr<DeepSeekClientResult> owned(result);
         if (_exit_when_done) {
             ActivityManager::instance().pop();
             return;
         }
-        if (result->success) {
-            if (_store.append_message(&_session, "assistant", result->content)) {
-                _messages.push_back({"assistant", result->content});
+        const int preserved_start = visible_line_start();
+        if (event->result.success) {
+            if (_store.append_message(&_session, "assistant", event->result.content)) {
+                _messages.push_back({"assistant", event->result.content});
+                _streaming_reply.clear();
+                _streaming_active = false;
                 _status.clear();
-                _line_scroll = 0;
             } else {
                 _status = "Reply received, but saving it failed";
             }
         } else {
-            _status = result->canceled ? "Canceled" : result->error;
+            _streaming_active = false;
+            _status = event->result.canceled ? "Canceled" : event->result.error;
         }
+        preserve_line_start(preserved_start);
         draw_chat(false);
     }
 
     bool on_touch(const TouchEvent &event) override
     {
+        if (_view == View::Sessions && _confirm_delete) {
+            if (event.type == TouchEventType::Back || header_back_hit(event)) {
+                cancel_session_delete();
+                return true;
+            }
+            return session_delete_touch(event);
+        }
         if (event.type == TouchEventType::Back || header_back_hit(event)) {
             go_back();
             return true;
@@ -183,6 +224,17 @@ public:
 
     bool on_key(int key) override
     {
+        if (_view == View::Sessions && _confirm_delete) {
+            if (key == APP_KEY_BACK) cancel_session_delete();
+            else if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
+                _delete_choice = 1 - _delete_choice;
+                draw_sessions(false);
+            } else if (key == APP_KEY_OK) {
+                if (_delete_choice == 0) cancel_session_delete();
+                else confirm_session_delete();
+            }
+            return true;
+        }
         if (key == APP_KEY_BACK) {
             go_back();
             return true;
@@ -193,9 +245,9 @@ public:
             else if (key == APP_KEY_OK) open_session_row(_session_focus);
             return true;
         }
-        if (_busy) return true;
-        if (key == APP_KEY_UP) scroll_chat(6);
-        else if (key == APP_KEY_DOWN) scroll_chat(-6);
+        if (_busy && key != APP_KEY_UP && key != APP_KEY_DOWN) return true;
+        if (key == APP_KEY_UP) scroll_chat(visible_chat_lines());
+        else if (key == APP_KEY_DOWN) scroll_chat(-visible_chat_lines());
         else if (key == APP_KEY_OK) open_input();
         else if (key == APP_KEY_EXTRA) toggle_model();
         return true;
@@ -209,17 +261,44 @@ private:
     bool _busy = false;
     bool _cancel_requested = false;
     bool _exit_when_done = false;
+    bool _wifi_active = false;
     int _session_focus = 0;
     int _session_scroll = 0;
     int _line_scroll = 0;
     TaskHandle_t _task = nullptr;
-    QueueHandle_t _result_queue = nullptr;
+    QueueHandle_t _event_queue = nullptr;
     DeepSeekSessionStore _store;
     std::vector<DeepSeekSessionMeta> _sessions;
     DeepSeekSessionMeta _session;
     std::vector<DeepSeekMessage> _messages;
     std::string _pending_question;
     std::string _status;
+    std::string _streaming_reply;
+    bool _streaming_active = false;
+    bool _confirm_delete = false;
+    int _delete_choice = 0;
+    int _delete_index = -1;
+    std::string _delete_title;
+    std::string _session_notice;
+
+    bool ensure_wifi()
+    {
+        if (wifi_setting_is_connected()) {
+            _wifi_active = true;
+            return true;
+        }
+        const esp_err_t error =
+            wifi_setting_connect_saved(CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS);
+        _wifi_active = error == ESP_OK;
+        return _wifi_active;
+    }
+
+    void release_wifi()
+    {
+        if (!_wifi_active && !wifi_setting_is_connected()) return;
+        _wifi_active = false;
+        wifi_setting_deinit(true);
+    }
 
     int visible_session_rows() const
     {
@@ -267,6 +346,12 @@ private:
             M5.Display.drawFastHLine(PAD, y + SESSION_ROW_H - 4,
                                      width - PAD * 2, TFT_BLACK);
         }
+        if (!_session_notice.empty() && !_confirm_delete) {
+            system_font::draw_center(M5.Display,
+                                     system_font::ellipsize(_session_notice, width - PAD * 2),
+                                     width / 2, M5.Display.height() - 54, TFT_BLACK);
+        }
+        if (_confirm_delete) draw_session_delete_dialog();
         M5.Display.display();
         M5.Display.endWrite();
     }
@@ -293,15 +378,133 @@ private:
             move_session_focus(-visible_session_rows());
             return true;
         }
+        if (event.type == TouchEventType::LongPress) {
+            int index = session_index_at(event.y);
+            if (index <= 0) return index == 0;
+            begin_session_delete(index);
+            return true;
+        }
         if (event.type != TouchEventType::Tap || event.y < SESSION_TOP) return false;
-        int row = (event.y - SESSION_TOP) / SESSION_ROW_H;
-        int index = _session_scroll + row;
+        int index = session_index_at(event.y);
         if (index >= 0 && index < session_row_count()) {
             _session_focus = index;
             open_session_row(index);
             return true;
         }
         return false;
+    }
+
+    int session_index_at(int y) const
+    {
+        if (y < SESSION_TOP) return -1;
+        const int row = (y - SESSION_TOP) / SESSION_ROW_H;
+        if (row < 0 || row >= visible_session_rows()) return -1;
+        const int index = _session_scroll + row;
+        return index < session_row_count() ? index : -1;
+    }
+
+    void begin_session_delete(int index)
+    {
+        if (index <= 0 || index > static_cast<int>(_sessions.size())) return;
+        _session_focus = index;
+        _delete_index = index;
+        _delete_title = _sessions[static_cast<size_t>(index - 1)].title;
+        _delete_choice = 0;
+        _confirm_delete = true;
+        _session_notice.clear();
+        draw_sessions(false);
+    }
+
+    void cancel_session_delete()
+    {
+        _confirm_delete = false;
+        _delete_choice = 0;
+        _delete_index = -1;
+        _delete_title.clear();
+        draw_sessions(false);
+    }
+
+    void confirm_session_delete()
+    {
+        if (_delete_index <= 0 || _delete_index > static_cast<int>(_sessions.size())) {
+            cancel_session_delete();
+            return;
+        }
+        const std::string id = _sessions[static_cast<size_t>(_delete_index - 1)].id;
+        const bool removed = _store.remove(id);
+        if (removed && _session.id == id) {
+            _session = {};
+            std::vector<DeepSeekMessage>().swap(_messages);
+            _streaming_reply.clear();
+            _streaming_active = false;
+        }
+        _confirm_delete = false;
+        _delete_choice = 0;
+        _delete_index = -1;
+        _delete_title.clear();
+        _session_notice = removed ? "Conversation deleted" : "Failed to delete conversation";
+        load_sessions();
+        draw_sessions(false);
+    }
+
+    void draw_session_delete_dialog()
+    {
+        const int width = M5.Display.width();
+        const int height = M5.Display.height();
+        const int box_width = std::min(width - 48, 620);
+        const int box_height = 270;
+        const int x = (width - box_width) / 2;
+        const int y = (height - box_height) / 2;
+        M5.Display.fillRoundRect(x, y, box_width, box_height, 8, TFT_WHITE);
+        M5.Display.drawRoundRect(x, y, box_width, box_height, 8, TFT_BLACK);
+        system_font::draw_center(M5.Display, "Delete conversation?", width / 2,
+                                 y + 20, TFT_BLACK);
+        system_font::draw_center(M5.Display,
+                                 system_font::ellipsize(_delete_title, box_width - 48),
+                                 width / 2, y + 82, TFT_BLACK);
+
+        const int gap = 18;
+        const int button_height = 68;
+        const int button_width = (box_width - 48 - gap) / 2;
+        const int button_y = y + box_height - button_height - 22;
+        const int left_x = x + 24;
+        const int right_x = left_x + button_width + gap;
+        M5.Display.fillRoundRect(left_x, button_y, button_width, button_height, 6,
+                                 _delete_choice == 0 ? TFT_BLACK : TFT_WHITE);
+        M5.Display.drawRoundRect(left_x, button_y, button_width, button_height, 6, TFT_BLACK);
+        M5.Display.fillRoundRect(right_x, button_y, button_width, button_height, 6,
+                                 _delete_choice == 1 ? TFT_BLACK : TFT_WHITE);
+        M5.Display.drawRoundRect(right_x, button_y, button_width, button_height, 6, TFT_BLACK);
+        system_font::draw_center(M5.Display, "Cancel", left_x + button_width / 2,
+                                 button_y + 12,
+                                 _delete_choice == 0 ? TFT_WHITE : TFT_BLACK);
+        system_font::draw_center(M5.Display, "Delete", right_x + button_width / 2,
+                                 button_y + 12,
+                                 _delete_choice == 1 ? TFT_WHITE : TFT_BLACK);
+    }
+
+    bool session_delete_touch(const TouchEvent &event)
+    {
+        if (event.type != TouchEventType::Tap) return true;
+        const int width = M5.Display.width();
+        const int height = M5.Display.height();
+        const int box_width = std::min(width - 48, 620);
+        const int box_height = 270;
+        const int x = (width - box_width) / 2;
+        const int y = (height - box_height) / 2;
+        const int gap = 18;
+        const int button_height = 68;
+        const int button_width = (box_width - 48 - gap) / 2;
+        const int button_y = y + box_height - button_height - 22;
+        const int left_x = x + 24;
+        const int right_x = left_x + button_width + gap;
+        if (event.y < button_y || event.y > button_y + button_height) return true;
+        if (event.x >= left_x && event.x <= left_x + button_width) {
+            cancel_session_delete();
+        } else if (event.x >= right_x && event.x <= right_x + button_width) {
+            confirm_session_delete();
+        }
+        return true;
     }
 
     void open_session_row(int index)
@@ -337,6 +540,11 @@ private:
             wrap_text(message.content, max_width, &lines);
             lines.emplace_back();
         }
+        if (_streaming_active || !_streaming_reply.empty()) {
+            lines.push_back("DeepSeek");
+            wrap_text(_streaming_reply, max_width, &lines);
+            lines.emplace_back();
+        }
         if (!_status.empty() && !_busy) {
             lines.push_back("Status");
             wrap_text(_status, max_width, &lines);
@@ -348,6 +556,52 @@ private:
     {
         int bottom = M5.Display.height() - CHAT_INPUT_H - CHAT_INPUT_Y_MARGIN - 18;
         return std::max(1, (bottom - CHAT_BODY_Y) / system_font::line_height());
+    }
+
+    int visible_line_start() const
+    {
+        const int total = static_cast<int>(transcript_lines().size());
+        return std::max(0, total - visible_chat_lines() - _line_scroll);
+    }
+
+    void preserve_line_start(int start)
+    {
+        const int total = static_cast<int>(transcript_lines().size());
+        const int max_start = std::max(0, total - visible_chat_lines());
+        start = std::clamp(start, 0, max_start);
+        _line_scroll = max_start - start;
+    }
+
+    void append_stream_chunk(const std::string &chunk)
+    {
+        const int start = visible_line_start();
+        const int visible = visible_chat_lines();
+        std::vector<std::string> before_page;
+        before_page.reserve(static_cast<size_t>(visible));
+        {
+            const std::vector<std::string> before = transcript_lines();
+            for (int row = 0; row < visible; ++row) {
+                const int index = start + row;
+                before_page.push_back(index < static_cast<int>(before.size())
+                    ? before[static_cast<size_t>(index)] : std::string());
+            }
+        }
+        _streaming_reply += chunk;
+        preserve_line_start(start);
+        const std::vector<std::string> after = transcript_lines();
+        bool visible_changed = false;
+        for (int row = 0; row < visible; ++row) {
+            const int index = start + row;
+            const std::string new_line = index < static_cast<int>(after.size())
+                ? after[static_cast<size_t>(index)] : std::string();
+            if (before_page[static_cast<size_t>(row)] != new_line) {
+                visible_changed = true;
+                break;
+            }
+        }
+        // Once the current page is full, later stream chunks are retained in
+        // _streaming_reply without repeatedly refreshing an unchanged EPD page.
+        if (visible_changed) draw_chat(false);
     }
 
     void draw_chat(bool quality)
@@ -408,11 +662,11 @@ private:
     bool chat_touch(const TouchEvent &event)
     {
         if (event.type == TouchEventType::SwipeUp) {
-            scroll_chat(-visible_chat_lines() / 2);
+            scroll_chat(-visible_chat_lines());
             return true;
         }
         if (event.type == TouchEventType::SwipeDown) {
-            scroll_chat(visible_chat_lines() / 2);
+            scroll_chat(visible_chat_lines());
             return true;
         }
         if (event.type != TouchEventType::Tap) return false;
@@ -510,6 +764,8 @@ private:
             return;
         }
         _messages.push_back({"user", question});
+        _streaming_reply.clear();
+        _streaming_active = true;
         _status = _session.thinking ? "Thinking deeply..." : "Thinking...";
         _busy = true;
         _cancel_requested = false;
@@ -518,25 +774,35 @@ private:
         draw_chat(false);
         M5.Display.waitDisplay();
 
+        if (!ensure_wifi()) {
+            _busy = false;
+            _streaming_active = false;
+            _status = "WiFi connection failed";
+            draw_chat(false);
+            return;
+        }
+
         auto *job = new ChatTaskJob;
         deepseek_config_load(&job->config);
         job->model = _session.model;
         job->thinking = _session.thinking;
         job->messages = _messages;
-        job->result_queue = _result_queue;
+        job->event_queue = _event_queue;
         job->cancel_requested = &_cancel_requested;
         job->external_stack = true;
         BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
             chat_task, "deepseek_api", 12288, job, 4, &_task,
-            tskNO_AFFINITY, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+            0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (created != pdPASS) {
             ESP_LOGW(TAG, "PSRAM network task stack allocation failed; trying internal RAM");
             job->external_stack = false;
-            created = xTaskCreate(chat_task, "deepseek_api", 12288, job, 4, &_task);
+            created = xTaskCreatePinnedToCore(
+                chat_task, "deepseek_api", 12288, job, 4, &_task, 0);
         }
         if (created != pdPASS) {
             delete job;
             _busy = false;
+            _streaming_active = false;
             _status = "Failed to start the network task";
             draw_chat(false);
         }

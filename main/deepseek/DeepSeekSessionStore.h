@@ -26,6 +26,7 @@ public:
     bool create(DeepSeekModel model, bool thinking, DeepSeekSessionMeta *session) const;
     bool load_meta(const std::string &id, DeepSeekSessionMeta *session) const;
     bool load_messages(const std::string &id, std::vector<DeepSeekMessage> *messages) const;
+    bool remove(const std::string &id) const;
     bool append_message(DeepSeekSessionMeta *session,
                         const std::string &role,
                         const std::string &content) const;

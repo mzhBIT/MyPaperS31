@@ -499,7 +499,10 @@ namespace lgfx
       ESP_LOGE(TAG, "frame semaphore allocation failed");
       return false;
     }
-    if (!init_dma(state) || !init_streaming(state)
+    if (!init_dma(state)
+#if MYPAPER_EPD_2D_LINE_STREAM
+     || !init_streaming(state)
+#endif
      || !init_lcd(state) || !init_ckv(state)) {
       return false;
     }

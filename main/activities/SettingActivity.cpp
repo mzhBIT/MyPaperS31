@@ -3,6 +3,7 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "activities/EpdDiagnosticActivity.h"
+#include "activities/RssReaderActivity.h"
 #include "activities/TextInputActivity.h"
 #include "deepseek/DeepSeekConfig.h"
 #include "deepseek/DeepSeekClient.h"
@@ -30,7 +31,7 @@ constexpr int PAD = 20;
 constexpr int SETTINGS_ROW_Y = 106;
 constexpr int SETTINGS_ROW_H = 126;
 constexpr int SETTINGS_ROW_GAP = 14;
-constexpr int SETTINGS_ITEM_COUNT = 4;
+constexpr int SETTINGS_ITEM_COUNT = 5;
 
 constexpr int SCAN_TOP = 94;
 constexpr int SCAN_ROW_H = 92;
@@ -707,6 +708,174 @@ private:
     }
 };
 
+static std::string format_cache_bytes(uint64_t bytes)
+{
+    char text[32] = {};
+    if (bytes >= 1024ULL * 1024ULL) {
+        std::snprintf(text, sizeof(text), "%.1f MB",
+                      static_cast<double>(bytes) / (1024.0 * 1024.0));
+    } else if (bytes >= 1024ULL) {
+        std::snprintf(text, sizeof(text), "%.1f KB",
+                      static_cast<double>(bytes) / 1024.0);
+    } else {
+        std::snprintf(text, sizeof(text), "%llu B",
+                      static_cast<unsigned long long>(bytes));
+    }
+    return text;
+}
+
+class RssCacheSettingsActivity final : public Activity {
+public:
+    void on_create() override
+    {
+        refresh_info();
+        draw(true);
+    }
+
+    bool on_touch(const TouchEvent &event) override
+    {
+        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+            if (_confirm) {
+                _confirm = false;
+                draw(false);
+            } else {
+                ActivityManager::instance().pop();
+            }
+            return true;
+        }
+        if (event.type != TouchEventType::Tap) return false;
+
+        if (!_confirm) {
+            if (event.y >= 430 && event.y < 530) begin_confirm();
+            return true;
+        }
+
+        const int width = M5.Display.width();
+        if (event.y >= 790 && event.y < 880) {
+            if (event.x < width / 2) cancel_confirm();
+            else clear_cache();
+        }
+        return true;
+    }
+
+    bool on_key(int key) override
+    {
+        if (key == APP_KEY_BACK) {
+            if (_confirm) cancel_confirm();
+            else ActivityManager::instance().pop();
+            return true;
+        }
+        if (_confirm && (key == APP_KEY_UP || key == APP_KEY_DOWN)) {
+            _confirm_choice = 1 - _confirm_choice;
+            draw(false);
+            return true;
+        }
+        if (key == APP_KEY_OK) {
+            if (!_confirm) begin_confirm();
+            else if (_confirm_choice == 0) cancel_confirm();
+            else clear_cache();
+            return true;
+        }
+        return false;
+    }
+
+private:
+    RssCacheInfo _info;
+    bool _confirm = false;
+    int _confirm_choice = 0;
+    std::string _message;
+
+    void refresh_info()
+    {
+        _info = rss_cache_info();
+    }
+
+    void begin_confirm()
+    {
+        _confirm = true;
+        _confirm_choice = 0;
+        draw(false);
+    }
+
+    void cancel_confirm()
+    {
+        _confirm = false;
+        _confirm_choice = 0;
+        draw(false);
+    }
+
+    void clear_cache()
+    {
+        RssCacheInfo removed;
+        const bool ok = clear_rss_cache(&removed);
+        refresh_info();
+        _confirm = false;
+        _confirm_choice = 0;
+        char message[80] = {};
+        std::snprintf(message, sizeof(message),
+                      ok ? "Cleared %u files, %s" : "Partially cleared %u files, %s",
+                      static_cast<unsigned>(removed.files),
+                      format_cache_bytes(removed.bytes).c_str());
+        _message = message;
+        draw(false);
+    }
+
+    void draw(bool quality)
+    {
+        const int width = M5.Display.width();
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
+        M5.Display.fillScreen(TFT_WHITE);
+        draw_header("RSS Cache");
+
+        char summary[80] = {};
+        std::snprintf(summary, sizeof(summary), "%u image files, %s",
+                      static_cast<unsigned>(_info.files),
+                      format_cache_bytes(_info.bytes).c_str());
+        system_font::draw_center(M5.Display, summary, width / 2, 180, TFT_BLACK);
+        system_font::draw_center(M5.Display, "Removes downloaded RSS images and temporary article data",
+                                 width / 2, 260, TFT_BLACK);
+        system_font::draw_center(M5.Display, "Subscriptions and saved Bing wallpapers are kept",
+                                 width / 2, 320, TFT_BLACK);
+
+        M5.Display.fillRoundRect(70, 430, width - 140, 100, 8, TFT_BLACK);
+        system_font::draw_center(M5.Display, "Clear RSS Cache", width / 2,
+                                 430 + std::max(0, (100 - system_font::line_height()) / 2),
+                                 TFT_WHITE);
+        if (!_message.empty()) {
+            system_font::draw_center(M5.Display,
+                                     system_font::ellipsize(_message, width - 50),
+                                     width / 2, 590, TFT_BLACK);
+        }
+
+        if (_confirm) {
+            M5.Display.fillRoundRect(35, 665, width - 70, 250, 10, TFT_WHITE);
+            M5.Display.drawRoundRect(35, 665, width - 70, 250, 10, TFT_BLACK);
+            system_font::draw_center(M5.Display, "Clear all RSS temporary cache?",
+                                     width / 2, 700, TFT_BLACK);
+            const int button_y = 790;
+            const int button_w = (width - 105) / 2;
+            const int left_x = 45;
+            const int right_x = left_x + button_w + 15;
+            M5.Display.fillRoundRect(left_x, button_y, button_w, 90, 8,
+                                     _confirm_choice == 0 ? TFT_BLACK : TFT_WHITE);
+            M5.Display.drawRoundRect(left_x, button_y, button_w, 90, 8, TFT_BLACK);
+            M5.Display.fillRoundRect(right_x, button_y, button_w, 90, 8,
+                                     _confirm_choice == 1 ? TFT_BLACK : TFT_WHITE);
+            M5.Display.drawRoundRect(right_x, button_y, button_w, 90, 8, TFT_BLACK);
+            system_font::draw_center(M5.Display, "Cancel", left_x + button_w / 2,
+                                     button_y + 20,
+                                     _confirm_choice == 0 ? TFT_WHITE : TFT_BLACK);
+            system_font::draw_center(M5.Display, "Clear", right_x + button_w / 2,
+                                     button_y + 20,
+                                     _confirm_choice == 1 ? TFT_WHITE : TFT_BLACK);
+        }
+
+        M5.Display.display();
+        M5.Display.endWrite();
+    }
+};
+
 class SettingActivity final : public Activity {
 public:
     void on_create() override
@@ -774,7 +943,8 @@ private:
         if (_focus == 0) ActivityManager::instance().push(new WifiSettingsActivity());
         else if (_focus == 1) ActivityManager::instance().push(new DeepSeekSettingsActivity());
         else if (_focus == 2) ActivityManager::instance().push(new ZhihuSettingsActivity());
-        else launch_epd_diagnostics();
+        else if (_focus == 3) launch_epd_diagnostics();
+        else ActivityManager::instance().push(new RssCacheSettingsActivity());
     }
 
     void draw_item(int index, const char *title, const std::string &detail)
@@ -821,6 +991,12 @@ private:
                                             : "Access Secret not configured");
         draw_item(3, "EPD Diagnostics",
                   "Direction, grayscale, transitions and VCOM");
+        RssCacheInfo rss_cache = rss_cache_info();
+        char rss_detail[64] = {};
+        std::snprintf(rss_detail, sizeof(rss_detail), "%u files, %s",
+                      static_cast<unsigned>(rss_cache.files),
+                      format_cache_bytes(rss_cache.bytes).c_str());
+        draw_item(4, "Clear RSS Cache", rss_detail);
         M5.Display.display();
         M5.Display.endWrite();
     }

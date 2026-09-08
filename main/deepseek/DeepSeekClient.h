@@ -14,6 +14,8 @@ struct DeepSeekClientResult {
     std::string error;
 };
 
+using DeepSeekStreamCallback = bool (*)(void *context, const std::string &chunk);
+
 class DeepSeekClient {
 public:
     static DeepSeekClientResult validate(const DeepSeekConfig &config);
@@ -21,5 +23,7 @@ public:
                                      DeepSeekModel model,
                                      bool thinking,
                                      const std::vector<DeepSeekMessage> &messages,
-                                     const volatile bool *cancel_requested = nullptr);
+                                     const volatile bool *cancel_requested = nullptr,
+                                     DeepSeekStreamCallback stream_callback = nullptr,
+                                     void *stream_context = nullptr);
 };

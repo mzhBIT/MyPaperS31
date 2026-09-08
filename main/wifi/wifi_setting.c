@@ -429,6 +429,15 @@ esp_err_t wifi_setting_clear_credentials(void)
     return ret;
 }
 
+bool wifi_setting_is_connected(void)
+{
+    esp_netif_ip_info_t ip_info = {0};
+    return s_connected && s_sta_netif != NULL &&
+           esp_netif_is_netif_up(s_sta_netif) &&
+           esp_netif_get_ip_info(s_sta_netif, &ip_info) == ESP_OK &&
+           ip_info.ip.addr != 0;
+}
+
 esp_err_t wifi_setting_connect_saved(int timeout_ms)
 {
     char ssid[WIFI_SETTING_SSID_MAX_LEN + 1] = {0};

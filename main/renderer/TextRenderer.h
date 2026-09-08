@@ -168,6 +168,8 @@ private:
     std::vector<Glyph> _glyph_cache;
     std::vector<uint32_t> _missing_codepoints;
     std::vector<uint32_t> _page_missing_codepoints;
+    // Glyphs required by the last page passed to preparePage().
+    std::vector<uint32_t> _prepared_page_codepoints;
     std::vector<LookupSlot> _advance_lookup;
     std::vector<LookupSlot> _glyph_lookup;
     uint8_t *_glyph_pool = nullptr;

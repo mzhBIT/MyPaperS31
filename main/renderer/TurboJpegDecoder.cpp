@@ -37,13 +37,6 @@ static void error_exit(j_common_ptr common)
     longjmp(error->jump, 1);
 }
 
-static uint16_t gray_to_rgb565(uint8_t gray)
-{
-    return (uint16_t)(((uint16_t)(gray & 0xF8) << 8) |
-                      ((uint16_t)(gray & 0xFC) << 3) |
-                      ((uint16_t)gray >> 3));
-}
-
 static int choose_scale_denom(j_decompress_ptr cinfo, int target_width, int target_height)
 {
     static const int denoms[] = {8, 4, 2, 1};
@@ -155,7 +148,7 @@ bool draw_file(lgfx::LGFXBase &gfx,
     jpeg_decompress_struct cinfo = {};
     ErrorManager error = {};
     uint8_t *source_row = nullptr;
-    uint16_t *display_row = nullptr;
+    lgfx::grayscale_t *display_row = nullptr;
     bool created = false;
     bool ok = false;
     int64_t push_us = 0;
@@ -205,8 +198,9 @@ bool draw_file(lgfx::LGFXBase &gfx,
         }
 
         source_row = static_cast<uint8_t *>(heap_caps_malloc(cinfo.output_width, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
-        display_row = static_cast<uint16_t *>(heap_caps_malloc((size_t)box_width * sizeof(uint16_t),
-                                                               MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        display_row = static_cast<lgfx::grayscale_t *>(heap_caps_malloc(
+            (size_t)box_width * sizeof(lgfx::grayscale_t),
+            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
         if (!source_row || !display_row) {
             ESP_LOGW(TAG, "scanline allocation failed path=%s src_w=%u dst_w=%d",
                      path, (unsigned)cinfo.output_width, box_width);
@@ -224,7 +218,7 @@ bool draw_file(lgfx::LGFXBase &gfx,
                 for (int output_x = 0; output_x < box_width; ++output_x) {
                     size_t source_x = (size_t)((int64_t)output_x * cinfo.output_width / box_width);
                     if (source_x >= cinfo.output_width) source_x = cinfo.output_width - 1;
-                    display_row[output_x] = gray_to_rgb565(source_row[source_x]);
+                    display_row[output_x] = source_row[source_x];
                 }
                 const int64_t push_start = esp_timer_get_time();
                 gfx.pushImage(x, y + next_output_y, box_width, 1, display_row);

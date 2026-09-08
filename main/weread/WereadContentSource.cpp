@@ -13,6 +13,7 @@
 #include <climits>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <sys/stat.h>
 
 namespace weread {
@@ -183,6 +184,142 @@ bool txt_to_xhtml(const std::string &text, std::string *out)
     return true;
 }
 
+bool parse_annotation_range(const std::string &range, size_t *start, size_t *end)
+{
+    const size_t dash = range.find('-');
+    if (dash == std::string::npos || dash == 0 || dash + 1 >= range.size()) return false;
+    char *tail = nullptr;
+    const unsigned long long first = std::strtoull(range.c_str(), &tail, 10);
+    if (!tail || tail != range.c_str() + dash) return false;
+    const unsigned long long last = std::strtoull(range.c_str() + dash + 1, &tail, 10);
+    if (!tail || *tail || first >= last || last > SIZE_MAX) return false;
+    *start = static_cast<size_t>(first);
+    *end = static_cast<size_t>(last);
+    return true;
+}
+
+std::vector<size_t> utf8_offsets(const std::string &text)
+{
+    std::vector<size_t> offsets;
+    offsets.reserve(text.size() / 2 + 1);
+    size_t position = 0;
+    while (position < text.size()) {
+        offsets.push_back(position);
+        const uint8_t lead = static_cast<uint8_t>(text[position]);
+        size_t length = lead < 0x80 ? 1 : (lead < 0xE0 ? 2 : (lead < 0xF0 ? 3 : 4));
+        if (position + length > text.size()) length = 1;
+        position += length;
+    }
+    offsets.push_back(text.size());
+    return offsets;
+}
+
+std::string wrap_annotation_text(const std::string &fragment, const std::string &range)
+{
+    std::string output;
+    output.reserve(fragment.size() + 96);
+    bool in_tag = false;
+    size_t text_start = 0;
+    auto append_text = [&](size_t begin, size_t end) {
+        if (begin >= end) return;
+        bool visible = false;
+        for (size_t i = begin; i < end; ++i) {
+            if (!std::isspace(static_cast<unsigned char>(fragment[i]))) { visible = true; break; }
+        }
+        if (!visible) {
+            output.append(fragment, begin, end - begin);
+            return;
+        }
+        output += "<span class=\"wr-annotation\" data-wr-range=\"";
+        output += range;
+        output += "\">";
+        output.append(fragment, begin, end - begin);
+        output += "</span>";
+    };
+    for (size_t i = 0; i < fragment.size(); ++i) {
+        if (!in_tag && fragment[i] == '<') {
+            append_text(text_start, i);
+            in_tag = true;
+            text_start = i;
+        } else if (in_tag && fragment[i] == '>') {
+            output.append(fragment, text_start, i - text_start + 1);
+            in_tag = false;
+            text_start = i + 1;
+        }
+    }
+    if (in_tag) output.append(fragment, text_start, fragment.size() - text_start);
+    else append_text(text_start, fragment.size());
+    return output;
+}
+
+void snap_annotation_boundaries(const std::string &html, size_t *start, size_t *end)
+{
+    if (!start || !end || *start >= *end || *end > html.size()) return;
+    const size_t open_before_start = *start ? html.rfind('<', *start - 1) : std::string::npos;
+    const size_t close_before_start = *start ? html.rfind('>', *start - 1) : std::string::npos;
+    if (open_before_start != std::string::npos &&
+        (close_before_start == std::string::npos || open_before_start > close_before_start)) {
+        const size_t close = html.find('>', *start);
+        if (close == std::string::npos || close + 1 >= *end) { *start = *end; return; }
+        *start = close + 1;
+    }
+    const size_t open_before_end = *end ? html.rfind('<', *end - 1) : std::string::npos;
+    const size_t close_before_end = *end ? html.rfind('>', *end - 1) : std::string::npos;
+    if (open_before_end != std::string::npos &&
+        (close_before_end == std::string::npos || open_before_end > close_before_end)) {
+        *end = open_before_end;
+    }
+
+    const size_t amp_before_start = *start ? html.rfind('&', *start - 1) : std::string::npos;
+    const size_t semi_before_start = *start ? html.rfind(';', *start - 1) : std::string::npos;
+    if (amp_before_start != std::string::npos &&
+        (semi_before_start == std::string::npos || amp_before_start > semi_before_start) &&
+        *start - amp_before_start <= 12) {
+        const size_t semi = html.find(';', *start);
+        if (semi != std::string::npos && semi + 1 < *end) *start = semi + 1;
+    }
+    const size_t amp_before_end = *end ? html.rfind('&', *end - 1) : std::string::npos;
+    const size_t semi_before_end = *end ? html.rfind(';', *end - 1) : std::string::npos;
+    if (amp_before_end != std::string::npos &&
+        (semi_before_end == std::string::npos || amp_before_end > semi_before_end) &&
+        *end - amp_before_end <= 12) {
+        *end = amp_before_end;
+    }
+}
+
+void inject_annotations(const std::vector<ChapterAnnotation> &annotations, std::string *xhtml)
+{
+    if (!xhtml || xhtml->empty() || annotations.empty()) return;
+    const std::vector<size_t> offsets = utf8_offsets(*xhtml);
+    struct Replacement { size_t start; size_t end; std::string range; };
+    std::vector<Replacement> replacements;
+    replacements.reserve(annotations.size());
+    for (const auto &annotation : annotations) {
+        size_t start = 0, end = 0;
+        if (!parse_annotation_range(annotation.range, &start, &end) || end >= offsets.size()) continue;
+        size_t byte_start = offsets[start];
+        size_t byte_end = offsets[end];
+        snap_annotation_boundaries(*xhtml, &byte_start, &byte_end);
+        if (byte_start < byte_end) replacements.push_back({byte_start, byte_end, annotation.range});
+    }
+    std::sort(replacements.begin(), replacements.end(), [](const Replacement &a, const Replacement &b) {
+        return a.start < b.start;
+    });
+    std::string output;
+    output.reserve(xhtml->size() + replacements.size() * 96);
+    size_t copied = 0;
+    for (const auto &replacement : replacements) {
+        if (replacement.start < copied || replacement.start >= replacement.end ||
+            replacement.end > xhtml->size()) continue;
+        output.append(*xhtml, copied, replacement.start - copied);
+        output += wrap_annotation_text(
+            xhtml->substr(replacement.start, replacement.end - replacement.start), replacement.range);
+        copied = replacement.end;
+    }
+    output.append(*xhtml, copied, xhtml->size() - copied);
+    *xhtml = std::move(output);
+}
+
 bool chapter_from_epub(const std::string &path, const Chapter &chapter, std::string *out)
 {
     if (!file_exists(path)) return false;
@@ -198,39 +335,91 @@ bool load_chapter_content(const std::string &book_id, const Chapter &chapter,
                           std::string *xhtml, std::string *error)
 {
     if (!xhtml) return false;
-    ChapterPayloadKind kind;
+    ChapterPayloadKind kind = ChapterPayloadKind::Xhtml;
     std::string path;
     const std::string epub_path = store::epub_payload_path(book_id);
-    if (chapter_from_epub(epub_path, chapter, xhtml)) return true;
+    const bool epub_cached = chapter_from_epub(epub_path, chapter, xhtml);
+    const bool chapter_cached = epub_cached || store::chapter_cached(book_id, chapter, &kind, &path);
+    const bool comments_enabled = store::public_comments_enabled();
+    const bool annotations_missing = comments_enabled &&
+                                     !store::annotations_cached(book_id, chapter);
 
-    if (!store::chapter_cached(book_id, chapter, &kind, &path)) {
-        if (wifi_setting_connect_saved(CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS) != ESP_OK) {
+    // Chapter payloads and underline ranges have independent cache lifetimes.
+    // Older firmware only fetched ranges while downloading a new chapter, so a
+    // cached chapter could permanently miss its underline markers.  Backfill a
+    // missing range cache without making an already cached chapter unavailable
+    // when the device happens to be offline.
+    if (!chapter_cached || annotations_missing) {
+        const bool online =
+            wifi_setting_connect_saved(CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS) == ESP_OK;
+        if (!online && !chapter_cached) {
             if (error) *error = "chapter is not cached and WiFi connection failed";
             return false;
         }
-        HttpClient client;
-        Api api(&client);
-        ChapterPayload payload;
-        std::string fetch_error;
-        const bool fetched = api.get_chapter(book_id, chapter, &payload, &fetch_error);
-        if (fetched && payload.kind == ChapterPayloadKind::EpubZip) {
-            path = epub_path;
-            if (!store::save_response_file(path, payload.content.data(), payload.content.size())) {
-                fetch_error = "failed to save EPUB payload";
+        if (!online) {
+            ESP_LOGW(TAG, "underline backfill deferred chapter=%s: WiFi unavailable",
+                     chapter.uid.c_str());
+        } else {
+            HttpClient client;
+            Api api(&client);
+            if (annotations_missing) {
+                std::vector<ChapterAnnotation> annotations;
+                std::string annotation_error;
+                if (api.get_chapter_annotations(book_id, chapter, &annotations, &annotation_error)) {
+                    if (!store::save_annotations(book_id, chapter, annotations)) {
+                        ESP_LOGW(TAG, "failed to save annotation cache chapter=%s",
+                                 chapter.uid.c_str());
+                    } else {
+                        ESP_LOGI(TAG,
+                                 "underline cache backfilled chapter=%s ranges=%u cached_body=%d",
+                                 chapter.uid.c_str(), static_cast<unsigned>(annotations.size()),
+                                 chapter_cached ? 1 : 0);
+                    }
+                } else {
+                    ESP_LOGW(TAG, "annotation fetch skipped chapter=%s error=%s",
+                             chapter.uid.c_str(), annotation_error.c_str());
+                }
             }
-        } else if (fetched && !store::save_chapter(book_id, chapter, payload, &path)) {
-            fetch_error = "failed to save chapter cache";
-        }
-        kind = payload.kind;
-        client.close();
-        if (!fetched || !fetch_error.empty()) {
-            if (error) *error = fetch_error.empty() ? "chapter download failed" : fetch_error;
-            return false;
+            if (!chapter_cached) {
+                ChapterPayload payload;
+                std::string fetch_error;
+                const bool fetched = api.get_chapter(book_id, chapter, &payload, &fetch_error);
+                if (fetched && payload.kind == ChapterPayloadKind::EpubZip) {
+                    path = epub_path;
+                    if (!store::save_response_file(path, payload.content.data(), payload.content.size())) {
+                        fetch_error = "failed to save EPUB payload";
+                    }
+                } else if (fetched && !store::save_chapter(book_id, chapter, payload, &path)) {
+                    fetch_error = "failed to save chapter cache";
+                }
+                kind = payload.kind;
+                if (!fetched || !fetch_error.empty()) {
+                    client.close();
+                    if (error) {
+                        *error = fetch_error.empty() ? "chapter download failed" : fetch_error;
+                    }
+                    return false;
+                }
+            }
+            client.close();
         }
     }
 
+    if (epub_cached) {
+        std::vector<ChapterAnnotation> annotations;
+        if (comments_enabled && store::load_annotations(book_id, chapter, &annotations)) {
+            inject_annotations(annotations, xhtml);
+        }
+        return true;
+    }
     if (kind == ChapterPayloadKind::EpubZip || path == epub_path) {
-        if (chapter_from_epub(path, chapter, xhtml)) return true;
+        if (chapter_from_epub(path, chapter, xhtml)) {
+            std::vector<ChapterAnnotation> annotations;
+            if (comments_enabled && store::load_annotations(book_id, chapter, &annotations)) {
+                inject_annotations(annotations, xhtml);
+            }
+            return true;
+        }
         if (error) *error = "EPUB chapter extraction failed";
         return false;
     }
@@ -239,8 +428,15 @@ bool load_chapter_content(const std::string &book_id, const Chapter &chapter,
         if (error) *error = "chapter cache read failed";
         return false;
     }
-    if (kind == ChapterPayloadKind::Txt) return txt_to_xhtml(content, xhtml);
-    *xhtml = std::move(content);
+    if (kind == ChapterPayloadKind::Txt) {
+        if (!txt_to_xhtml(content, xhtml)) return false;
+    } else {
+        *xhtml = std::move(content);
+    }
+    std::vector<ChapterAnnotation> annotations;
+    if (comments_enabled && store::load_annotations(book_id, chapter, &annotations)) {
+        inject_annotations(annotations, xhtml);
+    }
     return true;
 }
 

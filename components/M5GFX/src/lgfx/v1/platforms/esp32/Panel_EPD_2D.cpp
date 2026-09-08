@@ -1023,10 +1023,11 @@ namespace lgfx
     }
 
     uint8_t priority = config_detail().task_priority;
-    uint8_t core = config_detail().task_pinned_core;
-    if (core >= portNUM_PROCESSORS) {
-      core = (xPortGetCoreID() + 1) % portNUM_PROCESSORS;
-    }
+    // MyPaper reserves core 1 for the EPD update path.  Do not derive this
+    // from the caller's current core: doing so makes ownership depend on the
+    // initialization path and allows network/application work to contend with
+    // phase generation and scan submission.
+    uint8_t core = portNUM_PROCESSORS > 1 ? 1 : 0;
     const BaseType_t result = xTaskCreatePinnedToCore(
         reinterpret_cast<TaskFunction_t>(task_update), "epd2d", 6144, this,
         priority, &_task_update_2d, core);

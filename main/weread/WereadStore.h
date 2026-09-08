@@ -33,6 +33,19 @@ bool chapter_cached(const std::string &book_id, const Chapter &chapter,
                     ChapterPayloadKind *kind = nullptr, std::string *path = nullptr);
 bool save_chapter(const std::string &book_id, const Chapter &chapter,
                   const ChapterPayload &payload, std::string *path = nullptr);
+bool save_annotations(const std::string &book_id, const Chapter &chapter,
+                      const std::vector<ChapterAnnotation> &annotations);
+bool load_annotations(const std::string &book_id, const Chapter &chapter,
+                      std::vector<ChapterAnnotation> *annotations);
+bool annotations_cached(const std::string &book_id, const Chapter &chapter);
+bool annotation_text(const std::string &book_id, const Chapter &chapter,
+                     const std::string &range, std::string *text);
+bool load_annotation(const std::string &book_id, const Chapter &chapter,
+                     const std::string &range, ChapterAnnotation *annotation);
+bool update_annotation(const std::string &book_id, const Chapter &chapter,
+                       const ChapterAnnotation &annotation);
+bool public_comments_enabled();
+bool set_public_comments_enabled(bool enabled);
 
 std::string cover_path(const std::string &url);
 std::string epub_payload_path(const std::string &book_id);

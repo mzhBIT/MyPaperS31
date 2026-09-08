@@ -43,9 +43,14 @@ public:
     HttpClient &operator=(const HttpClient &) = delete;
 
     HttpResponse get(const std::string &url, const std::string &referer = {});
+    HttpResponse get_account_authenticated(const std::string &url,
+                                           const std::string &referer = {});
     HttpResponse get_html(const std::string &url, const std::string &referer = {});
     HttpResponse post_json(const std::string &url, const std::string &body,
                            const std::string &referer = {});
+    HttpResponse post_json_bearer(const std::string &url, const std::string &body,
+                                  const std::string &bearer,
+                                  const std::string &referer = {});
     bool refresh_session() { return renew_session(); }
     void close();
     void request_cancel() { _cancelled = true; }
@@ -59,10 +64,15 @@ private:
     HttpResponse request(const char *method, const std::string &url,
                          const std::string *body, const std::string &referer,
                          bool allow_renewal, bool html_response = false,
-                         bool persist_response_cookies = true);
+                         bool persist_response_cookies = true,
+                         bool account_headers = false,
+                         const std::string *bearer = nullptr,
+                         bool send_cookies = true);
     HttpResponse perform_once(const char *method, const std::string &url,
                               const std::string *body, const std::string &referer,
-                              bool html_response, bool persist_response_cookies);
+                              bool html_response, bool persist_response_cookies,
+                              bool account_headers, const std::string *bearer,
+                              bool send_cookies);
     bool ensure_client();
     bool renew_session();
     void absorb_cookie_headers(const std::string &headers);

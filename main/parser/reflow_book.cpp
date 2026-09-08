@@ -4,6 +4,8 @@
 #include "weread/WereadContentSource.h"
 #include "weread/WereadStore.h"
 
+#include <esp_log.h>
+
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
@@ -12,6 +14,8 @@
 #include <sys/stat.h>
 
 namespace {
+
+constexpr const char *TAG = "REFLOW_BOOK";
 
 bool regular_file_exists(const std::string &path)
 {
@@ -239,6 +243,18 @@ bool ReflowBook::resolve_footnote(const std::string &target, std::string *out)
     const size_t hash = target.find('#');
     if (hash == std::string::npos || hash == 0 || hash + 1 >= target.size()) return false;
     const std::string fragment = target.substr(hash + 1);
+    static constexpr const char *WEREAD_ANNOTATION = "wrannotation-";
+    if (_format == Format::Weread && fragment.rfind(WEREAD_ANNOTATION, 0) == 0 &&
+        _weread_active_chapter >= 0 &&
+        _weread_active_chapter < static_cast<int>(_weread_chapters.size())) {
+        const auto &chapter = _weread_chapters[static_cast<size_t>(_weread_active_chapter)];
+        const std::string range = fragment.substr(std::strlen(WEREAD_ANNOTATION));
+        if (weread::store::annotation_text(_weread_book.id, chapter, range, out)) return true;
+        // Network access is deliberately owned by the reader's asynchronous
+        // comment worker. Footnote resolution runs on the UI task and must
+        // never wait for TLS/HTTP while an EPD refresh is pending.
+        return false;
+    }
     static constexpr const char *MOBI_FILEPOS = "mobi-filepos-";
     if (_format == Format::Mobi && fragment.rfind(MOBI_FILEPOS, 0) == 0) {
         char *end = nullptr;

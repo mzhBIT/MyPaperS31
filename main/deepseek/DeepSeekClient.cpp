@@ -186,6 +186,36 @@ bool consume_sse_line(const std::string &line, std::string *content)
     return false;
 }
 
+size_t utf8_codepoint_count(const std::string &text)
+{
+    size_t count = 0;
+    for (size_t pos = 0; pos < text.size(); ++count) {
+        const unsigned char c = static_cast<unsigned char>(text[pos]);
+        size_t bytes = (c & 0x80) == 0 ? 1
+                     : (c & 0xe0) == 0xc0 ? 2
+                     : (c & 0xf0) == 0xe0 ? 3
+                     : (c & 0xf8) == 0xf0 ? 4 : 1;
+        pos += std::min(bytes, text.size() - pos);
+    }
+    return count;
+}
+
+std::string take_utf8_prefix(std::string *text, size_t codepoints)
+{
+    size_t pos = 0;
+    for (size_t count = 0; pos < text->size() && count < codepoints; ++count) {
+        const unsigned char c = static_cast<unsigned char>((*text)[pos]);
+        size_t bytes = (c & 0x80) == 0 ? 1
+                     : (c & 0xe0) == 0xc0 ? 2
+                     : (c & 0xf0) == 0xe0 ? 3
+                     : (c & 0xf8) == 0xf0 ? 4 : 1;
+        pos += std::min(bytes, text->size() - pos);
+    }
+    std::string prefix = text->substr(0, pos);
+    text->erase(0, pos);
+    return prefix;
+}
+
 }  // namespace
 
 DeepSeekClientResult DeepSeekClient::validate(const DeepSeekConfig &config)
@@ -255,7 +285,9 @@ DeepSeekClientResult DeepSeekClient::chat(const DeepSeekConfig &config,
                                           DeepSeekModel model,
                                           bool thinking,
                                           const std::vector<DeepSeekMessage> &messages,
-                                          const volatile bool *cancel_requested)
+                                          const volatile bool *cancel_requested,
+                                          DeepSeekStreamCallback stream_callback,
+                                          void *stream_context)
 {
     DeepSeekClientResult result;
     if (config.api_key.empty()) {
@@ -267,10 +299,11 @@ DeepSeekClientResult DeepSeekClient::chat(const DeepSeekConfig &config,
         return result;
     }
 
-    esp_err_t wifi_err = wifi_setting_connect_saved(CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS);
-    WifiShutdownGuard wifi_guard;
-    if (wifi_err != ESP_OK) {
-        result.error = std::string("WiFi connection failed: ") + esp_err_to_name(wifi_err);
+    // This function runs on a PSRAM-backed task stack. NVS/flash access can
+    // disable the external-memory cache, so the Activity must establish Wi-Fi
+    // from its internal stack before creating this worker.
+    if (!wifi_setting_is_connected()) {
+        result.error = "WiFi was not prepared before starting the chat task";
         return result;
     }
     if (cancel_requested && *cancel_requested) {
@@ -324,9 +357,12 @@ DeepSeekClientResult DeepSeekClient::chat(const DeepSeekConfig &config,
 
     char buffer[2048];
     std::string pending;
+    std::string stream_batch;
     std::string error_body;
     bool stream_done = false;
-    while (!stream_done && !(cancel_requested && *cancel_requested)) {
+    bool stream_delivery_failed = false;
+    while (!stream_done && !stream_delivery_failed &&
+           !(cancel_requested && *cancel_requested)) {
         int count = esp_http_client_read(client, buffer, sizeof(buffer));
         if (count <= 0) break;
         if (result.http_status >= 200 && result.http_status < 300) {
@@ -336,7 +372,20 @@ DeepSeekClientResult DeepSeekClient::chat(const DeepSeekConfig &config,
                 std::string line = pending.substr(0, newline);
                 pending.erase(0, newline + 1);
                 if (!line.empty() && line.back() == '\r') line.pop_back();
+                const size_t content_before = result.content.size();
                 stream_done = consume_sse_line(line, &result.content) || stream_done;
+                if (result.content.size() > content_before) {
+                    stream_batch.append(result.content, content_before,
+                                        result.content.size() - content_before);
+                    while (stream_callback && utf8_codepoint_count(stream_batch) >= 30) {
+                        std::string chunk = take_utf8_prefix(&stream_batch, 30);
+                        if (!stream_callback(stream_context, chunk)) {
+                            stream_delivery_failed = true;
+                            break;
+                        }
+                    }
+                }
+                if (stream_delivery_failed) break;
             }
         } else if (error_body.size() < 8192) {
             error_body.append(buffer, std::min<size_t>(count, 8192 - error_body.size()));
@@ -345,9 +394,17 @@ DeepSeekClientResult DeepSeekClient::chat(const DeepSeekConfig &config,
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
 
+    if (!stream_delivery_failed && stream_callback && !stream_batch.empty()) {
+        stream_delivery_failed = !stream_callback(stream_context, stream_batch);
+    }
+
     if (cancel_requested && *cancel_requested) {
         result.canceled = true;
         result.error = "Canceled";
+        return result;
+    }
+    if (stream_delivery_failed) {
+        result.error = "DeepSeek stream display was interrupted";
         return result;
     }
     if (result.http_status < 200 || result.http_status >= 300) {

@@ -29,6 +29,7 @@ esp_err_t wifi_setting_scan(wifi_setting_ap_t *records,
                             size_t *out_count);
 esp_err_t wifi_setting_connect(const char *ssid, const char *password, int timeout_ms);
 esp_err_t wifi_setting_connect_saved(int timeout_ms);
+bool wifi_setting_is_connected(void);
 bool wifi_setting_load_credentials(char *ssid,
                                    size_t ssid_size,
                                    char *password,

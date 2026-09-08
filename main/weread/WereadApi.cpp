@@ -9,6 +9,7 @@
 #include <mbedtls/sha256.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <ctime>
 #include <string_view>
@@ -18,6 +19,8 @@ namespace {
 
 constexpr const char *TAG = "WEREAD_API";
 constexpr const char *WEB_HOST = "https://weread.qq.com";
+constexpr const char *GATEWAY_HOST = "https://i.weread.qq.com/api/agent/gateway";
+constexpr const char *SKILL_VERSION = "1.0.5";
 constexpr const char *READER_TOKEN = "3c5c8717f3daf09iop3423zafeqoi";
 constexpr const char *WEB_USER_AGENT =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -76,6 +79,13 @@ int field_int(std::string_view object, const char *name, int fallback = 0)
     int64_t value = fallback;
     return field_view(object, name, &raw) && json::integer(raw, &value)
                ? static_cast<int>(value) : fallback;
+}
+
+int64_t field_int64(std::string_view object, const char *name, int64_t fallback = 0)
+{
+    std::string_view raw;
+    int64_t value = fallback;
+    return field_view(object, name, &raw) && json::integer(raw, &value) ? value : fallback;
 }
 
 bool field_bool(std::string_view object, const char *name, bool fallback = false)
@@ -182,7 +192,30 @@ bool empty_json_object(const HttpResponse &response)
 std::string request_error(const char *operation, const HttpResponse &response)
 {
     if (!response.error.empty()) return std::string(operation) + ": " + response.error;
-    return std::string(operation) + " HTTP " + std::to_string(response.status);
+    std::string result = std::string(operation) + " HTTP " + std::to_string(response.status);
+    if (response.data() && response.size()) {
+        const std::string_view root = response_view(response);
+        const int code = field_int(root, "errCode", field_int(root, "errcode"));
+        std::string message;
+        if (!field_string(root, "errMsg", &message)) {
+            if (!field_string(root, "errmsg", &message)) field_string(root, "message", &message);
+        }
+        if (code != 0) result += " errCode=" + std::to_string(code);
+        if (!message.empty() && message != std::to_string(code)) result += " " + message;
+    }
+    return result;
+}
+
+// Lua's JSON encoder in the reference implementation preserves the catalog's
+// numeric chapterUid type. Our compact catalog model stores every UID as text,
+// so restore a canonical decimal UID to a JSON number for gateway requests.
+// Non-decimal identifiers remain strings.
+std::string chapter_uid_json(const std::string &uid)
+{
+    const bool decimal = !uid.empty() &&
+        std::all_of(uid.begin(), uid.end(), [](unsigned char c) { return std::isdigit(c) != 0; }) &&
+        (uid.size() == 1 || uid.front() != '0');
+    return decimal ? uid : "\"" + json_escape(uid) + "\"";
 }
 
 std::string sha256_hex(const std::string &value)
@@ -267,6 +300,9 @@ LoginPoll Api::poll_login(const std::string &uid)
     field_string(object, "logicCode", &logic);
     if (success && !vid.empty() && !token.empty()) {
         Session session = _client->session();
+        // A bearer key belongs to the signed-in WeRead account. Never retain
+        // one across a QR login, even if the cookie jar was renewed in-place.
+        session.api_key.clear();
         if (session.vid.empty() || session.vid == before_request.vid) session.vid = vid;
         if (session.skey.empty() || session.skey == before_request.skey) session.skey = token;
         session.cookies["wr_vid"] = session.vid;
@@ -281,6 +317,14 @@ LoginPoll Api::poll_login(const std::string &uid)
             result.state = LoginState::Failed;
             result.message = "failed to save login session";
         } else {
+            std::string key_error;
+            if (!ensure_api_key(&key_error)) {
+                // The ordinary web reader remains usable without the official
+                // API key, so a gateway provisioning failure must not invalidate
+                // an otherwise successful login.
+                ESP_LOGW(TAG, "official API key unavailable after login: %s",
+                         key_error.c_str());
+            }
             result.state = LoginState::Success;
         }
         return result;
@@ -296,6 +340,62 @@ LoginPoll Api::poll_login(const std::string &uid)
         result.message = logic;
     }
     return result;
+}
+
+bool Api::ensure_api_key(std::string *error)
+{
+    if (!_client) {
+        if (error) *error = "HTTP client is unavailable";
+        return false;
+    }
+    if (!_client->session().api_key.empty()) return true;
+    if (!_client->session().valid()) {
+        if (error) *error = "WeRead login is required";
+        return false;
+    }
+
+    const std::string skills_url = std::string(WEB_HOST) + "/r/weread-skills";
+    std::string key;
+    std::string response_message;
+    for (int attempt = 0; attempt < 3 && key.empty(); ++attempt) {
+        HttpResponse response = _client->get_account_authenticated(
+            std::string(WEB_HOST) + "/api/skills/apikeyGet?only_show=1", skills_url);
+        if (!response.ok()) {
+            response_message = request_error("API key", response);
+        } else {
+            const std::string_view root = response_view(response);
+            if (!field_string(root, "apikey", &key)) field_string(root, "apiKey", &key);
+            if (key.empty()) {
+                std::string_view data;
+                if (field_view(root, "data", &data)) {
+                    if (!field_string(data, "apikey", &key)) field_string(data, "apiKey", &key);
+                }
+            }
+            if (key.empty()) {
+                if (!field_string(root, "errmsg", &response_message)) {
+                    field_string(root, "message", &response_message);
+                }
+            }
+        }
+        if (key.empty() && attempt < 2) vTaskDelay(pdMS_TO_TICKS(500));
+    }
+    if (key.empty() || key.size() > 2048) {
+        if (error) *error = response_message.empty() ? "API key response has no key" : response_message;
+        return false;
+    }
+
+    Session session = _client->session();
+    session.api_key = std::move(key);
+    _client->set_session(session);
+    if (!save_session(session)) {
+        session.api_key.clear();
+        _client->set_session(session);
+        if (error) *error = "failed to save API key";
+        return false;
+    }
+    ESP_LOGI(TAG, "official API key stored length=%u",
+             static_cast<unsigned>(_client->session().api_key.size()));
+    return true;
 }
 
 bool Api::get_shelf(std::vector<Book> *books, std::string *error)
@@ -427,6 +527,191 @@ bool Api::get_book_reviews(const std::string &book_id, int list_type, int count,
     }
     ESP_LOGI(TAG, "book reviews loaded book=%s type=%d count=%u",
              book_id.c_str(), list_type, static_cast<unsigned>(reviews->size()));
+    return true;
+}
+
+HttpResponse Api::gateway(const std::string &api_name, const std::string &parameters,
+                          std::string *error)
+{
+    if (!_client || _client->session().api_key.empty()) {
+        if (error) *error = "WeRead official API key is unavailable";
+        return {};
+    }
+    std::string body = "{\"api_name\":\"" + json_escape(api_name) +
+                       "\",\"skill_version\":\"" + SKILL_VERSION + "\"";
+    if (!parameters.empty()) {
+        body.push_back(',');
+        body += parameters;
+    }
+    body.push_back('}');
+    HttpResponse response = _client->post_json_bearer(
+        GATEWAY_HOST, body, _client->session().api_key, std::string(WEB_HOST) + "/r/weread-skills");
+    if (!response.ok() && error) *error = request_error(api_name.c_str(), response);
+    return response;
+}
+
+bool Api::get_chapter_annotations(const std::string &book_id, const Chapter &chapter,
+                                  std::vector<ChapterAnnotation> *annotations,
+                                  std::string *error)
+{
+    if (!_client || !annotations || book_id.empty() || chapter.uid.empty()) return false;
+    annotations->clear();
+    if (!ensure_api_key(error)) return false;
+
+    const std::string common = "\"bookId\":\"" + json_escape(book_id) +
+                               "\",\"chapterUid\":" + chapter_uid_json(chapter.uid);
+    HttpResponse underline_response = gateway("/book/underlines", common, error);
+    if (!underline_response.ok()) return false;
+    std::string_view underline_root = response_view(underline_response);
+    std::string_view data;
+    if (field_view(underline_root, "data", &data) && !data.empty() && data.front() == '{') {
+        underline_root = data;
+    }
+    const int underline_error = field_int(underline_root, "errCode",
+                                           field_int(underline_root, "errcode"));
+    if (underline_error != 0) {
+        if (error) *error = "underlines errCode=" + std::to_string(underline_error);
+        return false;
+    }
+    std::string_view underline_array;
+    if (!field_view(underline_root, "underlines", &underline_array)) {
+        // An empty successful response is a valid chapter with no annotations.
+        ESP_LOGI(TAG, "chapter annotations book=%s chapter=%s ranges=0 comments=0",
+                 book_id.c_str(), chapter.uid.c_str());
+        return true;
+    }
+
+    json::ObjectIterator underline_iterator(underline_array);
+    std::string_view underline;
+    while (underline_iterator.next(&underline)) {
+        ChapterAnnotation annotation;
+        field_string(underline, "range", &annotation.range);
+        if (!annotation.range.empty() && annotation.range.find('-') != std::string::npos) {
+            annotations->push_back(std::move(annotation));
+        }
+    }
+    if (annotations->empty()) return true;
+
+    // Public comments are intentionally not downloaded for every underline
+    // here. A heavily annotated chapter can contain hundreds of ranges, which
+    // turns opening one chapter into dozens of gateway calls and trips the
+    // official API's request-frequency limit. Comments are fetched and cached
+    // for one range when the reader actually taps that underline.
+    ESP_LOGI(TAG, "chapter annotations book=%s chapter=%s ranges=%u comments=deferred",
+             book_id.c_str(), chapter.uid.c_str(),
+             static_cast<unsigned>(annotations->size()));
+    return true;
+}
+
+bool Api::get_annotation_comments(const std::string &book_id, const Chapter &chapter,
+                                  ChapterAnnotation *annotation, std::string *error,
+                                  int count, bool append)
+{
+    if (!_client || !annotation || book_id.empty() || chapter.uid.empty() ||
+        annotation->range.empty()) return false;
+    count = std::clamp(count, 1, 10);
+    if (!append) {
+        annotation->popup_text.clear();
+        annotation->comment_count = 0;
+        annotation->total_count = -1;
+        annotation->max_idx = 0;
+        annotation->synckey = 0;
+        annotation->has_more = false;
+        annotation->comments_loaded = false;
+    }
+    if (!ensure_api_key(error)) return false;
+
+    const std::string common = "\"bookId\":\"" + json_escape(book_id) +
+                               "\",\"chapterUid\":" + chapter_uid_json(chapter.uid);
+    const std::string request = common + ",\"reviews\":[{\"range\":\"" +
+        json_escape(annotation->range) +
+        "\",\"maxIdx\":" + std::to_string(annotation->max_idx) +
+        ",\"count\":" + std::to_string(count) +
+        ",\"synckey\":" + std::to_string(annotation->synckey) + "}]";
+    HttpResponse response = gateway("/book/readreviews", request, error);
+    if (!response.ok()) return false;
+
+    std::string_view root = response_view(response);
+    std::string_view data;
+    if (field_view(root, "data", &data) && !data.empty() && data.front() == '{') root = data;
+    const int response_error = field_int(root, "errCode", field_int(root, "errcode"));
+    if (response_error != 0) {
+        if (error) *error = "readreviews errCode=" + std::to_string(response_error);
+        return false;
+    }
+
+    bool matched_range = false;
+    bool saw_page_reviews = false;
+    int added = 0;
+    std::string_view ranges_array;
+    if (field_view(root, "reviews", &ranges_array)) {
+        json::ObjectIterator range_iterator(ranges_array);
+        std::string_view range_review;
+        while (range_iterator.next(&range_review)) {
+            std::string range;
+            field_string(range_review, "range", &range);
+            if (!range.empty() && range != annotation->range) continue;
+            matched_range = true;
+            annotation->total_count = field_int(range_review, "totalCount", annotation->total_count);
+            annotation->has_more = field_bool(range_review, "hasMore", false);
+            const int previous_max_idx = annotation->max_idx;
+            annotation->max_idx = field_int(range_review, "maxIdx", annotation->max_idx);
+            annotation->synckey = field_int64(range_review, "synckey", annotation->synckey);
+            std::string_view pages;
+            if (!field_view(range_review, "pageReviews", &pages)) continue;
+            saw_page_reviews = true;
+            json::ObjectIterator page_iterator(pages);
+            std::string_view page_review;
+            while (page_iterator.next(&page_review)) {
+                std::string_view review;
+                if (!field_view(page_review, "review", &review)) review = page_review;
+                std::string author = "Anonymous";
+                std::string_view author_object;
+                if (field_view(review, "author", &author_object)) {
+                    if (!field_string(author_object, "nick", &author)) {
+                        field_string(author_object, "name", &author);
+                    }
+                }
+                std::string content;
+                field_string(review, "content", &content);
+                if (content.empty()) continue;
+                if (!annotation->popup_text.empty()) {
+                    annotation->popup_text += ANNOTATION_COMMENT_SEPARATOR;
+                }
+                annotation->popup_text += author + "\n" + content;
+                const int likes = field_int(page_review, "likesCount");
+                if (likes > 0) annotation->popup_text += "  Likes " + std::to_string(likes);
+                ++annotation->comment_count;
+                ++added;
+            }
+            if (added > 0 && annotation->max_idx == previous_max_idx) {
+                annotation->max_idx = previous_max_idx + added;
+            }
+        }
+    }
+
+    if (!matched_range) {
+        if (error) *error = "readreviews response has no matching range";
+        return false;
+    }
+    if (annotation->total_count >= 0) {
+        annotation->has_more = annotation->has_more ||
+                               annotation->comment_count < annotation->total_count;
+    }
+    if (annotation->total_count == 0) {
+        annotation->popup_text = "No public comments for this underline.";
+        annotation->has_more = false;
+    } else if (!saw_page_reviews || (added == 0 && annotation->popup_text.empty())) {
+        if (error) *error = "readreviews returned an unrecognized or empty comment page";
+        return false;
+    }
+    annotation->comments_loaded = true;
+    ESP_LOGI(TAG,
+             "annotation comments chapter=%s range=%s added=%d loaded=%d total=%d more=%d max_idx=%d synckey=%lld",
+             chapter.uid.c_str(), annotation->range.c_str(), added,
+             annotation->comment_count, annotation->total_count,
+             annotation->has_more ? 1 : 0, annotation->max_idx,
+             static_cast<long long>(annotation->synckey));
     return true;
 }
 

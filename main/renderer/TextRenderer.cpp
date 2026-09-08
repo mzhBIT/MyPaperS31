@@ -726,6 +726,7 @@ void TextRenderer::resetFont()
     _glyph_cache.clear();
     _missing_codepoints.clear();
     _page_missing_codepoints.clear();
+    _prepared_page_codepoints.clear();
     _advance_lookup.clear();
     _glyph_lookup.clear();
     if (_glyph_pool) {
@@ -1493,7 +1494,7 @@ const TextRenderer::Glyph *TextRenderer::getGlyph(uint32_t codepoint)
         }
     }
 
-    Glyph glyph;
+    Glyph glyph{};
     _glyph_pool_full = false;
     if (!loadGlyph(codepoint, glyph)) {
         if (_glyph_pool_full) {
@@ -1655,6 +1656,7 @@ void TextRenderer::clearGlyphCache()
     _glyph_cache.clear();
     _missing_codepoints.clear();
     _page_missing_codepoints.clear();
+    _prepared_page_codepoints.clear();
     _glyph_lookup.clear();
     int glyph_limit = std::max(32, _style.glyph_cache_limit);
     _glyph_lookup.assign(next_power_of_two((size_t)glyph_limit * 2), LookupSlot());
@@ -1673,15 +1675,54 @@ bool TextRenderer::compactGlyphCache(size_t needed_bytes)
     const size_t max_used_after = _glyph_pool_capacity > free_target ? _glyph_pool_capacity - free_target : 0;
     const size_t keep_bytes_target = std::min(keep_bytes_limit, max_used_after);
     const size_t keep_count_target = std::max<size_t>(16, ((size_t)std::max(32, _style.glyph_cache_limit) * GLYPH_CACHE_FIFO_RETAIN_COUNT_PERCENT) / 100);
-    const size_t first_keep_index = old_count > keep_count_target ? old_count - keep_count_target : 0;
 
-    std::vector<Glyph> kept;
-    kept.reserve(old_count - first_keep_index);
-    size_t new_used = 0;
-    for (size_t idx = first_keep_index; idx < old_count; ++idx) {
+    std::vector<uint8_t> selected(old_count, 0);
+    size_t selected_bytes = 0;
+    size_t protected_count = 0;
+
+    // Pin all glyphs used by the prepared page. The old FIFO-only policy could
+    // evict an old-but-visible glyph while the rest of the same page was still
+    // being prepared, which allowed another pool relocation during drawing.
+    for (size_t idx = 0; idx < old_count; ++idx) {
+        const Glyph &glyph = _glyph_cache[idx];
+        if (std::find(_prepared_page_codepoints.begin(), _prepared_page_codepoints.end(),
+                      glyph.codepoint) == _prepared_page_codepoints.end()) {
+            continue;
+        }
+        if (glyph.data_size > 0 && glyph.data_offset + glyph.data_size > old_used) continue;
+        if (selected_bytes + glyph.data_size > max_used_after) {
+            ESP_LOGW(TAG, "glyph compact cannot retain prepared page: protected=%u bytes=%u need=%u cap=%u",
+                     (unsigned)protected_count,
+                     (unsigned)selected_bytes,
+                     (unsigned)needed_bytes,
+                     (unsigned)_glyph_pool_capacity);
+            return false;
+        }
+        selected[idx] = 1;
+        selected_bytes += glyph.data_size;
+        ++protected_count;
+    }
+
+    // Add recent entries up to the normal FIFO target. Selection is newest
+    // first, but movement below stays in ascending source-offset order.
+    size_t selected_count = protected_count;
+    for (size_t idx = old_count; idx-- > 0;) {
+        if (selected[idx]) continue;
         const Glyph &glyph = _glyph_cache[idx];
         if (glyph.data_size > 0 && glyph.data_offset + glyph.data_size > old_used) continue;
-        if (glyph.data_size > 0 && new_used + glyph.data_size > keep_bytes_target) continue;
+        if (selected_count >= keep_count_target) break;
+        if (selected_bytes + glyph.data_size > keep_bytes_target) continue;
+        selected[idx] = 1;
+        selected_bytes += glyph.data_size;
+        ++selected_count;
+    }
+
+    std::vector<Glyph> kept;
+    kept.reserve(selected_count);
+    size_t new_used = 0;
+    for (size_t idx = 0; idx < old_count; ++idx) {
+        if (!selected[idx]) continue;
+        const Glyph &glyph = _glyph_cache[idx];
 
         Glyph moved = glyph;
         if (moved.data_size > 0) {
@@ -1706,9 +1747,10 @@ bool TextRenderer::compactGlyphCache(size_t needed_bytes)
         insertLookup(_glyph_lookup, _glyph_cache[i].codepoint, (uint16_t)i);
     }
 
-    ESP_LOGI(TAG, "glyph cache fifo compacted count=%u/%u pool=%u/%u need=%u",
+    ESP_LOGI(TAG, "glyph cache compacted count=%u/%u protected=%u pool=%u/%u need=%u",
              (unsigned)_glyph_cache.size(),
              (unsigned)old_count,
+             (unsigned)protected_count,
              (unsigned)_glyph_pool_used,
              (unsigned)_glyph_pool_capacity,
              (unsigned)needed_bytes);
@@ -1736,6 +1778,35 @@ bool TextRenderer::preparePage(const std::string &text)
         pos = nextUtf8(text, pos, cp);
         if (cp == '\r' || cp == '\n') continue;
         if (std::find(cps.begin(), cps.end(), cp) == cps.end()) cps.push_back(cp);
+    }
+
+    _prepared_page_codepoints = cps;
+
+    // Make room before glyph loading starts so pool relocation happens at a
+    // page boundary, never halfway through the following draw pass.
+    size_t missing_count = 0;
+    for (uint32_t cp : cps) {
+        if (findLookup(_glyph_lookup, cp) < 0 &&
+            std::find(_missing_codepoints.begin(), _missing_codepoints.end(), cp) == _missing_codepoints.end()) {
+            ++missing_count;
+        }
+    }
+    const size_t glyph_side = (size_t)std::max(16, _style.font_size + 12);
+    const size_t estimated_per_glyph = (glyph_side * glyph_side + 1) / 2 + 64;
+    const size_t estimated_need = std::min(_glyph_pool_capacity / 2,
+                                           missing_count * estimated_per_glyph);
+    if (missing_count > 0 &&
+        _glyph_pool_used + estimated_need > (_glyph_pool_capacity * 9) / 10) {
+        ESP_LOGI(TAG, "glyph cache page-boundary compact: glyphs=%u missing=%u used=%u cap=%u reserve=%u",
+                 (unsigned)cps.size(),
+                 (unsigned)missing_count,
+                 (unsigned)_glyph_pool_used,
+                 (unsigned)_glyph_pool_capacity,
+                 (unsigned)estimated_need);
+        if (!compactGlyphCache(estimated_need)) {
+            clearGlyphCache();
+            _prepared_page_codepoints = cps;
+        }
     }
 
     int64_t t0 = esp_timer_get_time();

@@ -12,6 +12,7 @@ constexpr const char *KEY_REFRESH = "refresh";
 constexpr const char *KEY_COOKIES = "cookies";
 constexpr const char *KEY_TICKET = "ticket";
 constexpr const char *KEY_WRPA = "wrpa";
+constexpr const char *KEY_API_KEY = "api_key";
 constexpr size_t MAX_COOKIE_BYTES = 2048;
 // NVS strings must fit in one entry page. The allow-list keeps the real jar
 // much smaller than this, while the limit prevents a malformed header from
@@ -82,6 +83,7 @@ void Session::clear()
     cookies.clear();
     wr_ticket.clear();
     wr_wrpa.clear();
+    api_key.clear();
 }
 
 bool load_session(Session *session)
@@ -98,6 +100,7 @@ bool load_session(Session *session)
     deserialize_cookies(cookie_data, &session->cookies);
     read_string(handle, KEY_TICKET, &session->wr_ticket);
     read_string(handle, KEY_WRPA, &session->wr_wrpa);
+    read_string(handle, KEY_API_KEY, &session->api_key);
     nvs_close(handle);
     if (!session->vid.empty()) session->cookies["wr_vid"] = session->vid;
     if (!session->skey.empty()) session->cookies["wr_skey"] = session->skey;
@@ -110,7 +113,8 @@ bool save_session(const Session &session)
     const std::string cookie_data = serialize_cookies(session.cookies);
     if (session.vid.size() > MAX_COOKIE_BYTES || session.skey.size() > MAX_COOKIE_BYTES ||
         session.refresh_token.size() > MAX_COOKIE_BYTES || session.wr_ticket.size() > MAX_COOKIE_BYTES ||
-        session.wr_wrpa.size() > MAX_COOKIE_BYTES || cookie_data.size() > MAX_COOKIE_JAR_BYTES) return false;
+        session.wr_wrpa.size() > MAX_COOKIE_BYTES || session.api_key.size() > MAX_COOKIE_BYTES ||
+        cookie_data.size() > MAX_COOKIE_JAR_BYTES) return false;
     nvs_handle_t handle = 0;
     if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) return false;
     esp_err_t result = write_or_erase(handle, KEY_VID, session.vid);
@@ -119,6 +123,7 @@ bool save_session(const Session &session)
     if (result == ESP_OK) result = write_or_erase(handle, KEY_COOKIES, cookie_data);
     if (result == ESP_OK) result = write_or_erase(handle, KEY_TICKET, session.wr_ticket);
     if (result == ESP_OK) result = write_or_erase(handle, KEY_WRPA, session.wr_wrpa);
+    if (result == ESP_OK) result = write_or_erase(handle, KEY_API_KEY, session.api_key);
     if (result == ESP_OK) result = nvs_commit(handle);
     nvs_close(handle);
     return result == ESP_OK;

@@ -31,13 +31,16 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <dirent.h>
 #include <memory>
 #include <string>
 #include <sys/stat.h>
+#include <unistd.h>
 #include <vector>
 
 static const char *TAG = "RSS";
@@ -94,6 +97,72 @@ static std::string g_status;
 static RssItem g_external_article;
 
 extern void launch_reader_font_picker();
+
+RssCacheInfo rss_cache_info()
+{
+    RssCacheInfo info;
+    DIR *dir = opendir(app_paths::rss_image_cache_dir());
+    if (!dir) return info;
+
+    while (dirent *entry = readdir(dir)) {
+        if (std::strcmp(entry->d_name, ".") == 0 ||
+            std::strcmp(entry->d_name, "..") == 0) continue;
+        std::string path = std::string(app_paths::rss_image_cache_dir()) + "/" + entry->d_name;
+        struct stat st = {};
+        if (stat(path.c_str(), &st) == 0 && !S_ISDIR(st.st_mode)) {
+            ++info.files;
+            if (st.st_size > 0) info.bytes += static_cast<uint64_t>(st.st_size);
+        }
+    }
+    closedir(dir);
+    return info;
+}
+
+bool clear_rss_cache(RssCacheInfo *removed)
+{
+    RssCacheInfo result;
+    bool ok = true;
+    DIR *dir = opendir(app_paths::rss_image_cache_dir());
+    if (dir) {
+        while (dirent *entry = readdir(dir)) {
+            if (std::strcmp(entry->d_name, ".") == 0 ||
+                std::strcmp(entry->d_name, "..") == 0) continue;
+            std::string path = std::string(app_paths::rss_image_cache_dir()) + "/" + entry->d_name;
+            struct stat st = {};
+            if (stat(path.c_str(), &st) != 0 || S_ISDIR(st.st_mode)) continue;
+            if (unlink(path.c_str()) == 0) {
+                ++result.files;
+                if (st.st_size > 0) result.bytes += static_cast<uint64_t>(st.st_size);
+            } else {
+                ok = false;
+                ESP_LOGW(TAG, "cache remove failed path=%s errno=%d", path.c_str(), errno);
+            }
+        }
+        closedir(dir);
+    } else if (errno != ENOENT) {
+        ok = false;
+        ESP_LOGW(TAG, "cache directory open failed path=%s errno=%d",
+                 app_paths::rss_image_cache_dir(), errno);
+    }
+
+    // RSS feed/article payloads are intentionally memory-only. Release their
+    // retained capacity as part of the same user-visible cache operation.
+    std::vector<RssFeed>().swap(g_feeds);
+    std::vector<RssItem>().swap(g_items);
+    std::vector<ArticleImage>().swap(g_article_images);
+    document_layout::Pages().swap(g_article_pages);
+    std::string().swap(g_status);
+    g_external_article = {};
+    g_focus = 0;
+    g_scroll = 0;
+    g_page = 0;
+
+    if (removed) *removed = result;
+    ESP_LOGI(TAG, "cache cleared files=%u bytes=%llu ok=%d",
+             static_cast<unsigned>(result.files),
+             static_cast<unsigned long long>(result.bytes), ok ? 1 : 0);
+    return ok;
+}
 
 static epd_mode_t reader_epd_mode()
 {
@@ -1194,6 +1263,7 @@ private:
             return;
         }
 
+        if (action == ReaderOverlay::Action::Close) _reader_overlay.commit_pending_seek();
         bool apply_layout = _reader_overlay.settings_dirty();
         _reader_overlay.close();
         if (apply_layout) {
@@ -1566,13 +1636,14 @@ private:
 
         BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
             article_image_load_task, "rss_images", 8192, job, 3,
-            &_image_load_task, tskNO_AFFINITY,
+            &_image_load_task, 0,
             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (created != pdPASS) {
             ESP_LOGW(TAG, "PSRAM image task stack allocation failed; trying internal RAM");
             job->external_stack = false;
-            created = xTaskCreate(article_image_load_task, "rss_images", 8192,
-                                  job, 3, &_image_load_task);
+            created = xTaskCreatePinnedToCore(
+                article_image_load_task, "rss_images", 8192, job, 3,
+                &_image_load_task, 0);
         }
         if (created != pdPASS) {
             ESP_LOGE(TAG, "image task creation failed pending=%u",

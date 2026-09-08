@@ -12,6 +12,7 @@ struct Session {
     std::map<std::string, std::string> cookies;
     std::string wr_ticket;
     std::string wr_wrpa;
+    std::string api_key;
 
     bool valid() const
     {

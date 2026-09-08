@@ -277,7 +277,9 @@ void HttpClient::absorb_cookie_headers(const std::string &headers)
 
 HttpResponse HttpClient::perform_once(const char *method, const std::string &url,
                                       const std::string *body, const std::string &referer,
-                                      bool html_response, bool persist_response_cookies)
+                                      bool html_response, bool persist_response_cookies,
+                                      bool account_headers, const std::string *bearer,
+                                      bool send_cookies)
 {
     HttpResponse response;
     if (_cancelled) {
@@ -298,9 +300,22 @@ HttpResponse HttpClient::perform_once(const char *method, const std::string &url
     if (body) esp_http_client_set_header(_client, "Origin", "https://weread.qq.com");
     else esp_http_client_delete_header(_client, "Origin");
     esp_http_client_set_header(_client, "Referer", referer.empty() ? DEFAULT_REFERER : referer.c_str());
-    const std::string cookie = cookie_header();
+    const std::string cookie = send_cookies ? cookie_header() : std::string();
     if (!cookie.empty()) esp_http_client_set_header(_client, "Cookie", cookie.c_str());
     else esp_http_client_delete_header(_client, "Cookie");
+    if (account_headers) {
+        esp_http_client_set_header(_client, "X-Vid", _session.vid.c_str());
+        esp_http_client_set_header(_client, "X-Skey", _session.skey.c_str());
+    } else {
+        esp_http_client_delete_header(_client, "X-Vid");
+        esp_http_client_delete_header(_client, "X-Skey");
+    }
+    if (bearer && !bearer->empty()) {
+        const std::string authorization = "Bearer " + *bearer;
+        esp_http_client_set_header(_client, "Authorization", authorization.c_str());
+    } else {
+        esp_http_client_delete_header(_client, "Authorization");
+    }
     if (body) {
         esp_http_client_set_header(_client, "Content-Type", "application/json;charset=UTF-8");
         esp_http_client_set_post_field(_client, body->data(), static_cast<int>(body->size()));
@@ -331,25 +346,34 @@ HttpResponse HttpClient::perform_once(const char *method, const std::string &url
 HttpResponse HttpClient::request(const char *method, const std::string &url,
                                  const std::string *body, const std::string &referer,
                                  bool allow_renewal, bool html_response,
-                                 bool persist_response_cookies)
+                                 bool persist_response_cookies, bool account_headers,
+                                 const std::string *bearer, bool send_cookies)
 {
     HttpResponse response = perform_once(method, url, body, referer, html_response,
-                                         persist_response_cookies);
+                                         persist_response_cookies, account_headers, bearer,
+                                         send_cookies);
     if (!response.error.empty() && response.error != "cancelled") {
         ESP_LOGW(TAG, "request failed, rebuilding session: %s", response.error.c_str());
         close();
         response = perform_once(method, url, body, referer, html_response,
-                                persist_response_cookies);
+                                persist_response_cookies, account_headers, bearer,
+                                send_cookies);
     }
     if (allow_renewal && response.ok() && contains_expired(response) && renew_session())
         response = request(method, url, body, referer, false, html_response,
-                           persist_response_cookies);
+                           persist_response_cookies, account_headers, bearer, send_cookies);
     return response;
 }
 
 HttpResponse HttpClient::get(const std::string &url, const std::string &referer)
 {
     return request("GET", url, nullptr, referer, true);
+}
+
+HttpResponse HttpClient::get_account_authenticated(const std::string &url,
+                                                   const std::string &referer)
+{
+    return request("GET", url, nullptr, referer, true, false, true, true);
 }
 
 HttpResponse HttpClient::get_html(const std::string &url, const std::string &referer)
@@ -361,6 +385,14 @@ HttpResponse HttpClient::post_json(const std::string &url, const std::string &bo
                                    const std::string &referer)
 {
     return request("POST", url, &body, referer, true);
+}
+
+HttpResponse HttpClient::post_json_bearer(const std::string &url, const std::string &body,
+                                          const std::string &bearer,
+                                          const std::string &referer)
+{
+    return request("POST", url, &body, referer, false, false, false, false,
+                   &bearer, false);
 }
 
 bool HttpClient::renew_session()

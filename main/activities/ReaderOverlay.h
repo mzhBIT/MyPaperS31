@@ -11,6 +11,8 @@ struct ReaderOverlayChapters {
     std::string (*title)(void *context, int index) = nullptr;
     int (*depth)(void *context, int index) = nullptr;
     bool (*activate)(void *context, int index) = nullptr;
+    int (*progress)(void *context) = nullptr;                  // 0..100 percent.
+    bool (*seek)(void *context, int percent) = nullptr;
 };
 
 class ReaderOverlay {
@@ -32,8 +34,12 @@ public:
 
     void set_chapters(const ReaderOverlayChapters &chapters);
     void set_chapters_enabled(bool enabled);
+    void set_weread_mode(bool enabled);
     void open(Tab tab);
     void close();
+    // Applies the last progress-bar selection, if any. The selection remains
+    // a preview until the owner explicitly closes the overlay.
+    bool commit_pending_seek();
 
     bool visible() const { return m_visible; }
     bool settings_dirty() const { return m_settings_dirty; }
@@ -50,6 +56,7 @@ public:
 private:
     static constexpr int SETTING_COUNT = 7;
     static constexpr int BEAUTY_COUNT = 7;
+    static constexpr int PROGRESS_AREA_H = 118;
 
     struct Geometry {
         int x = 0;
@@ -65,6 +72,8 @@ private:
     Geometry geometry() const;
     void select_tab(Tab tab);
     void adjust_setting(int delta);
+    int beauty_base_index(int index) const;
+    bool is_public_comments_row(int index) const;
     void move_setting_focus(int delta);
     int active_setting_count() const;
     void move_chapter_focus(int delta);
@@ -73,6 +82,7 @@ private:
     void clamp_chapter_scroll();
     int hit_setting(int x, int y, int *direction) const;
     int hit_chapter(int y) const;
+    int hit_progress(int x, int y) const;
     Action activate_setting();
     Action activate_chapter();
     void draw_settings(const Geometry &g);
@@ -82,10 +92,12 @@ private:
 
     ReaderOverlayChapters m_chapters;
     bool m_chapters_enabled = true;
+    bool m_weread_mode = false;
     bool m_visible = false;
     bool m_settings_dirty = false;
     Tab m_tab = Tab::Settings;
     int m_setting_focus = 0;
     int m_chapter_focus = 0;
     int m_chapter_scroll = 0;
+    int m_pending_progress = -1;
 };

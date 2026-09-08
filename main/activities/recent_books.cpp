@@ -77,6 +77,25 @@ static int txt_progress_percent(const char *path)
     return (int)std::min<uint64_t>(100, (bounded * 100 + file_size / 2) / file_size);
 }
 
+static bool read_progress_summary(FILE *fp, RecentBookProgress *result)
+{
+    if (!fp || !result) return false;
+    uint32_t marker = 0, percent = 0, chapter = 0, chapter_count = 0;
+    if (std::fread(&marker, 1, sizeof(marker), fp) != sizeof(marker) ||
+        std::fread(&percent, 1, sizeof(percent), fp) != sizeof(percent) ||
+        std::fread(&chapter, 1, sizeof(chapter), fp) != sizeof(chapter) ||
+        std::fread(&chapter_count, 1, sizeof(chapter_count), fp) != sizeof(chapter_count) ||
+        marker != READER_PROGRESS_SUMMARY_MAGIC) {
+        return false;
+    }
+    result->percent = std::clamp(static_cast<int>(percent), 0, 100);
+    result->chapter_count = static_cast<int>(chapter_count);
+    result->chapter = result->chapter_count > 0
+        ? std::clamp(static_cast<int>(chapter), 1, result->chapter_count)
+        : 0;
+    return true;
+}
+
 static RecentBookProgress epub_progress(const char *path)
 {
     RecentBookProgress result;
@@ -92,11 +111,21 @@ static RecentBookProgress epub_progress(const char *path)
               std::fread(&layout, 1, sizeof(layout), fp) == sizeof(layout) &&
               std::fread(&spine, 1, sizeof(spine), fp) == sizeof(spine) &&
               std::fread(&position, 1, sizeof(position), fp) == sizeof(position);
+    if (!ok || magic != EPUB_PROGRESS_MAGIC || version != EPUB_PROGRESS_VERSION) {
+        std::fclose(fp);
+        return result;
+    }
+    const bool has_summary = read_progress_summary(fp, &result);
     std::fclose(fp);
-    if (!ok || magic != EPUB_PROGRESS_MAGIC || version != EPUB_PROGRESS_VERSION) return result;
+    if (has_summary) return result;
 
     EpubBook::cached_progress_info(path, spine, position,
                                    &result.percent, &result.chapter, &result.chapter_count);
+    // Old files have no summary. Match the chapter-index scale used by the
+    // Chapters progress bar instead of the former byte-weighted estimate.
+    if (result.chapter_count > 1 && result.chapter > 0) {
+        result.percent = (result.chapter - 1) * 100 / (result.chapter_count - 1);
+    }
     return result;
 }
 
@@ -119,10 +148,16 @@ static RecentBookProgress sectioned_progress(const char *path, const char *root,
               std::fread(&position, 1, sizeof(position), fp) == sizeof(position) &&
               std::fread(&section_count, 1, sizeof(section_count), fp) == sizeof(section_count) &&
               std::fread(&section_size, 1, sizeof(section_size), fp) == sizeof(section_size);
-    std::fclose(fp);
     if (!ok || magic != expected_magic || version != expected_version || section_count == 0) {
+        std::fclose(fp);
         return result;
     }
+
+    if (read_progress_summary(fp, &result)) {
+        std::fclose(fp);
+        return result;
+    }
+    std::fclose(fp);
 
     section = std::min(section, section_count - 1);
     uint64_t local_thousand = section_size
@@ -133,6 +168,26 @@ static RecentBookProgress sectioned_progress(const char *path, const char *root,
                                                                (static_cast<uint64_t>(section_count) * 1000)));
     result.chapter = static_cast<int>(section + 1);
     result.chapter_count = static_cast<int>(section_count);
+    return result;
+}
+
+static RecentBookProgress generic_reflow_progress(const char *path)
+{
+    RecentBookProgress result;
+    std::string progress_path = std::string(app_paths::epub_progress_dir()) + "/" +
+                                recent_book_progress_key(path) + ".pos";
+    FILE *fp = std::fopen(progress_path.c_str(), "rb");
+    if (!fp) return result;
+    uint32_t magic = 0, version = 0, layout = 0, spine = 0;
+    uint64_t position = 0;
+    const bool ok = std::fread(&magic, 1, sizeof(magic), fp) == sizeof(magic) &&
+                    std::fread(&version, 1, sizeof(version), fp) == sizeof(version) &&
+                    std::fread(&layout, 1, sizeof(layout), fp) == sizeof(layout) &&
+                    std::fread(&spine, 1, sizeof(spine), fp) == sizeof(spine) &&
+                    std::fread(&position, 1, sizeof(position), fp) == sizeof(position) &&
+                    magic == EPUB_PROGRESS_MAGIC && version == EPUB_PROGRESS_VERSION;
+    if (ok) read_progress_summary(fp, &result);
+    std::fclose(fp);
     return result;
 }
 
@@ -156,8 +211,7 @@ RecentBookProgress recent_book_progress(const RecentBook &book)
     if (strcasecmp(book.type.c_str(), "mobi") == 0) return mobi_progress(book.path.c_str());
     if (strcasecmp(book.type.c_str(), "fb2") == 0) return fb2_progress(book.path.c_str());
     if (strcasecmp(book.type.c_str(), "markdown") == 0) {
-        return sectioned_progress(book.path.c_str(), app_paths::epub_progress_dir(),
-                                  EPUB_PROGRESS_MAGIC, EPUB_PROGRESS_VERSION);
+        return generic_reflow_progress(book.path.c_str());
     }
     RecentBookProgress result;
     result.percent = txt_progress_percent(book.path.c_str());

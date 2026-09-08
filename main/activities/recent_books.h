@@ -1,7 +1,12 @@
 #pragma once
 
+#include <cstdint>
 #include <string>
 #include <vector>
+
+// Optional trailer appended to reflow-reader progress files. It keeps the
+// bookshelf and the reader overlay on exactly the same display-progress scale.
+static constexpr uint32_t READER_PROGRESS_SUMMARY_MAGIC = 0x52505331; // RPS1
 
 struct RecentBook {
     std::string path;

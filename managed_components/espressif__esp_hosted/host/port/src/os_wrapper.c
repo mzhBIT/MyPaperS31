@@ -172,11 +172,11 @@ void *hosted_thread_create(char *tname, uint32_t tprio, uint32_t tstack_size, vo
 #if CONFIG_ESP_HOSTED_TASK_STACK_IN_SPIRAM
 	task_created = xTaskCreatePinnedToCoreWithCaps(
 			(void (*)(void *))start_routine, tname, tstack_size, sr_arg,
-			tprio, thread_handle, tskNO_AFFINITY,
+			tprio, thread_handle, 0,
 			MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
 #else
-	task_created = xTaskCreate((void (*)(void *))start_routine, tname,
-			tstack_size, sr_arg, tprio, thread_handle);
+	task_created = xTaskCreatePinnedToCore((void (*)(void *))start_routine,
+			tname, tstack_size, sr_arg, tprio, thread_handle, 0);
 #endif
 	if (!(*thread_handle)) {
 		ESP_LOGE(TAG, "Failed to create thread: %s\n", tname);

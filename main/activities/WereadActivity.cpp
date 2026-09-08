@@ -91,6 +91,7 @@ struct WorkResult {
     std::vector<weread::Chapter> chapters;
     std::vector<weread::Review> reviews;
     std::string format;
+    bool cached = false;
     bool offline = false;
     std::string reader_path;
     int reader_spine = 0;
@@ -156,7 +157,8 @@ void weread_task(void *argument)
         cached->kind = ResultKind::Catalog;
         if (weread::store::load_chapters(job->book.id, &cached->chapters, &cached->format)) {
             weread::store::save_manifest(job->book, cached->chapters, cached->format);
-            cached->offline = true;
+            cached->cached = true;
+            cached->offline = !wifi_setting_is_connected();
             send_final(job.get(), std::move(cached), external_stack);
         }
     }
@@ -170,6 +172,10 @@ void weread_task(void *argument)
             ready->kind = ResultKind::OpenReader;
             ready->reader_path = weread::store::manifest_path(job->book.id);
             ready->reader_spine = job->resume_saved_position ? -1 : job->chapter_index;
+            // Never leave the WeRead HTTP task alive while the EPD reader is
+            // rendering. The two pipelines contend for internal RAM and can
+            // starve the waveform producer. Cached body content wins; optional
+            // annotation metadata must not delay or overlap reader startup.
             send_final(job.get(), std::move(ready), external_stack);
         }
     }
@@ -186,6 +192,7 @@ void weread_task(void *argument)
             auto cached = std::make_unique<WorkResult>();
             cached->kind = ResultKind::Shelf;
             if (weread::store::load_shelf(&cached->books)) {
+                cached->cached = true;
                 cached->offline = true;
                 send_final(job.get(), std::move(cached), external_stack);
             }
@@ -219,6 +226,12 @@ void weread_task(void *argument)
         send_final(job.get(), std::move(result), external_stack, &client);
     }
     weread::Api api(&client);
+    if (client.session().valid() && client.session().api_key.empty()) {
+        std::string key_error;
+        if (!api.ensure_api_key(&key_error)) {
+            ESP_LOGW(TAG, "official API key bootstrap deferred: %s", key_error.c_str());
+        }
+    }
     auto sync_pending_progress = [&]() {
         weread::store::PendingProgress pending;
         if (!weread::store::load_pending_progress(&pending)) return;
@@ -247,6 +260,16 @@ void weread_task(void *argument)
             send_final(job.get(), error_result("Invalid chapter index"), external_stack, &client);
         } else {
             const auto &chapter = job->chapter;
+            struct stat cached_epub_info = {};
+            const bool cached_epub = stat(weread::store::epub_payload_path(job->book.id).c_str(),
+                                          &cached_epub_info) == 0 && cached_epub_info.st_size > 0;
+            if (cached_epub || weread::store::chapter_cached(job->book.id, chapter)) {
+                auto ready = std::make_unique<WorkResult>();
+                ready->kind = ResultKind::OpenReader;
+                ready->reader_path = weread::store::manifest_path(job->book.id);
+                ready->reader_spine = job->resume_saved_position ? -1 : job->chapter_index;
+                send_final(job.get(), std::move(ready), external_stack, &client);
+            }
             weread::ChapterPayload payload;
             std::string error;
             if (!api.get_chapter(job->book.id, chapter, &payload, &error)) {
@@ -488,6 +511,7 @@ public:
             _page = 0;
             _shelf_page = 0;
             _view = View::Shelf;
+            _cached = result->cached;
             _offline = result->offline;
             _cover_pages_attempted.clear();
             _cover_prefetch_disabled = false;
@@ -496,6 +520,7 @@ public:
         } else if (result->kind == ResultKind::Catalog) {
             _chapters = std::move(result->chapters);
             _format = std::move(result->format);
+            _cached = result->cached;
             _offline = result->offline;
             _page = 0;
             if (!_selected_book.progress_chapter_uid.empty()) {
@@ -575,7 +600,8 @@ public:
                 // selected book instead of showing an empty shelf.
                 _books.clear();
                 weread::store::load_shelf(&_books);
-                _offline = true;
+                _cached = true;
+                _offline = !wifi_setting_is_connected();
                 ESP_LOGI(TAG, "reader returned: catalog restored chapters=%u",
                          static_cast<unsigned>(_chapters.size()));
                 draw_catalog();
@@ -604,7 +630,8 @@ public:
                         weread::store::save_shelf(_books);
                     }
                 }
-                _offline = true;
+                _cached = true;
+                _offline = !wifi_setting_is_connected();
                 _cover_pages_attempted.clear();
                 _cover_prefetch_disabled = false;
                 restore_selected_book_shelf_page();
@@ -665,6 +692,7 @@ private:
     bool _busy = false;
     bool _exit_when_done = false;
     bool _offline = false;
+    bool _cached = false;
     bool _reader_open = false;
     bool _resume_after_catalog = false;
     bool _return_to_shelf_after_reader = false;
@@ -760,7 +788,13 @@ private:
         }
         system_font::draw_center(M5.Display, std::to_string(_page + 1) + "/" + std::to_string(total_pages),
                                  M5.Display.width() / 2, FOOTER_Y, TFT_BLACK);
-        if (_offline) system_font::draw_right(M5.Display, "Offline", M5.Display.width() - 24, FOOTER_Y, TFT_DARKGRAY);
+        if (_offline) {
+            system_font::draw_right(M5.Display, "Offline", M5.Display.width() - 24,
+                                    FOOTER_Y, TFT_DARKGRAY);
+        } else if (_cached) {
+            system_font::draw_right(M5.Display, "Cached", M5.Display.width() - 24,
+                                    FOOTER_Y, TFT_DARKGRAY);
+        }
         if (_book_menu_visible) draw_book_menu_overlay();
         end_frame();
         if (!_book_menu_visible) schedule_cover_prefetch();
@@ -878,7 +912,13 @@ private:
         }
         system_font::draw_center(M5.Display, std::to_string(_page + 1) + "/" + std::to_string(total_pages),
                                  M5.Display.width() / 2, FOOTER_Y, TFT_BLACK);
-        if (_offline) system_font::draw_right(M5.Display, "Cached", M5.Display.width() - 24, FOOTER_Y, TFT_DARKGRAY);
+        if (_offline) {
+            system_font::draw_right(M5.Display, "Offline", M5.Display.width() - 24,
+                                    FOOTER_Y, TFT_DARKGRAY);
+        } else if (_cached) {
+            system_font::draw_right(M5.Display, "Cached", M5.Display.width() - 24,
+                                    FOOTER_Y, TFT_DARKGRAY);
+        }
         end_frame();
     }
 
@@ -1068,8 +1108,9 @@ private:
         // sanity assertion. Large HTTP/content buffers are still allocated in
         // PSRAM by their owning components.
         job->external_stack = false;
-        BaseType_t created = xTaskCreate(
-            weread_task, "weread_net", WEREAD_TASK_STACK_BYTES, job, 4, &_task);
+        BaseType_t created = xTaskCreatePinnedToCore(
+            weread_task, "weread_net", WEREAD_TASK_STACK_BYTES, job, 4, &_task,
+            0);
         if (created != pdPASS) {
             delete job;
             _busy = false;
@@ -1121,8 +1162,9 @@ private:
         const unsigned missing_count = static_cast<unsigned>(job->cover_books.size());
         _cancelled = false;
         _cover_prefetch_active = true;
-        BaseType_t created = xTaskCreate(
-            weread_task, "weread_cover", WEREAD_TASK_STACK_BYTES, job, 2, &_task);
+        BaseType_t created = xTaskCreatePinnedToCore(
+            weread_task, "weread_cover", WEREAD_TASK_STACK_BYTES, job, 2, &_task,
+            0);
         if (created != pdPASS) {
             delete job;
             _task = nullptr;

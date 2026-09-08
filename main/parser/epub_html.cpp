@@ -403,6 +403,16 @@ static bool contains_footnote_token(std::string value)
            value.find("note-ref") != std::string::npos;
 }
 
+static bool is_weread_annotation(const std::unordered_map<std::string, std::string> &attrs)
+{
+    std::string class_name = attr_value(attrs, "class");
+    std::transform(class_name.begin(), class_name.end(), class_name.begin(), [](unsigned char c) {
+        return static_cast<char>(std::tolower(c));
+    });
+    return class_name.find("wr-annotation") != std::string::npos &&
+           !attr_value(attrs, "data-wr-range").empty();
+}
+
 static bool looks_like_footnote_marker(std::string text)
 {
     text = trim_copy(text);
@@ -564,6 +574,11 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
         std::string target;
         std::string content;
     } active_link;
+    struct ActiveAnnotation {
+        bool active = false;
+        size_t byte_start = 0;
+        std::string range;
+    } active_annotation;
     int heading_level = 0;
     int skip_depth = 0;
     size_t pos = 0;
@@ -638,6 +653,21 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
                     if (ref.byte_start < ref.byte_end) pending_footnotes.push_back(std::move(ref));
                 }
                 active_link = ActiveLink();
+            }
+        }
+
+        if (name == "span") {
+            if (!closing && parsed_attrs && is_weread_annotation(attrs)) {
+                active_annotation.active = true;
+                active_annotation.byte_start = current.size();
+                active_annotation.range = attr_value(attrs, "data-wr-range");
+            } else if (closing && active_annotation.active) {
+                EpubFootnoteRef ref;
+                ref.byte_start = active_annotation.byte_start;
+                ref.byte_end = current.size();
+                ref.target = item_href + "#wrannotation-" + active_annotation.range;
+                if (ref.byte_start < ref.byte_end) pending_footnotes.push_back(std::move(ref));
+                active_annotation = ActiveAnnotation();
             }
         }
 
