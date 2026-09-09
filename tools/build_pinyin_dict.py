@@ -2,7 +2,9 @@
 """Build MyPaperP4's sorted PYD1 pinyin dictionary.
 
 Input lines: pinyin<TAB>candidate1 candidate2 ...
-Output: fixed-size sorted lookup records followed by UTF-8 candidate blobs.
+Output: fixed-size sorted lookup records, UTF-8 candidate blobs, and an
+optional-compatible PY91 nine-key index trailer. Older firmware ignores the
+trailer and continues to read the PYD1 section normally.
 """
 
 import argparse
@@ -11,6 +13,32 @@ import struct
 
 HEADER = struct.Struct("<4sII")
 RECORD = struct.Struct("<32sIHH")
+T9_HEADER = struct.Struct("<4sII")
+T9_RECORD = struct.Struct("<32s")
+
+
+def t9_digits(key: str):
+    result = []
+    for char in key:
+        if char in "abc":
+            result.append("2")
+        elif char in "def":
+            result.append("3")
+        elif char in "ghi":
+            result.append("4")
+        elif char in "jkl":
+            result.append("5")
+        elif char in "mno":
+            result.append("6")
+        elif char in "pqrs":
+            result.append("7")
+        elif char in "tuv":
+            result.append("8")
+        elif char in "wxyz":
+            result.append("9")
+        elif char == "'":
+            result.append("0")
+    return "".join(result)
 
 
 def normalize_key(value: str):
@@ -59,19 +87,30 @@ def main():
     blob_offset = HEADER.size + RECORD.size * len(entries)
     records = []
     blobs = []
+    t9_records = []
     cursor = blob_offset
-    for key, values in entries:
+    for source_index, (key, values) in enumerate(entries):
         if len(values) > 8192:
             raise ValueError(f"candidate list too large: {key}")
         records.append(RECORD.pack(key.encode("ascii"), cursor, len(values), 0))
         blobs.append(values)
+        t9_records.append((t9_digits(key), key, source_index))
         cursor += len(values)
+    t9_records.sort()
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("wb") as out:
         out.write(HEADER.pack(b"PYD1", 1, len(entries)))
         out.writelines(records)
         out.writelines(blobs)
-    print(f"wrote {len(entries)} entries, {cursor} bytes, skipped {skipped} lines -> {args.output}")
+        out.write(T9_HEADER.pack(b"PY92", 2, len(t9_records)))
+        for _digits, key, _source_index in t9_records:
+            out.write(T9_RECORD.pack(key.encode("ascii")))
+    final_size = cursor + T9_HEADER.size + T9_RECORD.size * len(t9_records)
+    print(
+        f"wrote {len(entries)} entries, {final_size} bytes "
+        f"(PYD1={cursor}, PY92={final_size - cursor}), skipped {skipped} lines "
+        f"-> {args.output}"
+    )
 
 
 if __name__ == "__main__":

@@ -121,6 +121,39 @@ namespace lgfx
     return gray < 8 ? 0 : 15;
   }
 
+  __attribute__((optimize("O3"))) static void quantize_du_target_rect_4bpp(
+      uint8_t* target, size_t stride, size_t panel_width, size_t panel_height,
+      uint16_t x, uint16_t y, uint16_t width, uint16_t height)
+  {
+    const size_t pixel_begin = std::min<size_t>(x, panel_width);
+    const size_t pixel_end = std::min<size_t>(size_t(x) + width, panel_width);
+    const size_t row_begin = std::min<size_t>(y, panel_height);
+    const size_t row_end = std::min<size_t>(size_t(y) + height, panel_height);
+    if (pixel_begin >= pixel_end || row_begin >= row_end) return;
+
+    for (size_t row = row_begin; row < row_end; ++row) {
+      uint8_t* pixels = target + row * stride;
+      size_t begin = pixel_begin;
+      if (begin & 1u) {
+        const size_t index = begin >> 1;
+        pixels[index] = uint8_t((pixels[index] & 0xF0u)
+                              | quantize_a2_gray(pixels[index] & 0x0Fu));
+        ++begin;
+      }
+      const size_t full_byte_end = pixel_end >> 1;
+      for (size_t index = begin >> 1; index < full_byte_end; ++index) {
+        const uint8_t pair = pixels[index];
+        pixels[index] = uint8_t((pair & 0x80u ? 0xF0u : 0u)
+                              | (pair & 0x08u ? 0x0Fu : 0u));
+      }
+      if (pixel_end & 1u) {
+        const size_t index = pixel_end >> 1;
+        pixels[index] = uint8_t((pixels[index] & 0x0Fu)
+                              | (quantize_a2_gray(pixels[index] >> 4) << 4));
+      }
+    }
+  }
+
   static void apply_gc16_black_hold_compensation(
       uint8_t* transition, uint8_t waveform_type,
       int phase, int phase_count)
@@ -850,10 +883,12 @@ namespace lgfx
         const uint8_t physical_high = waveform_type == WAVEFORM_MODE_DU4
                                     ? quantize_du4_gray(new_high)
                                     : (waveform_type == WAVEFORM_MODE_A2
+                                    || waveform_type == WAVEFORM_MODE_DU
                                       ? quantize_a2_gray(new_high) : new_high);
         const uint8_t physical_low = waveform_type == WAVEFORM_MODE_DU4
                                    ? quantize_du4_gray(new_low)
                                    : (waveform_type == WAVEFORM_MODE_A2
+                                   || waveform_type == WAVEFORM_MODE_DU
                                      ? quantize_a2_gray(new_low) : new_low);
         const uint8_t resolved_high = high_driven ? physical_high : old_high;
         const uint8_t resolved_low = low_driven ? physical_low : old_low;
@@ -1367,6 +1402,16 @@ namespace lgfx
         me->_physical_state_known = false;
         continue;
       }
+
+#if MYPAPER_EPD_2D_DU_BINARY_TARGET
+      if (selected.type == WAVEFORM_MODE_DU) {
+        quantize_du_target_rect_4bpp(
+            me->_target_buf, stride, panel_w, panel_h,
+            update.x, update.y, update.w, update.h);
+        ESP_LOGI(TAG_2D,
+                 "DU target quantized: source_levels=16 target_levels=2 threshold=8");
+      }
+#endif
 
       ESP_LOGI(TAG_2D,
                "batch begin: mode=%u waveform_type=%u phases=%d temp_range=%u area=%u,%u %ux%u merged=%u",

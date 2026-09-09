@@ -43,7 +43,7 @@
 
 - Built-in table: common characters and words needed for immediate offline use.
 - External text dictionary: easy to generate and inspect during bring-up.
-- `tools/build_pinyin_dict.py` converts that source into the sorted `PYD1` binary dictionary used for normal operation.
+- `tools/build_pinyin_dict.py` converts that source into the sorted `PYD1` binary dictionary used for normal operation. New dictionaries append a `PY92` digit-sorted list of pinyin spellings, allowing sequential nine-key lookup without random SD reads. New firmware also accepts the earlier `PY91` index; old firmware ignores either trailer.
 - The converter also accepts pyim dictionaries (`pinyin-with-hyphens candidate1 candidate2 ...`) and removes syllable hyphens automatically.
 - User frequency is deliberately deferred until candidate quality is validated; it will be stored in an atomic file under `/sdcard/.reader/ime` rather than NVS.
 

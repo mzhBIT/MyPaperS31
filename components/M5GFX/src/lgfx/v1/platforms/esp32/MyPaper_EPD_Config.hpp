@@ -48,6 +48,14 @@
 #define MYPAPER_EPD_2D_DU_PHASE_DEDUP 1
 #endif
 
+// The supplied DU waveform has a 16-level source axis but only drives black
+// and white target rows. Quantize the per-refresh target snapshot to 0/15 so
+// antialiased 4bpp pixels never select the idle target rows 1..14. The main
+// drawing framebuffer remains untouched for later DU4/GC16 refreshes.
+#ifndef MYPAPER_EPD_2D_DU_BINARY_TARGET
+#define MYPAPER_EPD_2D_DU_BINARY_TARGET 1
+#endif
+
 // Expand the current GC16 phase's 16x16 pixel transition table into a direct
 // old-byte/new-byte lookup.  The 64 KiB table lives in internal RAM and turns
 // two pixel LUT reads plus masking/shifting into one lookup for each pair of

@@ -24,6 +24,7 @@ set(srcs
     "ui/SystemFont.cpp"
     "ui/Utf8Text.cpp"
     "ui/VirtualKeyboard.cpp"
+    "ui/NineKeyKeyboard.cpp"
     "ui/TextInputOverlay.cpp"
     "ui/icon_bitmap_1bpp.cpp"
     "ui/home_icons_1bpp.cpp"

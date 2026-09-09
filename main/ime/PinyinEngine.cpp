@@ -4,9 +4,13 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <esp_log.h>
+#include <esp_timer.h>
 
 namespace ime {
 namespace {
+
+constexpr const char *TAG = "PINYIN_IME";
 
 struct Entry { const char *key; const char *values; };
 
@@ -21,6 +25,18 @@ struct BinaryRecord {
     uint32_t value_offset;
     uint16_t value_size;
     uint16_t reserved;
+};
+struct T9IndexHeader {
+    char magic[4];
+    uint32_t version;
+    uint32_t count;
+};
+struct T9IndexRecord {
+    char digits[32];
+    uint32_t source_index;
+};
+struct T9IndexRecordV2 {
+    char key[32];
 };
 #pragma pack(pop)
 
@@ -208,6 +224,263 @@ static void append_segmented_candidates(const std::string &composition,
     }
 }
 
+char t9_digit(unsigned char c)
+{
+    c = static_cast<unsigned char>(std::tolower(c));
+    if (c >= 'a' && c <= 'c') return '2';
+    if (c >= 'd' && c <= 'f') return '3';
+    if (c >= 'g' && c <= 'i') return '4';
+    if (c >= 'j' && c <= 'l') return '5';
+    if (c >= 'm' && c <= 'o') return '6';
+    if (c >= 'p' && c <= 's') return '7';
+    if (c >= 't' && c <= 'v') return '8';
+    if (c >= 'w' && c <= 'z') return '9';
+    if (c == '\'') return '0';
+    return '\0';
+}
+
+std::string t9_digits(const char *key)
+{
+    std::string digits;
+    if (!key) return digits;
+    for (const unsigned char *p = reinterpret_cast<const unsigned char *>(key); *p; ++p) {
+        const char digit = t9_digit(*p);
+        if (digit) digits.push_back(digit);
+    }
+    return digits;
+}
+
+void append_unique_key(std::vector<std::string> *keys, const std::string &key,
+                       size_t limit)
+{
+    if (!keys || key.empty() || keys->size() >= limit) return;
+    if (std::find(keys->begin(), keys->end(), key) == keys->end()) {
+        keys->push_back(key);
+    }
+}
+
+std::string t9_prefix_for(const char *key, size_t digit_count)
+{
+    std::string prefix;
+    if (!key) return prefix;
+    size_t used = 0;
+    for (const unsigned char *p = reinterpret_cast<const unsigned char *>(key);
+         *p && used < digit_count; ++p) {
+        if (!t9_digit(*p)) continue;
+        prefix.push_back(static_cast<char>(std::tolower(*p)));
+        ++used;
+    }
+    return prefix;
+}
+
+void collect_t9_key(const char *key, const std::string &digits,
+                    std::vector<std::string> *exact,
+                    std::vector<std::string> *prefix)
+{
+    if (!key || !*key) return;
+    const std::string signature = t9_digits(key);
+    if (signature == digits) {
+        append_unique_key(exact, key, 32);
+    } else if (signature.size() > digits.size() &&
+               signature.compare(0, digits.size(), digits) == 0) {
+        append_unique_key(prefix, t9_prefix_for(key, digits.size()), 32);
+    }
+}
+
+bool collect_indexed_binary_t9_v2(FILE *fp, const BinaryHeader &header,
+                                  const std::string &digits,
+                                  std::vector<std::string> *exact,
+                                  std::vector<std::string> *prefix)
+{
+    if (std::fseek(fp, 0, SEEK_END) != 0) return false;
+    const long file_size = std::ftell(fp);
+    const uint64_t index_size = sizeof(T9IndexHeader) +
+        static_cast<uint64_t>(header.count) * sizeof(T9IndexRecordV2);
+    if (file_size < 0 || static_cast<uint64_t>(file_size) < index_size) return false;
+    const long index_offset = static_cast<long>(static_cast<uint64_t>(file_size) - index_size);
+    if (std::fseek(fp, index_offset, SEEK_SET) != 0) return false;
+    T9IndexHeader index_header = {};
+    if (std::fread(&index_header, 1, sizeof(index_header), fp) != sizeof(index_header) ||
+        std::memcmp(index_header.magic, "PY92", 4) != 0 || index_header.version != 2 ||
+        index_header.count != header.count) return false;
+
+    auto read_index = [&](uint32_t index, T9IndexRecordV2 *record) {
+        const uint64_t offset = static_cast<uint64_t>(index_offset) +
+                                sizeof(T9IndexHeader) +
+                                static_cast<uint64_t>(index) * sizeof(T9IndexRecordV2);
+        return std::fseek(fp, static_cast<long>(offset), SEEK_SET) == 0 &&
+               std::fread(record, 1, sizeof(*record), fp) == sizeof(*record);
+    };
+    uint32_t low = 0;
+    uint32_t high = index_header.count;
+    T9IndexRecordV2 indexed = {};
+    while (low < high) {
+        const uint32_t mid = low + (high - low) / 2;
+        if (!read_index(mid, &indexed)) return false;
+        indexed.key[sizeof(indexed.key) - 1] = '\0';
+        if (t9_digits(indexed.key) < digits) low = mid + 1;
+        else high = mid;
+    }
+
+    // PY92 stores pinyin beside its signature. After lower_bound, matching
+    // records are sequential and no random reads of the PYD1 table are needed.
+    const uint64_t first_offset = static_cast<uint64_t>(index_offset) +
+        sizeof(T9IndexHeader) + static_cast<uint64_t>(low) * sizeof(T9IndexRecordV2);
+    if (std::fseek(fp, static_cast<long>(first_offset), SEEK_SET) != 0) return false;
+    size_t scanned = 0;
+    while (low < index_header.count && scanned < 256 &&
+           (exact->size() < 24 || prefix->size() < 24)) {
+        if (std::fread(&indexed, 1, sizeof(indexed), fp) != sizeof(indexed)) return false;
+        ++low;
+        ++scanned;
+        indexed.key[sizeof(indexed.key) - 1] = '\0';
+        const std::string signature = t9_digits(indexed.key);
+        const bool is_exact = digits == signature;
+        if (signature.compare(0, digits.size(), digits) != 0) break;
+        if (is_exact) append_unique_key(exact, indexed.key, 32);
+        else append_unique_key(prefix, t9_prefix_for(indexed.key, digits.size()), 32);
+    }
+    return true;
+}
+
+bool collect_indexed_binary_t9_v1(FILE *fp, const BinaryHeader &header,
+                                  const std::string &digits,
+                                  std::vector<std::string> *exact,
+                                  std::vector<std::string> *prefix)
+{
+    if (std::fseek(fp, 0, SEEK_END) != 0) return false;
+    const long file_size = std::ftell(fp);
+    const uint64_t index_size = sizeof(T9IndexHeader) +
+        static_cast<uint64_t>(header.count) * sizeof(T9IndexRecord);
+    if (file_size < 0 || static_cast<uint64_t>(file_size) < index_size) return false;
+    const long index_offset = static_cast<long>(static_cast<uint64_t>(file_size) - index_size);
+    if (std::fseek(fp, index_offset, SEEK_SET) != 0) return false;
+    T9IndexHeader index_header = {};
+    if (std::fread(&index_header, 1, sizeof(index_header), fp) != sizeof(index_header) ||
+        std::memcmp(index_header.magic, "PY91", 4) != 0 || index_header.version != 1 ||
+        index_header.count != header.count) return false;
+
+    auto read_index = [&](uint32_t index, T9IndexRecord *record) {
+        const uint64_t offset = static_cast<uint64_t>(index_offset) +
+                                sizeof(T9IndexHeader) +
+                                static_cast<uint64_t>(index) * sizeof(T9IndexRecord);
+        return std::fseek(fp, static_cast<long>(offset), SEEK_SET) == 0 &&
+               std::fread(record, 1, sizeof(*record), fp) == sizeof(*record);
+    };
+    uint32_t low = 0;
+    uint32_t high = index_header.count;
+    T9IndexRecord indexed = {};
+    while (low < high) {
+        const uint32_t mid = low + (high - low) / 2;
+        if (!read_index(mid, &indexed)) return false;
+        indexed.digits[sizeof(indexed.digits) - 1] = '\0';
+        if (std::strcmp(indexed.digits, digits.c_str()) < 0) low = mid + 1;
+        else high = mid;
+    }
+
+    FILE *source = std::fopen("/sdcard/system/ime/pinyin.bin", "rb");
+    if (!source) return false;
+    bool ok = true;
+    for (uint32_t index = low; index < index_header.count; ++index) {
+        if (!read_index(index, &indexed)) {
+            ok = false;
+            break;
+        }
+        indexed.digits[sizeof(indexed.digits) - 1] = '\0';
+        const bool is_exact = digits == indexed.digits;
+        const bool is_prefix = std::strncmp(indexed.digits, digits.c_str(), digits.size()) == 0;
+        if (!is_prefix) break;
+        if ((is_exact && exact->size() >= 32) || (!is_exact && prefix->size() >= 32)) continue;
+        BinaryRecord source_record = {};
+        const uint64_t source_offset = sizeof(BinaryHeader) +
+            static_cast<uint64_t>(indexed.source_index) * sizeof(BinaryRecord);
+        if (indexed.source_index >= header.count ||
+            std::fseek(source, static_cast<long>(source_offset), SEEK_SET) != 0 ||
+            std::fread(&source_record, 1, sizeof(source_record), source) != sizeof(source_record)) {
+            ok = false;
+            break;
+        }
+        source_record.key[sizeof(source_record.key) - 1] = '\0';
+        if (is_exact) append_unique_key(exact, source_record.key, 32);
+        else append_unique_key(prefix, t9_prefix_for(source_record.key, digits.size()), 32);
+        if (exact->size() >= 32 && prefix->size() >= 32) break;
+    }
+    std::fclose(source);
+    return ok;
+}
+
+bool collect_indexed_binary_t9(FILE *fp, const BinaryHeader &header,
+                               const std::string &digits,
+                               std::vector<std::string> *exact,
+                               std::vector<std::string> *prefix)
+{
+    if (collect_indexed_binary_t9_v2(fp, header, digits, exact, prefix)) return true;
+    return collect_indexed_binary_t9_v1(fp, header, digits, exact, prefix);
+}
+
+bool collect_binary_t9(const std::string &digits,
+                       std::vector<std::string> *exact,
+                       std::vector<std::string> *prefix,
+                       bool allow_full_scan)
+{
+    FILE *fp = std::fopen("/sdcard/system/ime/pinyin.bin", "rb");
+    if (!fp) return false;
+    BinaryHeader header = {};
+    const bool usable = std::fread(&header, 1, sizeof(header), fp) == sizeof(header) &&
+                        std::memcmp(header.magic, "PYD1", 4) == 0 && header.version == 1 &&
+                        header.count > 0 && header.count < 1000000;
+    if (!usable) {
+        std::fclose(fp);
+        return false;
+    }
+    if (collect_indexed_binary_t9(fp, header, digits, exact, prefix)) {
+        std::fclose(fp);
+        return true;
+    }
+    // Old PYD1 files do not have the appended PY91 index. Preserve their
+    // compatibility, but only pay for a complete scan when the built-in
+    // syllables did not produce any usable interpretation.
+    if (!allow_full_scan) {
+        std::fclose(fp);
+        return false;
+    }
+    std::fseek(fp, sizeof(BinaryHeader), SEEK_SET);
+    BinaryRecord records[64] = {};
+    uint32_t remaining = header.count;
+    while (remaining != 0) {
+        const size_t requested = std::min<size_t>(remaining, 64);
+        const size_t count = std::fread(records, sizeof(BinaryRecord), requested, fp);
+        if (count == 0) break;
+        for (size_t i = 0; i < count; ++i) {
+            records[i].key[sizeof(records[i].key) - 1] = '\0';
+            collect_t9_key(records[i].key, digits, exact, prefix);
+        }
+        remaining -= static_cast<uint32_t>(count);
+        if (count != requested) break;
+    }
+    std::fclose(fp);
+    return false;
+}
+
+void collect_text_t9(const std::string &digits,
+                     std::vector<std::string> *exact,
+                     std::vector<std::string> *prefix)
+{
+    FILE *fp = std::fopen("/sdcard/system/ime/pinyin.txt", "rb");
+    if (!fp) return;
+    char line[1024];
+    while (std::fgets(line, sizeof(line), fp)) {
+        char *tab = std::strchr(line, '\t');
+        if (tab) *tab = '\0';
+        else {
+            char *space = std::strchr(line, ' ');
+            if (space) *space = '\0';
+        }
+        collect_t9_key(line, digits, exact, prefix);
+    }
+    std::fclose(fp);
+}
+
 }  // namespace
 
 PinyinEngine::PinyinEngine(size_t page_size) : _page_size(std::max<size_t>(1, page_size)) {}
@@ -337,6 +610,132 @@ std::string PinyinEngine::candidate_on_page(size_t slot) const
 {
     size_t index = _page * _page_size + slot;
     return index < _candidates.size() ? _candidates[index] : std::string();
+}
+
+Pinyin9Engine::Pinyin9Engine(size_t page_size)
+    : _page_size(std::max<size_t>(1, page_size)), _engine(_page_size)
+{
+}
+
+std::string Pinyin9Engine::digits_for(const std::string &pinyin)
+{
+    return t9_digits(pinyin.c_str());
+}
+
+void Pinyin9Engine::set_digits(const std::string &digits)
+{
+    _digits.clear();
+    for (char c : digits) {
+        if (c >= '2' && c <= '9') _digits.push_back(c);
+        else if (c == '0' && !_digits.empty() && _digits.back() != '0') _digits.push_back(c);
+    }
+    rebuild();
+}
+
+bool Pinyin9Engine::append_digit(char digit)
+{
+    if (digit < '2' || digit > '9') {
+        if (digit != '0' || _digits.empty() || _digits.back() == '0') return false;
+    }
+    if (_digits.size() >= 31) return false;
+    _digits.push_back(digit);
+    rebuild();
+    return true;
+}
+
+bool Pinyin9Engine::erase_last()
+{
+    if (_digits.empty()) return false;
+    _digits.pop_back();
+    rebuild();
+    return true;
+}
+
+void Pinyin9Engine::clear()
+{
+    _digits.clear();
+    _compositions.clear();
+    _interpretation = 0;
+    _engine.set_composition("");
+}
+
+const std::string &Pinyin9Engine::composition() const
+{
+    static const std::string empty;
+    return _compositions.empty() ? empty : _compositions[_interpretation];
+}
+
+const std::string &Pinyin9Engine::interpretation_at(size_t index) const
+{
+    static const std::string empty;
+    return index < _compositions.size() ? _compositions[index] : empty;
+}
+
+void Pinyin9Engine::select_interpretation(size_t index)
+{
+    if (_compositions.empty()) {
+        _interpretation = 0;
+        _engine.set_composition("");
+        return;
+    }
+    _interpretation = std::min(index, _compositions.size() - 1);
+    _engine.set_composition(_compositions[_interpretation]);
+}
+
+bool Pinyin9Engine::next_interpretation()
+{
+    if (_interpretation + 1 >= _compositions.size()) return false;
+    select_interpretation(_interpretation + 1);
+    return true;
+}
+
+bool Pinyin9Engine::previous_interpretation()
+{
+    if (_interpretation == 0 || _compositions.empty()) return false;
+    select_interpretation(_interpretation - 1);
+    return true;
+}
+
+void Pinyin9Engine::rebuild()
+{
+    const int64_t start_us = esp_timer_get_time();
+    _compositions.clear();
+    _interpretation = 0;
+    if (_digits.empty()) {
+        _engine.set_composition("");
+        return;
+    }
+
+    std::vector<std::string> exact;
+    std::vector<std::string> prefix;
+    static const char *PREFERRED[] = {
+        "ni", "hao", "wo", "shi", "de", "le", "ma", "you", "zai", "ren",
+        "zhong", "guo", "men", "yao", "he", "yi", "bu", "zhe", "na", "shuo",
+        "nihao", "zhongguo", "wenjian", "shuru", "yuedu", "yinyue", "jiangnan",
+    };
+    for (const char *key : PREFERRED) collect_t9_key(key, _digits, &exact, &prefix);
+    for (const auto &entry : BUILTIN) collect_t9_key(entry.key, _digits, &exact, &prefix);
+    // One digit cannot identify a useful syllable yet. For complete built-in
+    // syllables the normal PinyinEngine will still load the full SD candidate
+    // list, so avoid rescanning every PYD1 record on those common key presses.
+    bool scanned_dictionary = false;
+    bool indexed_dictionary = false;
+    if (_digits.size() > 1) {
+        const bool allow_full_scan = exact.empty();
+        indexed_dictionary = collect_binary_t9(_digits, &exact, &prefix,
+                                                allow_full_scan);
+        scanned_dictionary = allow_full_scan && !indexed_dictionary;
+    }
+    if (exact.empty() && prefix.empty()) collect_text_t9(_digits, &exact, &prefix);
+
+    for (const auto &key : exact) append_unique_key(&_compositions, key, 24);
+    for (const auto &key : prefix) append_unique_key(&_compositions, key, 24);
+    select_interpretation(0);
+    ESP_LOGI(TAG, "nine-key digits=%s pinyin=%s options=%u dictionary_scan=%d indexed=%d time=%lld ms",
+             _digits.c_str(), composition().c_str(),
+             static_cast<unsigned>(_compositions.size()), scanned_dictionary ? 1 : 0,
+             indexed_dictionary ? 1 : 0,
+             (esp_timer_get_time() - start_us) / 1000);
 }
 
 }  // namespace ime
