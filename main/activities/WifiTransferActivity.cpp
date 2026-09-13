@@ -4,6 +4,7 @@
 #include "activities/SettingActivity.h"
 #include "activities/recent_books.h"
 #include "audio/audio_file_formats.h"
+#include "storage/app_paths.h"
 #include "storage/storage_sdcard.h"
 #include "ui/SystemFont.h"
 #include "wifi/wifi_setting.h"
@@ -306,7 +307,7 @@ static bool ensure_dir_logged(const char *path)
 static const char *upload_dir_for_name(const std::string &name)
 {
     if (strcasecmp(name.c_str(), "pinyin.bin") == 0) {
-        return "/sdcard/system/ime";
+        return app_paths::ime_dir();
     }
     if (has_ext_ci(name, ".txt") || has_ext_ci(name, ".md") ||
         has_ext_ci(name, ".markdown") || has_ext_ci(name, ".epub") ||
@@ -331,8 +332,10 @@ static const char *upload_dir_for_name(const std::string &name)
 static bool ensure_upload_dir(const char *path)
 {
     if (!path) return false;
-    if (std::strcmp(path, "/sdcard/system/ime") == 0) {
-        return ensure_dir("/sdcard/system") && ensure_dir("/sdcard/system/ime");
+    if (std::strcmp(path, app_paths::ime_dir()) == 0) {
+        return ensure_dir(app_paths::data_dir()) &&
+               ensure_dir(app_paths::system_dir()) &&
+               ensure_dir(app_paths::ime_dir());
     }
     return ensure_dir(path);
 }

@@ -6,6 +6,7 @@
 #include "activities/PlaceholderActivity.h"
 #include "activities/RadioActivity.h"
 #include "activities/SettingActivity.h"
+#include "activities/TransferActivity.h"
 #include "activities/WifiTransferActivity.h"
 #include "activities/WereadActivity.h"
 #include "activities/ZhihuActivity.h"
@@ -50,7 +51,7 @@ static void go_browse()  { launch_file_browser("/sdcard"); }
 static void go_bookshelf();
 static void go_radio()   { launch_radio(); }
 static void go_rss()     { launch_rss_reader(); }
-static void go_wifi()    { launch_wifi_transfer(); }
+static void go_transfer(){ launch_transfer(); }
 static void go_settings(){ launch_settings(); }
 static void go_clock()   { ActivityManager::instance().push(new PlaceholderActivity("Clock")); }
 static void go_music()   { launch_music(); }
@@ -63,7 +64,7 @@ static void go_map()     { launch_map(); }
 static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
     {
         {"Clock",    go_clock},
-        {"Transfer", go_wifi},
+        {"Transfer", go_transfer},
         {"Images",   go_images},
         {"Files",    go_browse},
         {"Book",     go_bookshelf},

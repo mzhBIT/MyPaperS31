@@ -24,8 +24,13 @@ const char *weread_covers_dir();
 const char *zhihu_hot_list_file();
 const char *map_cache_dir();
 const char *map_image_file();
+const char *system_dir();
+const char *ime_dir();
+const char *pinyin_dictionary_file();
+const char *pinyin_text_file();
 
 void ensure_data_dir();
 void ensure_dir(const char *path);
+void ensure_ime_dir();
 
 } // namespace app_paths

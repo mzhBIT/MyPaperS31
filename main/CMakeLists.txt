@@ -1,5 +1,7 @@
 set(srcs
     "main.cpp"
+    "usb/usb_transfer_boot.c"
+    "usb/usb_msc_mode.cpp"
     "input/adc_keys.cpp"
     "input/touch_input.cpp"
     "ime/PinyinEngine.cpp"
@@ -60,6 +62,7 @@ set(srcs
     "activities/ZhihuActivity.cpp"
     "activities/MapActivity.cpp"
     "activities/WifiTransferActivity.cpp"
+    "activities/TransferActivity.cpp"
     "activities/RssReaderActivity.cpp"
     "activities/recent_books.cpp"
     "renderer/DocumentLayout.cpp"
@@ -79,8 +82,8 @@ set(srcs
     "parser/reflow_book.cpp")
 
 idf_component_register(SRCS ${srcs}
-                       INCLUDE_DIRS "." "activities" "input" "parser" "renderer" "storage" "ui" "wifi"
-                       REQUIRES fatfs sdmmc esp_driver_sdmmc esp_hw_support esp_driver_gpio esp_driver_i2c esp_driver_i2s esp_driver_jpeg esp_driver_ppa esp_adc esp_timer freertos freetype M5GFX M5Unified nvs_flash esp_event esp_netif esp_wifi esp_http_server esp_http_client esp-tls esp_psram usb esp_codec_dev esp_audio_simple_player esp_extractor esp_hls_stream gmf_core gmf_audio media_lib_sal espressif__eppp_link espressif__esp_hosted espressif__esp_wifi_remote espressif__libjpeg-turbo espressif__usb_host_uac uac2_host
+                       INCLUDE_DIRS "." "activities" "input" "parser" "renderer" "storage" "ui" "usb" "wifi"
+                       REQUIRES fatfs sdmmc esp_driver_sdmmc esp_hw_support esp_driver_gpio esp_driver_i2c esp_driver_i2s esp_driver_jpeg esp_driver_ppa esp_adc esp_timer freertos freetype M5GFX M5Unified nvs_flash esp_event esp_netif esp_wifi esp_http_server esp_http_client esp-tls esp_psram usb esp_codec_dev esp_audio_simple_player esp_extractor esp_hls_stream gmf_core gmf_audio media_lib_sal espressif__eppp_link espressif__esp_hosted espressif__esp_wifi_remote espressif__esp_tinyusb espressif__libjpeg-turbo espressif__usb_host_uac uac2_host
                        WHOLE_ARCHIVE)
 
 set_source_files_properties("weread/qrcodegen.cpp" "weread/WereadQr.cpp"

@@ -13,6 +13,8 @@
 #include "input/touch_input.h"
 #include "storage/app_paths.h"
 #include "storage/storage_sdcard.h"
+#include "usb/usb_msc_mode.h"
+#include "usb/usb_transfer_boot.h"
 #include "reader_font.h"
 #include "reader_style.h"
 
@@ -39,15 +41,20 @@ extern "C" void app_main(void)
 {
     init_nvs();
 
+    const bool usb_transfer_mode = usb_transfer_boot_requested();
+
     // The SD interface and EPD D9-D11 share the ESP32-P4 VDD_IO_5 domain.
     // Mounting SD configures on-chip LDO channel 4 to 3.3 V. Do this before
     // M5.begin(), otherwise the EPD bus starts while that domain is still at
     // its default ~1.9 V level.
-    esp_err_t sd_ret = storage_sdcard_mount();
-    if (sd_ret == ESP_OK) {
+    esp_err_t sd_ret = usb_transfer_mode
+                           ? storage_sdcard_init_usb_medium()
+                           : storage_sdcard_mount();
+    if (sd_ret == ESP_OK && !usb_transfer_mode) {
         app_paths::ensure_data_dir();
-    } else {
-        ESP_LOGW(TAG, "SD card mount failed before display init: %s",
+    } else if (sd_ret != ESP_OK) {
+        ESP_LOGW(TAG, "%s failed before display init: %s",
+                 usb_transfer_mode ? "SD raw-medium initialization" : "SD card mount",
                  esp_err_to_name(sd_ret));
     }
 
@@ -65,6 +72,17 @@ extern "C" void app_main(void)
 
     if (!M5.Display.width() || !M5.Display.height()) {
         ESP_LOGE(TAG, "Display init failed");
+        esp_restart();
+    }
+
+    if (usb_transfer_mode) {
+        touch_input_init();
+        ESP_LOGI(TAG, "Starting dedicated USB MSC transfer mode");
+        esp_err_t usb_ret = usb_msc_mode_run();
+        ESP_LOGE(TAG, "USB MSC mode stopped unexpectedly: %s", esp_err_to_name(usb_ret));
+        usb_transfer_boot_set(false);
+        storage_sdcard_release_usb_medium();
+        vTaskDelay(pdMS_TO_TICKS(250));
         esp_restart();
     }
 

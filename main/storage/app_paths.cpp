@@ -26,6 +26,10 @@ static const char *WEREAD_COVERS_DIR = "/sdcard/.reader/weread/covers";
 static const char *ZHIHU_HOT_LIST_FILE = "/sdcard/.reader/zhihu_hot_list.json";
 static const char *MAP_CACHE_DIR = "/sdcard/.reader/map";
 static const char *MAP_IMAGE_FILE = "/sdcard/.reader/map/current.img";
+static const char *SYSTEM_DIR = "/sdcard/.reader/system";
+static const char *IME_DIR = "/sdcard/.reader/system/ime";
+static const char *PINYIN_DICTIONARY_FILE = "/sdcard/.reader/system/ime/pinyin.bin";
+static const char *PINYIN_TEXT_FILE = "/sdcard/.reader/system/ime/pinyin.txt";
 
 const char *data_dir() { return APP_DATA_DIR; }
 const char *recent_books_file() { return RECENT_BOOKS_FILE; }
@@ -49,6 +53,10 @@ const char *weread_covers_dir() { return WEREAD_COVERS_DIR; }
 const char *zhihu_hot_list_file() { return ZHIHU_HOT_LIST_FILE; }
 const char *map_cache_dir() { return MAP_CACHE_DIR; }
 const char *map_image_file() { return MAP_IMAGE_FILE; }
+const char *system_dir() { return SYSTEM_DIR; }
+const char *ime_dir() { return IME_DIR; }
+const char *pinyin_dictionary_file() { return PINYIN_DICTIONARY_FILE; }
+const char *pinyin_text_file() { return PINYIN_TEXT_FILE; }
 
 void ensure_data_dir()
 {
@@ -59,6 +67,13 @@ void ensure_dir(const char *path)
 {
     ensure_data_dir();
     if (path && path[0]) mkdir(path, 0775);
+}
+
+void ensure_ime_dir()
+{
+    ensure_data_dir();
+    mkdir(SYSTEM_DIR, 0775);
+    mkdir(IME_DIR, 0775);
 }
 
 } // namespace app_paths

@@ -16,7 +16,7 @@
 2. `ime/PinyinEngine`
    - Owns the ASCII composition string and candidate page.
    - Uses a compact built-in common-word table.
-   - Looks up `/sdcard/system/ime/pinyin.bin` with an on-disk binary search, or falls back to `/sdcard/system/ime/pinyin.txt` during development. Text lines are `pinyin<TAB>candidate1 candidate2 ...`.
+   - Looks up `/sdcard/.reader/system/ime/pinyin.bin` with an on-disk binary search, or falls back to `/sdcard/.reader/system/ime/pinyin.txt` during development. Text lines are `pinyin<TAB>candidate1 candidate2 ...`.
    - Keeps lookup memory bounded; the complete external dictionary is never loaded into RAM.
 3. `ui/VirtualKeyboard`
    - Remains the reusable key hit-test and drawing component.

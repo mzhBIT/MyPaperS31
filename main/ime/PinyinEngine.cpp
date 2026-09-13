@@ -1,4 +1,5 @@
 #include "ime/PinyinEngine.h"
+#include "storage/app_paths.h"
 
 #include <algorithm>
 #include <cctype>
@@ -41,7 +42,7 @@ struct T9IndexRecordV2 {
 #pragma pack(pop)
 
 // Small always-available vocabulary. A larger dictionary can be placed at
-// /sdcard/system/ime/pinyin.txt without rebuilding the firmware.
+// /sdcard/.reader/system/ime/pinyin.txt without rebuilding the firmware.
 static const Entry BUILTIN[] = {
     {"a", "啊 阿 呵"}, {"ai", "爱 哎 矮 挨 艾"}, {"an", "安 按 暗 岸 案"},
     {"ang", "昂 盎"}, {"ao", "奥 熬 傲 澳 凹"}, {"ba", "把 八 吧 爸 巴"},
@@ -378,7 +379,7 @@ bool collect_indexed_binary_t9_v1(FILE *fp, const BinaryHeader &header,
         else high = mid;
     }
 
-    FILE *source = std::fopen("/sdcard/system/ime/pinyin.bin", "rb");
+    FILE *source = std::fopen(app_paths::pinyin_dictionary_file(), "rb");
     if (!source) return false;
     bool ok = true;
     for (uint32_t index = low; index < index_header.count; ++index) {
@@ -423,7 +424,7 @@ bool collect_binary_t9(const std::string &digits,
                        std::vector<std::string> *prefix,
                        bool allow_full_scan)
 {
-    FILE *fp = std::fopen("/sdcard/system/ime/pinyin.bin", "rb");
+    FILE *fp = std::fopen(app_paths::pinyin_dictionary_file(), "rb");
     if (!fp) return false;
     BinaryHeader header = {};
     const bool usable = std::fread(&header, 1, sizeof(header), fp) == sizeof(header) &&
@@ -466,7 +467,7 @@ void collect_text_t9(const std::string &digits,
                      std::vector<std::string> *exact,
                      std::vector<std::string> *prefix)
 {
-    FILE *fp = std::fopen("/sdcard/system/ime/pinyin.txt", "rb");
+    FILE *fp = std::fopen(app_paths::pinyin_text_file(), "rb");
     if (!fp) return;
     char line[1024];
     while (std::fgets(line, sizeof(line), fp)) {
@@ -518,7 +519,7 @@ void PinyinEngine::rebuild()
 
 bool PinyinEngine::load_binary_candidates()
 {
-    FILE *fp = std::fopen("/sdcard/system/ime/pinyin.bin", "rb");
+    FILE *fp = std::fopen(app_paths::pinyin_dictionary_file(), "rb");
     if (!fp) return false;
     BinaryHeader header = {};
     bool usable = std::fread(&header, 1, sizeof(header), fp) == sizeof(header) &&
@@ -569,7 +570,7 @@ bool PinyinEngine::load_binary_candidates()
 
 void PinyinEngine::load_external_candidates()
 {
-    FILE *fp = std::fopen("/sdcard/system/ime/pinyin.txt", "rb");
+    FILE *fp = std::fopen(app_paths::pinyin_text_file(), "rb");
     if (!fp) return;
     char line[1024];
     while (std::fgets(line, sizeof(line), fp)) {
