@@ -284,6 +284,29 @@ esp_gmf_err_t esp_gmf_rate_cvt_set_max_dest_rate(esp_gmf_element_handle_t handle
     return ESP_GMF_ERR_OK;
 }
 
+esp_gmf_err_t esp_gmf_rate_cvt_clear_max_dest_rate(esp_gmf_element_handle_t handle)
+{
+    ESP_GMF_NULL_CHECK(TAG, handle, { return ESP_GMF_ERR_INVALID_ARG;});
+    esp_gmf_rate_cvt_t *rate_cvt = (esp_gmf_rate_cvt_t *)handle;
+    esp_gmf_oal_mutex_lock(((esp_gmf_audio_element_t *)handle)->lock);
+    rate_cvt->max_dest_rate = 0;
+    esp_gmf_oal_mutex_unlock(((esp_gmf_audio_element_t *)handle)->lock);
+    return ESP_GMF_ERR_OK;
+}
+
+esp_gmf_err_t esp_gmf_rate_cvt_get_dest_rate(esp_gmf_element_handle_t handle,
+                                              uint32_t *dest_rate)
+{
+    ESP_GMF_NULL_CHECK(TAG, handle, { return ESP_GMF_ERR_INVALID_ARG;});
+    ESP_GMF_NULL_CHECK(TAG, dest_rate, { return ESP_GMF_ERR_INVALID_ARG;});
+    esp_ae_rate_cvt_cfg_t *cfg = (esp_ae_rate_cvt_cfg_t *)OBJ_GET_CFG(handle);
+    ESP_GMF_NULL_CHECK(TAG, cfg, return ESP_GMF_ERR_FAIL);
+    esp_gmf_oal_mutex_lock(((esp_gmf_audio_element_t *)handle)->lock);
+    *dest_rate = cfg->dest_rate;
+    esp_gmf_oal_mutex_unlock(((esp_gmf_audio_element_t *)handle)->lock);
+    return ESP_GMF_ERR_OK;
+}
+
 static esp_gmf_job_err_t esp_gmf_rate_cvt_reset(esp_gmf_element_handle_t handle, void *para)
 {
     ESP_GMF_NULL_CHECK(TAG, handle, return ESP_GMF_ERR_INVALID_ARG);

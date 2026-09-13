@@ -66,6 +66,13 @@ esp_gmf_err_t esp_gmf_rate_cvt_set_dest_rate(esp_gmf_element_handle_t handle, ui
  */
 esp_gmf_err_t esp_gmf_rate_cvt_set_max_dest_rate(esp_gmf_element_handle_t handle, uint32_t max_rate);
 
+/** Disable adaptive upper-limit mode so set_dest_rate() remains fixed. */
+esp_gmf_err_t esp_gmf_rate_cvt_clear_max_dest_rate(esp_gmf_element_handle_t handle);
+
+/** Read the currently configured destination rate. */
+esp_gmf_err_t esp_gmf_rate_cvt_get_dest_rate(esp_gmf_element_handle_t handle,
+                                              uint32_t *dest_rate);
+
 #ifdef __cplusplus
 }
 #endif /* __cplusplus */

@@ -11,6 +11,7 @@
 
 #include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_rom_sys.h>
 #include <esp_task.h>
 #include <esp_timer.h>
 
@@ -36,6 +37,14 @@ namespace lgfx
   static constexpr uint8_t WAVEFORM_MODE_GL16 = 5;
   static constexpr uint8_t WAVEFORM_MODE_DU4 = 7;
 
+  // Temporary diagnostic, reported on every call rather than past a threshold.
+  // The USB isochronous OUT pipe hands the next DMA buffer to the hardware from
+  // its ISR, at the microframe the previous one ends, so anything that delays
+  // that ISR by a fraction of a microframe shows up as "TX URB: 1/N packets
+  // skipped, first=0". This writeback is the largest CPU-bound operation on the
+  // display path, so its duration matters at every refresh. A threshold makes
+  // "fast" and "not running here any more" look identical in the log, which is
+  // exactly the ambiguity that cost a test round.
   static void cache_writeback_2d(const void* ptr, size_t size)
   {
 #if defined(ESP_CACHE_MSYNC_FLAG_DIR_C2M)
@@ -43,8 +52,21 @@ namespace lgfx
       uintptr_t start = reinterpret_cast<uintptr_t>(ptr) & ~uintptr_t(127);
       uintptr_t end = (reinterpret_cast<uintptr_t>(ptr) + size + 127) & ~uintptr_t(127);
       if (start < end) {
-        esp_cache_msync(reinterpret_cast<void*>(start), end - start,
-                        ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+        const int64_t t0 = esp_timer_get_time();
+        constexpr size_t sync_chunk = 16 * 1024;
+        uint32_t max_chunk_us = 0;
+        for (uintptr_t cursor = start; cursor < end; cursor += sync_chunk) {
+          const size_t chunk = std::min<size_t>(sync_chunk, end - cursor);
+          const int64_t chunk_begin = esp_timer_get_time();
+          esp_cache_msync(reinterpret_cast<void*>(cursor), chunk,
+                          ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+          max_chunk_us = std::max<uint32_t>(max_chunk_us,
+              static_cast<uint32_t>(esp_timer_get_time() - chunk_begin));
+        }
+        ESP_LOGI(TAG_2D, "cache writeback: %u bytes in %lld us max_chunk=%lu us",
+                 static_cast<unsigned>(end - start),
+                 static_cast<long long>(esp_timer_get_time() - t0),
+                 static_cast<unsigned long>(max_chunk_us));
       }
     }
 #else
@@ -600,6 +622,30 @@ namespace lgfx
     ctx->task = nullptr;
   }
 
+  static inline void du4_bus_relief()
+  {
+#if MYPAPER_EPD_2D_DU4_BUS_RELIEF_US > 0
+    // Both CPUs share the external-memory cache/bus.  A short ROM-only pause
+    // lets the core-0 UAC2 event path fetch code and resubmit its isochronous
+    // URB without making the EPD task sleep for a complete RTOS tick.
+    esp_rom_delay_us(MYPAPER_EPD_2D_DU4_BUS_RELIEF_US);
+#endif
+  }
+
+  static void clear_du4_frame(uint8_t* output_frame, size_t output_bytes)
+  {
+    size_t offset = 0;
+    while (offset < output_bytes) {
+      const size_t chunk = std::min<size_t>(
+          MYPAPER_EPD_2D_DU4_BUS_BURST_BYTES, output_bytes - offset);
+      memset(output_frame + offset, 0, chunk);
+      offset += chunk;
+      if (offset < output_bytes) {
+        du4_bus_relief();
+      }
+    }
+  }
+
   // DU4 has only four target buckets.  Collapse the two target nibbles to a
   // four-bit code and use a 4096-entry pair table instead of splitting and
   // looking up both pixels for every phase frame.  Exact unchanged 16-pixel
@@ -627,7 +673,7 @@ namespace lgfx
                           && scan_rows == panel_height;
 
     if (full_screen && active_groups != nullptr) {
-      memset(output_frame, 0, output_bytes);
+      clear_du4_frame(output_frame, output_bytes);
       uint32_t* output = reinterpret_cast<uint32_t*>(output_frame);
       for (size_t active = 0; active < active_group_count; ++active) {
         const size_t group_index = active_groups[active];
@@ -640,12 +686,17 @@ namespace lgfx
                  << pair_shifts[pair];
         }
         output[group_index] = permute_epd_output(packed);
+#if MYPAPER_EPD_2D_DU4_BUS_RELIEF_GROUPS > 0
+        if ((active + 1) % MYPAPER_EPD_2D_DU4_BUS_RELIEF_GROUPS == 0) {
+          du4_bus_relief();
+        }
+#endif
       }
       return;
     }
 
     if (!full_screen) {
-      memset(output_frame, 0, output_bytes);
+      clear_du4_frame(output_frame, output_bytes);
     }
     const size_t byte_begin = full_screen ? 0
         : std::min<size_t>(update_x >> 1, stride);
@@ -693,6 +744,11 @@ namespace lgfx
         }
         output[group] = permute_epd_output(packed);
       }
+#if MYPAPER_EPD_2D_DU4_BUS_RELIEF_ROWS > 0
+      if ((y - row_begin + 1) % MYPAPER_EPD_2D_DU4_BUS_RELIEF_ROWS == 0) {
+        du4_bus_relief();
+      }
+#endif
     }
   }
 
@@ -1313,9 +1369,10 @@ namespace lgfx
       .mode = _epd_mode,
     };
 
-    const size_t stride = size_t(_cfg.panel_width) >> 1;
-    cache_writeback_2d(_buf + size_t(_range_mod.top) * stride,
-                       size_t(update.h) * stride);
+    // The sprite writeback deliberately does NOT happen here. It is a long,
+    // non-interruptible walk over PSRAM, and this function runs on whichever
+    // core the application task sits on - core 0, the same core as the USB host
+    // ISR. Move it to task_update(), which is pinned to the scan core.
     _display_busy_2d = true;
     const bool queued = xQueueSend(_update_queue_2d, &update,
                                    128 / portTICK_PERIOD_MS) == pdTRUE;
@@ -1394,6 +1451,22 @@ namespace lgfx
         update.h = panel_h;
       }
 
+      // Write back the sprite rows this batch is about to consume. This has to
+      // precede the copy below so the PSRAM contents are coherent for anything
+      // that reads them without going through this core's cache.
+      //
+      // It used to run in display(), i.e. on the application's core (core 0 -
+      // the same one the USB host ISR and the usb_host task run on), and moved
+      // here to keep a 300 us PSRAM walk off that core. That move was tested and
+      // did NOT stop the "TX URB: 1/N packets skipped, first=0" reports, so the
+      // stall being chased is not this walk occupying core 0. It stays here
+      // anyway: the scan core is the better place for it, and the ordering
+      // requirement below is unchanged.
+      {
+        const size_t wb_top = std::min<size_t>(update.y, panel_h);
+        const size_t wb_rows = std::min<size_t>(update.h, panel_h - wb_top);
+        cache_writeback_2d(me->_buf + wb_top * stride, wb_rows * stride);
+      }
       memcpy(me->_target_buf, me->_buf, frame_bytes);
       const selected_waveform_t selected = me->selectWaveform(update.mode);
       if (selected.phases == nullptr || selected.phases->luts == nullptr

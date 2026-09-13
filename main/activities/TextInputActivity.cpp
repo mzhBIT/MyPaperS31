@@ -27,6 +27,7 @@ constexpr int MODE_KEY_X = 24;
 constexpr int MODE_KEY_W = 116;
 constexpr int MODE_KEY_GAP = 8;
 constexpr int PAGE_KEY_W = 36;
+constexpr int SECRET_TOGGLE_W = 104;
 
 class TextInputActivity final : public Activity {
 public:
@@ -60,6 +61,11 @@ public:
         if (event.type != TouchEventType::Tap) return false;
         if (event.y < HEADER_H && event.x < 130) {
             ActivityManager::instance().pop();
+            return true;
+        }
+        if (secret_toggle_hit(event.x, event.y)) {
+            _secret_visible = !_secret_visible;
+            redraw();
             return true;
         }
         // The language key lives in the candidate row and must remain
@@ -138,6 +144,7 @@ private:
     std::string _committed;
     std::string _message;
     bool _chinese;
+    bool _secret_visible = false;
 
     size_t committed_limit() const
     {
@@ -221,6 +228,13 @@ private:
         return y >= key_y && y < key_y + key_h && x >= key_x && x < key_x + widths[3];
     }
 
+    bool secret_toggle_hit(int x, int y) const
+    {
+        if (!_options.secret || y < EDIT_Y || y >= EDIT_Y + EDIT_H) return false;
+        const int right = M5.Display.width() - 20;
+        return x >= right - SECRET_TOGGLE_W && x < right;
+    }
+
     bool candidate_tap(int x, int y)
     {
         if (y < CANDIDATE_Y || y >= CANDIDATE_Y + CANDIDATE_H) return false;
@@ -277,7 +291,7 @@ private:
         int pad = 20;
         M5.Display.drawRoundRect(pad, EDIT_Y, width - pad * 2, EDIT_H, 7, TFT_BLACK);
         std::string editable = _chinese ? _committed : _keyboard.text();
-        if (_options.secret && !editable.empty()) {
+        if (_options.secret && !_secret_visible && !editable.empty()) {
             editable.assign(ui::utf8::length(editable), '*');
         }
         const int text_x = pad + 14;
@@ -285,7 +299,8 @@ private:
         const int inner_w = width - pad * 2 - 28;
         const int suffix_w = system_font::measure(_options.fixed_suffix);
         const int caret_gap = 8;
-        const int editable_w = std::max(0, inner_w - suffix_w - caret_gap);
+        const int toggle_space = _options.secret ? SECRET_TOGGLE_W + 10 : 0;
+        const int editable_w = std::max(0, inner_w - suffix_w - caret_gap - toggle_space);
 
         // Keep the insertion point visible for long names by retaining the
         // tail nearest the cursor. No placeholder is drawn for an empty name.
@@ -306,6 +321,16 @@ private:
         if (!_options.fixed_suffix.empty()) {
             system_font::draw_left(M5.Display, _options.fixed_suffix,
                                    caret_x + caret_gap, text_y, TFT_BLACK);
+        }
+        if (_options.secret) {
+            const int toggle_x = width - pad - SECRET_TOGGLE_W;
+            M5.Display.fillRect(toggle_x - 6, EDIT_Y + 1, SECRET_TOGGLE_W + 5,
+                                EDIT_H - 2, TFT_WHITE);
+            M5.Display.drawFastVLine(toggle_x - 6, EDIT_Y + 8, EDIT_H - 16, TFT_BLACK);
+            system_font::draw_center(M5.Display, _secret_visible ? "Hide" : "Show",
+                                     toggle_x + SECRET_TOGGLE_W / 2,
+                                     EDIT_Y + std::max(0, (EDIT_H - system_font::line_height()) / 2),
+                                     TFT_BLACK);
         }
     }
 

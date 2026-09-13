@@ -25,6 +25,33 @@ endmenu
 
 menu "Audio Radio Configuration"
 
+    config MYPAPER_USB_AUDIO
+        bool "Enable ESP32-P4 USB Host UAC headphone output"
+        depends on IDF_TARGET_ESP32P4
+        default y
+        help
+            Enable UAC 1.0 PCM playback through the ESP32-P4 High-Speed USB
+            Host port. The existing ES8311 speaker remains available.
+
+    config MYPAPER_USB_AUDIO_SOFTWARE_VOLUME
+        bool "Use software volume for USB audio"
+        depends on MYPAPER_USB_AUDIO
+        default y
+        help
+            Scale 16-bit PCM in the application and skip the optional UAC
+            Feature Unit volume-range probe. Some otherwise compatible USB
+            headsets advertise volume control but time out on GET_MIN/MAX/RES.
+
+    config MYPAPER_USB_AUDIO_MAX_VOLUME
+        int "USB headphone software volume ceiling (%)"
+        depends on MYPAPER_USB_AUDIO_SOFTWARE_VOLUME
+        range 1 100
+        default 5
+        help
+            Limit the maximum PCM amplitude sent to USB headphones. The UI
+            continues to use a 0..100 scale; UI 100 maps to this percentage of
+            full-scale PCM. A value of 50 is approximately -6 dB.
+
     config AUDIO_RADIO_ENABLE_ON_BOOT
         bool "Start network radio on boot"
         default y

@@ -1,0 +1,12 @@
+# USB audio isochronous OUT has a 125 us service interval on the P4 HS port.
+# Keep the project-local USB host/HCD implementation and its DWC HAL backend
+# executable while flash/PSRAM cache maintenance is in progress.
+[mapping:mypaper_usb_host_iram]
+archive: libusb.a
+entries:
+    * (noflash)
+
+[mapping:mypaper_usb_dwc_hal_iram]
+archive: libhal.a
+entries:
+    usb_dwc_hal (noflash)

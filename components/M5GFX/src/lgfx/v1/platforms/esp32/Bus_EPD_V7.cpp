@@ -44,6 +44,63 @@ namespace lgfx { inline namespace v1 {
 
 static constexpr char TAG[] = "Bus_EPD_V7";
 
+#if defined(CONFIG_IDF_TARGET_ESP32P4) \
+ && MYPAPER_EPD_USE_2D_ENGINE && MYPAPER_EPD_2D_CONTINUOUS_SCAN
+struct epd2d_init_context_t {
+    const Bus_EPD::config_t* config;
+    size_t panel_width;
+    size_t panel_height;
+    SemaphoreHandle_t done;
+    bool result;
+};
+
+static void epd2d_init_task(void* argument)
+{
+    auto* context = static_cast<epd2d_init_context_t*>(argument);
+    ESP_LOGI(TAG, "2D scan backend init on core %d", xPortGetCoreID());
+    context->result = epd2d_continuous_scan_init(*context->config,
+                                                 context->panel_width,
+                                                 context->panel_height);
+    xSemaphoreGive(context->done);
+    vTaskDelete(nullptr);
+}
+
+static bool init_epd2d_on_dedicated_core(const Bus_EPD::config_t& config,
+                                         size_t panel_width,
+                                         size_t panel_height)
+{
+    constexpr BaseType_t epd_core = portNUM_PROCESSORS > 1 ? 1 : 0;
+    if (xPortGetCoreID() == epd_core) {
+        return epd2d_continuous_scan_init(config, panel_width, panel_height);
+    }
+
+    SemaphoreHandle_t done = xSemaphoreCreateBinary();
+    if (done == nullptr) {
+        ESP_LOGE(TAG, "2D scan init semaphore allocation failed");
+        return false;
+    }
+    epd2d_init_context_t context = {
+        .config = &config,
+        .panel_width = panel_width,
+        .panel_height = panel_height,
+        .done = done,
+        .result = false,
+    };
+    TaskHandle_t task = nullptr;
+    const BaseType_t created = xTaskCreatePinnedToCore(
+        epd2d_init_task, "epd2d_init", 6144, &context,
+        configMAX_PRIORITIES - 2, &task, epd_core);
+    if (created != pdPASS) {
+        ESP_LOGE(TAG, "2D scan init task creation failed");
+        vSemaphoreDelete(done);
+        return false;
+    }
+    xSemaphoreTake(done, portMAX_DELAY);
+    vSemaphoreDelete(done);
+    return context.result;
+}
+#endif
+
 static uint8_t make_pca_power_value(bool output_enable, bool mode, bool pwrup, bool vcom_ctrl, bool wakeup)
 {
     uint8_t value = 0;
@@ -60,6 +117,10 @@ static uint8_t make_pca_power_value(bool output_enable, bool mode, bool pwrup, b
 bool Bus_EPD_V7::init(void) {
     _bus_busy = false;
     _pwr_on = false;
+#if MYPAPER_EPD_USE_2D_ENGINE
+    _last_power_off_ms = 0;
+    _power_off_time_valid = false;
+#endif
     _i80_bus_handle = nullptr;
     _io_handle = nullptr;
 
@@ -114,9 +175,12 @@ bool Bus_EPD_V7::init(void) {
 
 #if defined(CONFIG_IDF_TARGET_ESP32P4) \
  && MYPAPER_EPD_USE_2D_ENGINE && MYPAPER_EPD_2D_CONTINUOUS_SCAN
-    if (!epd2d_continuous_scan_init(_config,
-                                    MYPAPER_EPD_MEMORY_WIDTH,
-                                    MYPAPER_EPD_MEMORY_HEIGHT)) {
+    // Interrupt affinity is selected by the core which installs each driver.
+    // Initialize LCD_CAM/GDMA/RMT on the same dedicated core as epd2d, keeping
+    // their frame-end ISRs away from the core-0 USB Audio deadline path.
+    if (!init_epd2d_on_dedicated_core(_config,
+                                      MYPAPER_EPD_MEMORY_WIDTH,
+                                      MYPAPER_EPD_MEMORY_HEIGHT)) {
         ESP_LOGE(TAG, "2D continuous scan initialization failed");
         return false;
     }
@@ -239,6 +303,18 @@ bool Bus_EPD_V7::powerControl(bool flg_on) {
         _pwr_on = flg_on;
         wait();
         if (flg_on) {
+#if MYPAPER_EPD_USE_2D_ENGINE
+            if (_power_off_time_valid) {
+                const uint32_t elapsed_ms = lgfx::millis() - _last_power_off_ms;
+                if (elapsed_ms < MYPAPER_EPD_2D_MIN_POWER_OFF_MS) {
+                    const uint32_t settle_ms =
+                        MYPAPER_EPD_2D_MIN_POWER_OFF_MS - elapsed_ms;
+                    ESP_LOGI(TAG, "waiting %lu ms for TPS65185 rail discharge",
+                             (unsigned long)settle_ms);
+                    lgfx::delay(settle_ms);
+                }
+            }
+#endif
             // Match epdiy v7: rewrite PCA port1 as a complete control register.
             lgfx::gpio_hi(_config.pin_spv);
             uint8_t out = make_pca_power_value(false, false, false, false, true);
@@ -259,8 +335,12 @@ bool Bus_EPD_V7::powerControl(bool flg_on) {
 
             lgfx::gpio_hi(_config.pin_sph);
             if (!_wait_tps_pwrgood(200)) {
-                ESP_LOGE(TAG, "TPS Register PG Timeout!");
-                _pwr_on = false;
+                const uint8_t int1 = _tps_read(TPS_REG_INT1);
+                const uint8_t int2 = _tps_read(TPS_REG_INT2);
+                ESP_LOGE(TAG, "TPS Register PG Timeout! INT1=0x%02X INT2=0x%02X",
+                         int1, int2);
+                // Keep the logical state asserted so the panel's subsequent
+                // powerControl(false) performs a real rail/VCOM/WAKEUP cleanup.
                 return false;
             }
 
@@ -319,6 +399,10 @@ bool Bus_EPD_V7::powerControl(bool flg_on) {
             lgfx::delay(1);
             out = make_pca_power_value(false, false, false, false, false);
             _pca_write(3, out);
+#if MYPAPER_EPD_USE_2D_ENGINE
+            _last_power_off_ms = lgfx::millis();
+            _power_off_time_valid = true;
+#endif
         }
     }
     return true;

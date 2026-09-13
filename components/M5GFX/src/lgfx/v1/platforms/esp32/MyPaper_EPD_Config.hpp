@@ -88,6 +88,31 @@
 #define MYPAPER_EPD_2D_DU4_PIPELINE_PRIME 3
 #endif
 
+// DU4 frames live in PSRAM.  Clear/render them in short bursts so the shared
+// Flash/PSRAM cache bus regularly becomes available to the HS USB audio path.
+// The delay is a ROM busy wait on the EPD core: it does not alter LUT contents,
+// phase count, or LCD_CAM scan timing.
+#ifndef MYPAPER_EPD_2D_DU4_BUS_BURST_BYTES
+#define MYPAPER_EPD_2D_DU4_BUS_BURST_BYTES 4096u
+#endif
+#ifndef MYPAPER_EPD_2D_DU4_BUS_RELIEF_US
+#define MYPAPER_EPD_2D_DU4_BUS_RELIEF_US 4u
+#endif
+#ifndef MYPAPER_EPD_2D_DU4_BUS_RELIEF_GROUPS
+#define MYPAPER_EPD_2D_DU4_BUS_RELIEF_GROUPS 256u
+#endif
+#ifndef MYPAPER_EPD_2D_DU4_BUS_RELIEF_ROWS
+#define MYPAPER_EPD_2D_DU4_BUS_RELIEF_ROWS 4u
+#endif
+
+// TPS65185 keeps the negative rail active for its discharge interval after a
+// power-down request. Rapid UI updates can otherwise start a new high-voltage
+// sequence while the previous one is still settling, occasionally leaving PG
+// low. Applied only by the 2D engine's V7 power path.
+#ifndef MYPAPER_EPD_2D_MIN_POWER_OFF_MS
+#define MYPAPER_EPD_2D_MIN_POWER_OFF_MS 250u
+#endif
+
 // Experimental epdiy-style line producer/consumer backend.  Keep disabled:
 // the current P4 circular-GDMA implementation consumes its software queues
 // but does not reliably present the refilled bounce data to the panel.

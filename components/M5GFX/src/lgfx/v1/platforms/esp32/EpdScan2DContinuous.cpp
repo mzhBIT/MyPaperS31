@@ -531,12 +531,21 @@ namespace lgfx
       return false;
     }
 
-    esp_err_t err = esp_cache_msync(const_cast<uint8_t*>(data), length,
-                                    ESP_CACHE_MSYNC_FLAG_DIR_C2M
-                                  | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
-    if (err != ESP_OK) {
-      ESP_LOGE(TAG, "frame cache writeback failed: %s", esp_err_to_name(err));
-      return false;
+    // A monolithic PSRAM cache writeback can hold the shared cache controller
+    // longer than one 125 us USB HS microframe. Keep each non-preemptible cache
+    // operation short so UAC2 can submit the next isochronous URB on time.
+    esp_err_t err = ESP_OK;
+    constexpr size_t sync_chunk = 16 * 1024;
+    for (size_t offset = 0; offset < length; offset += sync_chunk) {
+      const size_t chunk = std::min(sync_chunk, length - offset);
+      err = esp_cache_msync(const_cast<uint8_t*>(data) + offset, chunk,
+                            ESP_CACHE_MSYNC_FLAG_DIR_C2M
+                          | ESP_CACHE_MSYNC_FLAG_TYPE_DATA);
+      if (err != ESP_OK) {
+        ESP_LOGE(TAG, "frame cache writeback failed at %u/%u: %s",
+                 (unsigned)offset, (unsigned)length, esp_err_to_name(err));
+        return false;
+      }
     }
     gdma_buffer_mount_config_t mount = {};
     mount.buffer = const_cast<uint8_t*>(data);

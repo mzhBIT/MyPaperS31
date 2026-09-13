@@ -54,6 +54,10 @@ private:
   int        _i2c_scl  = 8;
   unsigned   _vcom_mV  = 2560;
   bool       _mc2_upseq = false;
+#if MYPAPER_EPD_USE_2D_ENGINE
+  uint32_t   _last_power_off_ms = 0;
+  bool       _power_off_time_valid = false;
+#endif
 
   // Key input state
   int _key_int_pin = -1;

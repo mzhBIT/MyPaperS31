@@ -74,6 +74,31 @@ CONFIG_ESP_AUDIO_SIMPLE_PLAYER_CH_CVT_EN=y
 CONFIG_AUDIO_SIMPLE_PLAYER_CH_CVT_DEST=2
 CONFIG_ESP_AUDIO_SIMPLE_PLAYER_BIT_CVT_EN=y
 CONFIG_AUDIO_SIMPLE_PLAYER_BIT_CVT_DEST_16BIT=y
+# The USB host enum driver reads a device's whole configuration descriptor into
+# one buffer sized at build time, and rejects any device whose wTotalLength
+# exceeds it (enum.c: "Configuration descriptor larger than control transfer max
+# length"). UAC headsets are the worst case: an AudioControl interface plus one
+# AudioStreaming interface per alternate setting, each with its own format and
+# endpoint descriptors. The 256-byte default rejects working headsets at
+# enumeration, before any of our code runs. One buffer per attached device.
+CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=1024
+# The HCD keeps two DMA buffers per pipe (NUM_BUFFERS in hcd_dwc.c) and refills
+# one from its pending queue the moment the previous completes - in the ISR if a
+# URB is already waiting, otherwise only when the app resubmits from the
+# completion callback, which costs a round trip through the USB daemon task and
+# the class driver's client task. Isochronous OUT packets are one 125 us
+# microframe apart at High Speed bInterval=1, so a refill that misses its slot
+# leaves the leading packets planted on frames that have already elapsed; the
+# HCD reports that as USB_TRANSFER_STATUS_SKIPPED and this driver logs it as
+# "TX URB: N/packets skipped".
+#
+# Four 16-packet URBs keep about 2 ms in each submitted transfer. A 32-packet
+# test still lost packet zero at the end of an EPD PSRAM render burst, proving
+# that external-memory bus starvation rather than insufficient queue depth was
+# the limiting factor; keep the smaller setting to avoid needless DMA memory
+# and latency.
+CONFIG_UAC2_NUM_ISOC_URBS=4
+CONFIG_UAC2_NUM_PACKETS_PER_URB=16
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
 CONFIG_LWIP_TCP_WND_DEFAULT=32768
 CONFIG_LWIP_TCP_RECVMBOX_SIZE=32

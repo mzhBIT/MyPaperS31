@@ -26,6 +26,7 @@ constexpr int LAYOUT_KEY_W = 80;
 constexpr int PAGE_KEY_W = 36;
 constexpr int PINYIN_DIGITS_W = 92;
 constexpr int PINYIN_PAGE_KEY_W = 40;
+constexpr int SECRET_TOGGLE_W = 104;
 constexpr const char *INPUT_NVS_NAMESPACE = "text_input";
 constexpr const char *INPUT_NVS_LAYOUT = "cn_layout";
 
@@ -82,6 +83,7 @@ struct TextInputOverlay::Impl {
     bool chinese = true;
     bool nine_key = false;
     bool shown = false;
+    bool secret_visible = false;
 
     int candidate_y() const { return layout.keys_y - 144; }
     int candidate_h() const { return 136; }
@@ -382,6 +384,16 @@ struct TextInputOverlay::Impl {
         return false;
     }
 
+    bool secret_toggle_tap(int x, int y)
+    {
+        if (!options.secret || y < editor_y() || y >= editor_y() + editor_h()) return false;
+        const int edit_right = M5.Display.width() - 36;
+        if (x < edit_right - SECRET_TOGGLE_W || x >= edit_right) return false;
+        secret_visible = !secret_visible;
+        draw();
+        return true;
+    }
+
     void draw_editor()
     {
         const int width = M5.Display.width();
@@ -400,14 +412,15 @@ struct TextInputOverlay::Impl {
         M5.Display.drawRoundRect(edit_x, editor_y(), edit_w, editor_h(),
                                  6, TFT_BLACK);
         std::string editable = chinese ? committed : keyboard->text();
-        if (options.secret && !editable.empty()) {
+        if (options.secret && !secret_visible && !editable.empty()) {
             editable.assign(utf8::length(editable), '*');
         }
         const int text_x = edit_x + 12;
         const int text_y = editor_y() +
             std::max(0, (editor_h() - system_font::line_height()) / 2);
         const int suffix_w = system_font::measure(options.fixed_suffix);
-        const int editable_w = std::max(0, edit_w - 28 - suffix_w);
+        const int toggle_space = options.secret ? SECRET_TOGGLE_W + 10 : 0;
+        const int editable_w = std::max(0, edit_w - 28 - suffix_w - toggle_space);
         while (!editable.empty() && system_font::measure(editable) > editable_w) {
             size_t bytes = 1;
             const unsigned char lead = static_cast<unsigned char>(editable[0]);
@@ -424,6 +437,18 @@ struct TextInputOverlay::Impl {
         if (!options.fixed_suffix.empty()) {
             system_font::draw_left(M5.Display, options.fixed_suffix,
                                    caret_x + 7, text_y, TFT_BLACK);
+        }
+        if (options.secret) {
+            const int toggle_x = edit_x + edit_w - SECRET_TOGGLE_W;
+            M5.Display.fillRect(toggle_x - 6, editor_y() + 1,
+                                SECRET_TOGGLE_W + 5, editor_h() - 2, TFT_WHITE);
+            M5.Display.drawFastVLine(toggle_x - 6, editor_y() + 8,
+                                     editor_h() - 16, TFT_BLACK);
+            system_font::draw_center(M5.Display, secret_visible ? "Hide" : "Show",
+                                     toggle_x + SECRET_TOGGLE_W / 2,
+                                     editor_y() +
+                                         std::max(0, (editor_h() - system_font::line_height()) / 2),
+                                     TFT_BLACK);
         }
 
         const int gap = 16;
@@ -580,6 +605,7 @@ void TextInputOverlay::open(const TextInputOptions &options,
     _impl->nine_engine.clear();
     _impl->chinese = options.start_in_chinese;
     _impl->nine_key = load_nine_key_preference();
+    _impl->secret_visible = false;
     if (!_impl->chinese) _impl->keyboard->set_text(_impl->committed);
     _impl->shown = true;
     _impl->draw();
@@ -613,6 +639,7 @@ bool TextInputOverlay::handle_touch(const TouchEvent &event)
     if (event.type != TouchEventType::Tap) return true;
 
     bool submit_button = false;
+    if (_impl->secret_toggle_tap(event.x, event.y)) return true;
     if (_impl->button_tap(event.x, event.y, &submit_button)) {
         if (!submit_button) {
             cancel();

@@ -221,6 +221,7 @@ public:
 
     void loop() override
     {
+        audio_radio_service_output();
         audio_playback_state_t state = audio_radio_get_state();
         if (state == AUDIO_PLAYBACK_FINISHED && !_terminal_handled && _current >= 0) {
             _terminal_handled = true;
@@ -234,6 +235,7 @@ public:
         }
         if (update_volume_toast()) return;
         update_progress_if_due();
+        update_controls_if_state_changed();
     }
 
     bool on_touch(const TouchEvent &event) override
@@ -264,6 +266,10 @@ public:
 
         if (event.x < design_x(100) && event.y < design_y(130)) {
             ActivityManager::instance().pop();
+            return true;
+        }
+        if (event.x >= design_x(558) && event.y < design_y(130)) {
+            cycle_audio_output();
             return true;
         }
 
@@ -370,6 +376,9 @@ private:
     bool _volume_toast_drawn = false;
     std::string _cover_thumbnail_path;
     std::string _status;
+    // State the control row was last drawn with. Audio output changes flip the
+    // play/pause glyph without any touch, so the row needs to notice on its own.
+    audio_playback_state_t _controls_state = AUDIO_PLAYBACK_IDLE;
 
     bool hit_center(int x, int y, int center_x, int center_y, int half_w, int half_h) const
     {
@@ -596,7 +605,7 @@ private:
         // and visible lyric area so repeat-one does not trigger a full-screen
         // refresh or regenerate cover/lyric metadata at every loop.
         M5.Display.startWrite();
-        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
         draw_progress_section(0);
         if (_view == ContentView::Cover) draw_current_lyric_section();
         else if (_view == ContentView::Lyrics) draw_lyrics_section();
@@ -698,7 +707,7 @@ private:
         if (M5.Display.displayBusy()) return false;
 
         M5.Display.startWrite();
-        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
         draw_volume_toast(show);
         M5.Display.display();
         M5.Display.endWrite();
@@ -934,7 +943,7 @@ private:
         M5.Display.startWrite();
         // Keep progress and lyric partial updates on the same waveform.
         // Switching between fast/fastest here causes a visible dark flash.
-        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
         draw_progress_section(progress);
         if (lyric_changed) {
             if (_view == ContentView::Cover) draw_current_lyric_section();
@@ -1049,12 +1058,47 @@ private:
         if (_lyrics.empty()) draw_view_indicator();
     }
 
+    bool update_controls_if_state_changed()
+    {
+        if (audio_radio_get_state() == _controls_state) return false;
+        // Level-triggered on purpose: a refresh already in flight only means the
+        // next poll does the work, so nothing is lost by waiting for the panel.
+        if (M5.Display.displayBusy()) return false;
+
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
+        draw_controls();
+        M5.Display.display();
+        M5.Display.endWrite();
+        return true;
+    }
+
+    // The two glyphs this slot alternates between are not the same size - Play is
+    // 40x50, Pause 28x36 - and draw_icon_1bpp paints only the bitmap's own extent,
+    // with no fixed cell behind it. Drawing the smaller one over the larger
+    // therefore leaves a ring of the old glyph. draw_all() hides that behind its
+    // fillScreen; a partial repaint has to clear the union of the two first.
+    void draw_play_pause_icon()
+    {
+        const IconBitmap1bpp *play = music_icons::get(MusicIconId::Play);
+        const IconBitmap1bpp *pause = music_icons::get(MusicIconId::Pause);
+        if (play != nullptr && pause != nullptr) {
+            const int width = design_x(std::max(play->width, pause->width));
+            const int height = design_y(std::max(play->height, pause->height));
+            M5.Display.fillRect(design_x(342) - width / 2, design_y(MAIN_CONTROL_Y) - height / 2,
+                                width, height, TFT_WHITE);
+        }
+        draw_icon(audio_radio_get_state() == AUDIO_PLAYBACK_PLAYING ? MusicIconId::Pause
+                                                                   : MusicIconId::Play,
+                  342, MAIN_CONTROL_Y);
+    }
+
     void draw_controls()
     {
         audio_playback_state_t state = audio_radio_get_state();
+        _controls_state = state;
         draw_icon(MusicIconId::Previous, 207, MAIN_CONTROL_Y);
-        draw_icon(state == AUDIO_PLAYBACK_PLAYING ? MusicIconId::Pause : MusicIconId::Play,
-                  342, MAIN_CONTROL_Y);
+        draw_play_pause_icon();
         draw_icon(MusicIconId::Next, 479, MAIN_CONTROL_Y);
 
         MusicIconId mode_icon = MusicIconId::Sequence;
@@ -1068,6 +1112,32 @@ private:
         draw_icon(MusicIconId::VolumeUp, 579, BOTTOM_CONTROL_Y);
     }
 
+    void draw_audio_output_selector()
+    {
+        const int x = design_x(570);
+        const int y = design_y(34);
+        const int w = design_x(88);
+        const int h = design_y(56);
+        M5.Display.drawRect(x, y, w, h, TFT_BLACK);
+        system_font::draw_center(M5.Display, audio_radio_get_output_mode_name(),
+                                 x + w / 2, y + design_y(13), TFT_BLACK);
+    }
+
+    void cycle_audio_output()
+    {
+        audio_output_mode_t current = audio_radio_get_output_mode();
+        audio_output_mode_t next = current == AUDIO_OUTPUT_SPEAKER
+                                       ? AUDIO_OUTPUT_USB
+                                       : (current == AUDIO_OUTPUT_USB
+                                              ? AUDIO_OUTPUT_AUTO
+                                              : AUDIO_OUTPUT_SPEAKER);
+        esp_err_t ret = audio_radio_set_output_mode(next);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Audio output switch failed: %s", esp_err_to_name(ret));
+        }
+        draw_all();
+    }
+
     void draw_all()
     {
         ensure_focus_visible();
@@ -1076,7 +1146,7 @@ private:
         _volume_toast_drawn = false;
         _volume_toast_hide_us = 0;
         M5.Display.startWrite();
-        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
         M5.Display.fillScreen(TFT_WHITE);
 
         std::string title;
@@ -1084,8 +1154,9 @@ private:
         else if (_current >= 0) title = track_title(_tracks[_current].path);
         else title = "选择歌曲";
         system_font::draw_left(M5.Display,
-                               system_font::ellipsize(title, design_x(530)),
+                               system_font::ellipsize(title, design_x(455)),
                                design_x(TITLE_X), design_y(TITLE_Y), TFT_BLACK);
+        draw_audio_output_selector();
 
         M5.Display.drawRect(design_x(COVER_X), design_y(COVER_Y),
                             design_x(COVER_W), design_y(COVER_H), TFT_BLACK);
@@ -1121,7 +1192,7 @@ private:
         if (!_refresh_frozen) progress = read_progress();
 
         M5.Display.startWrite();
-        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
         draw_refresh_freeze_control();
         if (!_refresh_frozen) {
             draw_progress_section(progress);

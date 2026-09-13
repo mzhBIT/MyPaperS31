@@ -4,7 +4,7 @@ documentation: https://github.com/espressif/esp-adf-libs/tree/master/esp_extract
 issues: https://github.com/espressif/esp-gmf/issues
 repository: git://github.com/espressif/esp-adf-libs.git
 repository_info:
-  commit_sha: 8a9662d872d30c21b61a39f1913f74cbc7ff41f6
+  commit_sha: 7cbf3302f67a75f14ee34d55c1dc5a0c57912f3a
   path: esp_extractor
 tags:
 - multimedia
@@ -12,4 +12,4 @@ tags:
 - container
 - demuxer
 url: https://github.com/espressif/esp-adf-libs/tree/master/esp_extractor
-version: 1.0.4
+version: 1.0.5

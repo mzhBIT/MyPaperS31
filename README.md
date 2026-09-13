@@ -33,7 +33,8 @@ MyPaperP4 是一套面向自定义 **ESP32-P4 单色墨水屏设备**的阅读�
 - 播放进度、已播放时间和总时长显示。
 - 封面、滚动歌词和歌曲列表三视图，可在内容区左右滑动切换。
 - 支持 FLAC PICTURE、ID3 APIC/PIC、M4A `covr` 内嵌封面，以及同目录封面图片；封面会生成适合硬解显示的方形缩略图。
-- 44.1 kHz、48 kHz 音频按原采样率输出；高于 48 kHz 时转换到设备支持范围。
+- 支持 ES8311 扬声器、UAC 1.0 与 UAC 2.0 USB 耳机/DAC 输出，以及 Speaker、USB、Auto 动态切换。
+- 扬声器输出最高 48 kHz；USB 输出按 DAC 描述符动态协商，设备支持时可保持高于 48 kHz 的原始采样率及 16/24/32-bit 位深。
 - 相邻歌曲采样率相同时避免重复配置 I²S/Codec。
 - 支持 ID3 `SYLT`、`USLT`/`TXXX`、Vorbis Comment 和 M4A `©lyr` 中的同步歌词。
 - 没有可用内嵌歌词时，自动查找音频同目录下的同名 `.lrc` 文件。
@@ -222,7 +223,7 @@ MyPaperP4/
 │  ├─ storage/           SD 卡和应用路径
 │  ├─ ui/                字体、样式和位图图标
 │  └─ wifi/              ESP-Hosted Wi-Fi 生命周期
-├─ components/           定制 M5GFX、M5Unified、FreeType
+├─ components/           定制 M5GFX、M5Unified、FreeType、USB Host 与 UAC2 Host
 ├─ managed_components/   项目使用并做过适配的 Espressif 组件
 ├─ Assets/               SVG 设计与图标源文件
 ├─ tools/                图标转换等开发工具
@@ -231,6 +232,7 @@ MyPaperP4/
 ```
 
 应用内部采用 `Activity`/`ActivityManager` 管理页面。更详细的源码模块说明见 [`main/README.md`](main/README.md)。
+USB Audio Host 的架构、实时性和验证基线见 [`docs/USB_AUDIO_OUTPUT_DESIGN.md`](docs/USB_AUDIO_OUTPUT_DESIGN.md)。
 
 ## 注意事项
 

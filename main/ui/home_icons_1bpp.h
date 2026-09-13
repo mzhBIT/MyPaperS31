@@ -20,6 +20,7 @@ enum class HomeIconId {
     DeepSeek,
     WeChatReading,
     ZhiHu,
+    Map,
     Count,
 };
 

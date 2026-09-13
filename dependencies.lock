@@ -1,4 +1,14 @@
 dependencies:
+  espressif/cmake_utilities:
+    component_hash: 351350613ceafba240b761b4ea991e0f231ac7a9f59a9ee901f751bddc0bb18f
+    dependencies:
+    - name: idf
+      require: private
+      version: '>=4.1'
+    source:
+      registry_url: https://components.espressif.com
+      type: service
+    version: 0.5.3
   espressif/eppp_link:
     dependencies: []
     source:
@@ -43,12 +53,12 @@ dependencies:
       type: service
     version: 1.6.2
   espressif/esp_extractor:
-    component_hash: d67b055c65fa04db1b36dcb466673b923fe880e1bffddf71db372d2bd15912d4
+    component_hash: 49c020dccb664953445c1d77d775dfccd707f6c52e1c24bd2a49edba81ab21e1
     dependencies: []
     source:
       registry_url: https://components.espressif.com
       type: service
-    version: 1.0.4
+    version: 1.0.5
   espressif/esp_hls_stream:
     component_hash: b4202f5e93987ccbe82d0e22829bb42cad7c259d47e3638ea9ea5cf88916ec27
     dependencies:
@@ -158,6 +168,24 @@ dependencies:
       registry_url: https://components.espressif.com
       type: service
     version: 1.0.2
+  espressif/usb_host_uac:
+    component_hash: afb7da2c760c08a56bbc238f0c51d64e8289cb4b1de276670feab43a6a9fc0c9
+    dependencies:
+    - name: espressif/cmake_utilities
+      registry_url: https://components.espressif.com
+      require: private
+      version: 0.5.*
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32s2
+    - esp32s3
+    - esp32p4
+    version: 1.2.0
   idf:
     source:
       type: idf
@@ -173,7 +201,8 @@ direct_dependencies:
 - espressif/gmf_audio
 - espressif/gmf_io
 - espressif/libjpeg-turbo
+- espressif/usb_host_uac
 - idf
-manifest_hash: b04fe5b60c4f4d04f1b5b3cbb4377796c212fbc934745d6c082bb9944b550543
+manifest_hash: 214f99462430c4ca42f1f1310548fe14a73957d715b6fdc482fa49f60ec7e3b0
 target: esp32p4
 version: 2.0.0

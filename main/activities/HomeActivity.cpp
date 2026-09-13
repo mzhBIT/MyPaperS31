@@ -2,6 +2,7 @@
 #include "activities/ActivityManager.h"
 #include "activities/DeepSeekActivity.h"
 #include "activities/MusicActivity.h"
+#include "activities/MapActivity.h"
 #include "activities/PlaceholderActivity.h"
 #include "activities/RadioActivity.h"
 #include "activities/SettingActivity.h"
@@ -57,6 +58,7 @@ static void go_images()  { launch_file_browser("/sdcard"); }
 static void go_deepseek(){ launch_deepseek(); }
 static void go_weread()  { launch_weread(); }
 static void go_zhihu()   { launch_zhihu(); }
+static void go_map()     { launch_map(); }
 
 static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
     {
@@ -73,7 +75,7 @@ static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
     {
         {"DeepSeek", go_deepseek},
         {"WeRead", go_weread}, {"ZhiHu", go_zhihu},
-        {nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
+        {"Map", go_map}, {nullptr, nullptr}, {nullptr, nullptr},
         {nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
     },
 };
@@ -103,7 +105,7 @@ static const HomeIconId g_icons[HOME_PAGE_CNT][MENU_CNT] = {
     {
         HomeIconId::DeepSeek,
         HomeIconId::WeChatReading, HomeIconId::ZhiHu,
-        HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
+        HomeIconId::Map, HomeIconId::Count, HomeIconId::Count,
         HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
     },
 };

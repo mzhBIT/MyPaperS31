@@ -11,6 +11,7 @@
 #include "driver/i2s_std.h"
 #include "sdkconfig.h"
 #include "audio/m5_i2c_codec_ctrl.h"
+#include "audio/usb_audio_output.h"
 #include "esp_audio_simple_player.h"
 #include "esp_audio_simple_player_advance.h"
 #include "esp_check.h"
@@ -20,13 +21,17 @@
 #include "esp_extractor_defaults.h"
 #include "esp_fourcc.h"
 #include "esp_gmf_audio_dec.h"
+#include "esp_gmf_bit_cvt.h"
+#include "esp_gmf_ch_cvt.h"
 #include "esp_gmf_pipeline.h"
 #include "esp_gmf_pool.h"
 #include "esp_gmf_rate_cvt.h"
 #include "esp_hls_io.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "media_lib_adapter.h"
+#include "nvs.h"
 
 #ifndef ES8311_CODEC_DEFAULT_ADDR
 #define ES8311_CODEC_DEFAULT_ADDR 0x30
@@ -40,6 +45,10 @@
 #endif
 #endif
 
+#ifndef CONFIG_MYPAPER_USB_AUDIO_MAX_VOLUME
+#define CONFIG_MYPAPER_USB_AUDIO_MAX_VOLUME 100
+#endif
+
 #define AUDIO_RADIO_I2C_PORT      ((uint8_t)CONFIG_AUDIO_RADIO_I2C_PORT)
 #define AUDIO_RADIO_I2C_FREQ_HZ   100000U
 #define AUDIO_RADIO_I2S_PORT      I2S_NUM_0
@@ -50,6 +59,15 @@
 #define AUDIO_RADIO_HLS_TASK_STACK  (20 * 1024)
 #define AUDIO_RADIO_RECORD_BUFFER_SIZE 4096
 #define AUDIO_RADIO_RECORD_PATH_MAX    256
+#define AUDIO_OUTPUT_NVS_NAMESPACE     "audio_out"
+#define AUDIO_OUTPUT_NVS_MODE_KEY      "mode"
+#define AUDIO_OUTPUT_NVS_SPK_VOLUME_KEY "spk_volume"
+#define AUDIO_OUTPUT_NVS_USB_VOLUME_KEY "usb_volume"
+#define AUDIO_USB_CONNECT_WAIT_MS      6000
+#define AUDIO_USB_WRITE_TIMEOUT_MS     100
+// Hot-plug state changes on a human time scale. Five checks per second keeps
+// plug/unplug response prompt without running device maintenance every UI tick.
+#define AUDIO_OUTPUT_SERVICE_INTERVAL_US 200000
 
 static const char *TAG = "audio_radio";
 
@@ -70,13 +88,92 @@ static volatile bool s_playback_ready;
 static volatile audio_playback_state_t s_playback_state = AUDIO_PLAYBACK_IDLE;
 static uint32_t s_hls_last_format;
 static int s_output_volume = CONFIG_AUDIO_RADIO_OUTPUT_VOLUME;
+static int s_speaker_volume = CONFIG_AUDIO_RADIO_OUTPUT_VOLUME;
+static int s_usb_volume = CONFIG_AUDIO_RADIO_OUTPUT_VOLUME;
 static uint32_t s_output_sample_rate = CONFIG_AUDIO_RADIO_SAMPLE_RATE;
+static uint8_t s_output_channels = AUDIO_RADIO_CHANNELS;
+static uint8_t s_output_bits = AUDIO_RADIO_BITS;
+static uint32_t s_source_sample_rate;
+static uint8_t s_source_channels;
+static uint8_t s_source_bits;
+static bool s_source_format_valid;
 static volatile bool s_output_format_ok = true;
+// During stop/deinit, acknowledge residual GMF output without touching either
+// sink. This prevents an in-flight UAC write from racing stream destruction.
+static volatile bool s_output_write_gated;
 static portMUX_TYPE s_timing_lock = portMUX_INITIALIZER_UNLOCKED;
 static uint64_t s_file_pcm_bytes;
 static uint32_t s_file_duration_ms;
 static volatile bool s_current_source_is_file;
 static bool s_extractor_registered;
+static audio_output_mode_t s_output_mode = AUDIO_OUTPUT_SPEAKER;
+static bool s_output_mode_loaded;
+static volatile bool s_active_output_usb;
+static bool s_last_usb_connected;
+static int64_t s_last_output_service_us;
+// True while playback is paused only because its USB sink vanished. Separates
+// that pause from a deliberate one, so replugging the headset resumes the track
+// by itself while a pause the user asked for is left alone.
+static volatile bool s_paused_after_usb_loss;
+
+static void audio_radio_load_output_mode(void)
+{
+    if (s_output_mode_loaded) return;
+    s_output_mode_loaded = true;
+    nvs_handle_t handle = 0;
+    if (nvs_open(AUDIO_OUTPUT_NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return;
+    uint8_t value = AUDIO_OUTPUT_SPEAKER;
+    if (nvs_get_u8(handle, AUDIO_OUTPUT_NVS_MODE_KEY, &value) == ESP_OK &&
+        value <= AUDIO_OUTPUT_AUTO) {
+        s_output_mode = (audio_output_mode_t)value;
+    }
+    value = CONFIG_AUDIO_RADIO_OUTPUT_VOLUME;
+    if (nvs_get_u8(handle, AUDIO_OUTPUT_NVS_SPK_VOLUME_KEY, &value) == ESP_OK &&
+        value <= 100) {
+        s_speaker_volume = value;
+    }
+    value = CONFIG_AUDIO_RADIO_OUTPUT_VOLUME;
+    if (nvs_get_u8(handle, AUDIO_OUTPUT_NVS_USB_VOLUME_KEY, &value) == ESP_OK &&
+        value <= 100) {
+        s_usb_volume = value;
+    }
+    // Codec initialization always starts on the board speaker. If Auto later
+    // selects a headset, audio_radio_configure_usb() swaps in the USB value.
+    s_output_volume = s_speaker_volume;
+    nvs_close(handle);
+    ESP_LOGI(TAG, "Loaded output settings: mode=%d speaker_volume=%d usb_volume=%d",
+             s_output_mode, s_speaker_volume, s_usb_volume);
+}
+
+static void audio_radio_save_output_mode(audio_output_mode_t mode)
+{
+    nvs_handle_t handle = 0;
+    if (nvs_open(AUDIO_OUTPUT_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) return;
+    if (nvs_set_u8(handle, AUDIO_OUTPUT_NVS_MODE_KEY, (uint8_t)mode) == ESP_OK) {
+        (void)nvs_commit(handle);
+    }
+    nvs_close(handle);
+}
+
+static void audio_radio_save_volume(bool usb, int volume)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t ret = nvs_open(AUDIO_OUTPUT_NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to open audio volume NVS: %s", esp_err_to_name(ret));
+        return;
+    }
+    ret = nvs_set_u8(handle,
+                     usb ? AUDIO_OUTPUT_NVS_USB_VOLUME_KEY
+                         : AUDIO_OUTPUT_NVS_SPK_VOLUME_KEY,
+                     (uint8_t)volume);
+    if (ret == ESP_OK) ret = nvs_commit(handle);
+    nvs_close(handle);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Failed to save %s volume: %s", usb ? "USB" : "speaker",
+                 esp_err_to_name(ret));
+    }
+}
 
 static int audio_radio_file_read(void *buffer, uint32_t size, void *ctx)
 {
@@ -217,6 +314,15 @@ static esp_err_t audio_radio_read_file_duration(const char *path, uint32_t *dura
                                                        0, &info);
         if (extractor_ret == ESP_EXTRACTOR_ERR_OK) {
             *duration_ms = info.duration;
+            if (info.audio_info.sample_rate > 0 && info.audio_info.channel > 0 &&
+                info.audio_info.bits_per_sample > 0) {
+                s_source_sample_rate = info.audio_info.sample_rate;
+                s_source_channels = info.audio_info.channel;
+                s_source_bits = info.audio_info.bits_per_sample;
+                s_source_format_valid = true;
+                ESP_LOGI(TAG, "Audio source format: %" PRIu32 " Hz, %u ch, %u bit",
+                         s_source_sample_rate, s_source_channels, s_source_bits);
+            }
         }
     }
     if (extractor != NULL) esp_extractor_close(extractor);
@@ -255,20 +361,79 @@ static esp_err_t audio_radio_codec_ret_to_esp(int ret)
 }
 
 static esp_err_t audio_radio_set_output_sample_rate(uint32_t sample_rate);
+static esp_err_t audio_radio_set_output_format(uint32_t sample_rate,
+                                               uint8_t channels, uint8_t bits);
+static esp_err_t audio_radio_fall_back_to_speaker(uint32_t *target_rate);
 
 static int audio_radio_write_cb(uint8_t *pcm, int len, void *ctx)
 {
-    esp_codec_dev_handle_t codec_dev = (esp_codec_dev_handle_t) ctx;
-    if (pcm == NULL || len <= 0 || codec_dev == NULL || !s_output_format_ok) {
+    (void)ctx;
+    if (pcm == NULL || len <= 0 || !s_output_format_ok) {
         return -1;
     }
-    int ret = esp_codec_dev_write(codec_dev, pcm, (int) len);
-    if (ret == ESP_CODEC_DEV_OK && s_current_source_is_file) {
+    if (s_output_write_gated) {
+        return len;
+    }
+    bool write_ok = false;
+    if (s_active_output_usb) {
+        // UAC hardware volume is optional. Scale signed 16-bit PCM in place so
+        // every compliant headset follows the application's volume setting.
+        // USB has its own ceiling because headphone sensitivity is generally
+        // much higher than the board speaker path.
+        // Keep two decimal places of percentage precision. With a low ceiling
+        // such as 5%, calculating the effective percentage first would make
+        // several UI volume steps collapse to zero after integer truncation.
+        const int usb_gain_basis_points =
+            s_output_volume * CONFIG_MYPAPER_USB_AUDIO_MAX_VOLUME;
+        if (usb_audio_output_uses_software_volume() && usb_gain_basis_points < 10000) {
+            if (s_output_bits == 24) {
+                for (size_t i = 0; i + 2 < (size_t)len; i += 3) {
+                    int32_t sample = (int32_t)pcm[i] |
+                                     ((int32_t)pcm[i + 1] << 8) |
+                                     ((int32_t)pcm[i + 2] << 16);
+                    if (sample & 0x00800000) sample |= (int32_t)0xff000000;
+                    sample = (int32_t)(((int64_t)sample * usb_gain_basis_points) / 10000);
+                    pcm[i] = (uint8_t)sample;
+                    pcm[i + 1] = (uint8_t)(sample >> 8);
+                    pcm[i + 2] = (uint8_t)(sample >> 16);
+                }
+            } else if (s_output_bits == 32) {
+                int32_t *samples = (int32_t *)pcm;
+                size_t sample_count = (size_t)len / sizeof(int32_t);
+                for (size_t i = 0; i < sample_count; ++i) {
+                    samples[i] = (int32_t)(((int64_t)samples[i] * usb_gain_basis_points) /
+                                           10000);
+                }
+            } else {
+            int16_t *samples = (int16_t *)pcm;
+            size_t sample_count = (size_t)len / sizeof(int16_t);
+            for (size_t i = 0; i < sample_count; ++i) {
+                samples[i] = (int16_t)(((int32_t)samples[i] * usb_gain_basis_points) /
+                                       10000);
+            }
+            }
+        }
+        write_ok = usb_audio_output_write(pcm, (size_t)len,
+                                           AUDIO_USB_WRITE_TIMEOUT_MS) == ESP_OK;
+    } else if (s_codec_dev != NULL) {
+        write_ok = esp_codec_dev_write(s_codec_dev, pcm, len) == ESP_CODEC_DEV_OK;
+    }
+    if (write_ok && s_current_source_is_file) {
         portENTER_CRITICAL(&s_timing_lock);
         s_file_pcm_bytes += (uint32_t)len;
         portEXIT_CRITICAL(&s_timing_lock);
     }
-    return ret == ESP_CODEC_DEV_OK ? len : -1;
+    // A failed sink write must not be fatal to the pipeline. The write that is in
+    // flight when the headset is pulled always fails - it is already queued
+    // against a device that is gone - and returning -1 here tears the whole
+    // decode pipeline down (ESP_GMF_BIT_CVT reports "OUT port release error"),
+    // which nothing can undo: stop, pause and resume are all refused once the
+    // pipeline sits in ESP_GMF_EVENT_STATE_ERROR. That would cost us the one
+    // thing worth keeping across an unplug, the decode position, and
+    // esp_gmf_pipeline_seek cannot restore it for FLAC. Consume the samples
+    // instead; audio_radio_service_output() sees the missing output on its next
+    // poll and pauses playback, which stays resumable.
+    return len;
 }
 
 static int audio_radio_player_event_cb(esp_asp_event_pkt_t *pkt, void *ctx)
@@ -319,7 +484,18 @@ static int audio_radio_player_event_cb(esp_asp_event_pkt_t *pkt, void *ctx)
                  (int)info->channels,
                  (int)info->bits,
                  (int)info->bitrate);
-        esp_err_t ret = audio_radio_set_output_sample_rate((uint32_t)info->sample_rate);
+        if (s_source_format_valid &&
+            ((uint32_t)info->sample_rate != s_output_sample_rate ||
+             (uint8_t)info->channels != s_output_channels ||
+             (uint8_t)info->bits != s_output_bits)) {
+            ESP_LOGD(TAG, "Ignoring intermediate PCM report; waiting for %" PRIu32
+                     " Hz/%u ch/%u bit", s_output_sample_rate,
+                     s_output_channels, s_output_bits);
+            return 0;
+        }
+        esp_err_t ret = audio_radio_set_output_format((uint32_t)info->sample_rate,
+                                                      (uint8_t)info->channels,
+                                                      (uint8_t)info->bits);
         if (ret != ESP_OK) {
             s_output_format_ok = false;
             ESP_LOGE(TAG, "Failed to configure audio output for %d Hz: %s",
@@ -547,12 +723,20 @@ static esp_err_t audio_radio_init_codec(void)
     return ESP_OK;
 }
 
-static esp_err_t audio_radio_set_output_sample_rate(uint32_t sample_rate)
+static esp_err_t audio_radio_configure_speaker(uint32_t sample_rate)
 {
     ESP_RETURN_ON_FALSE(sample_rate > 0 && sample_rate <= CONFIG_AUDIO_RADIO_SAMPLE_RATE,
                         ESP_ERR_INVALID_ARG, TAG, "Unsupported output sample rate: %" PRIu32, sample_rate);
     ESP_RETURN_ON_FALSE(s_codec_dev != NULL, ESP_ERR_INVALID_STATE, TAG, "Codec is not initialized");
+    s_output_volume = s_speaker_volume;
     if (s_codec_opened && sample_rate == s_output_sample_rate) {
+        ESP_RETURN_ON_ERROR(audio_radio_codec_ret_to_esp(
+                                esp_codec_dev_set_out_vol(s_codec_dev, s_output_volume)),
+                            TAG, "Failed to restore speaker volume");
+        ESP_RETURN_ON_ERROR(audio_radio_codec_ret_to_esp(
+                                esp_codec_dev_set_out_mute(s_codec_dev, false)),
+                            TAG, "Failed to unmute speaker output");
+        ESP_RETURN_ON_ERROR(audio_radio_set_pa(true), TAG, "Failed to enable PA");
         s_output_format_ok = true;
         return ESP_OK;
     }
@@ -586,22 +770,145 @@ static esp_err_t audio_radio_set_output_sample_rate(uint32_t sample_rate)
     return ESP_OK;
 }
 
+static esp_err_t audio_radio_configure_usb(uint32_t sample_rate, uint8_t channels,
+                                           uint8_t bits, bool wait_for_device)
+{
+    ESP_RETURN_ON_ERROR(usb_audio_output_init(), TAG, "USB audio host init failed");
+    if (wait_for_device && !usb_audio_output_wait_connected(AUDIO_USB_CONNECT_WAIT_MS)) {
+        ESP_LOGW(TAG, "No compatible USB audio playback interface detected");
+        return ESP_ERR_NOT_FOUND;
+    }
+    ESP_RETURN_ON_FALSE(usb_audio_output_supports(sample_rate, channels, bits),
+                        ESP_ERR_NOT_SUPPORTED, TAG,
+                        "USB headset does not support %" PRIu32 " Hz, %u ch, %u-bit PCM",
+                        sample_rate, channels, bits);
+    ESP_RETURN_ON_ERROR(usb_audio_output_start(sample_rate, channels, bits),
+                        TAG, "Failed to start USB audio stream");
+    s_output_volume = s_usb_volume;
+    // UAC2 Feature Unit is preferred. The output layer switches to software
+    // PCM gain if any hardware control request fails.
+    (void)usb_audio_output_set_volume((uint8_t)s_output_volume);
+    if (s_codec_dev != NULL && s_codec_opened) {
+        (void)esp_codec_dev_set_out_mute(s_codec_dev, true);
+    }
+    (void)audio_radio_set_pa(false);
+    s_output_sample_rate = sample_rate;
+    s_output_channels = channels;
+    s_output_bits = bits;
+    s_active_output_usb = true;
+    s_output_format_ok = true;
+    ESP_LOGI(TAG, "Active audio output: USB (%" PRIu32 " Hz)", sample_rate);
+    return ESP_OK;
+}
+
+static esp_err_t audio_radio_set_output_format(uint32_t sample_rate,
+                                               uint8_t channels, uint8_t bits)
+{
+    ESP_RETURN_ON_FALSE(sample_rate > 0 && channels > 0 && bits > 0,
+                        ESP_ERR_INVALID_ARG, TAG, "Invalid output PCM format");
+    audio_radio_load_output_mode();
+
+    if (s_output_mode != AUDIO_OUTPUT_SPEAKER) {
+        esp_err_t usb_ret = audio_radio_configure_usb(
+            sample_rate, channels, bits, s_output_mode == AUDIO_OUTPUT_USB);
+        if (usb_ret == ESP_OK) return ESP_OK;
+        if (s_output_mode == AUDIO_OUTPUT_USB) return usb_ret;
+        ESP_LOGW(TAG, "USB unavailable in Auto mode; using ES8311: %s",
+                 esp_err_to_name(usb_ret));
+    }
+
+    (void)usb_audio_output_stop();
+    s_active_output_usb = false;
+    ESP_RETURN_ON_FALSE(channels == AUDIO_RADIO_CHANNELS && bits == AUDIO_RADIO_BITS &&
+                            sample_rate <= CONFIG_AUDIO_RADIO_SAMPLE_RATE,
+                        ESP_ERR_NOT_SUPPORTED, TAG,
+                        "Speaker requires <=%d Hz stereo 16-bit PCM",
+                        CONFIG_AUDIO_RADIO_SAMPLE_RATE);
+    esp_err_t ret = audio_radio_configure_speaker(sample_rate);
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "Active audio output: speaker (%" PRIu32 " Hz)", sample_rate);
+    }
+    return ret;
+}
+
+static esp_err_t audio_radio_set_output_sample_rate(uint32_t sample_rate)
+{
+    return audio_radio_set_output_format(sample_rate, s_output_channels, s_output_bits);
+}
+
 static int audio_radio_prepare_player_cb(esp_asp_handle_t *handle, void *ctx)
 {
     (void)ctx;
     esp_gmf_pipeline_handle_t pipeline = NULL;
     esp_gmf_element_handle_t rate_el = NULL;
+    esp_gmf_element_handle_t channel_el = NULL;
+    esp_gmf_element_handle_t bit_el = NULL;
     if (esp_audio_simple_player_get_pipeline((esp_asp_handle_t)handle, &pipeline) != ESP_GMF_ERR_OK ||
         pipeline == NULL ||
         esp_gmf_pipeline_get_el_by_name(pipeline, "aud_rate_cvt", &rate_el) != ESP_GMF_ERR_OK ||
-        rate_el == NULL) {
-        ESP_LOGE(TAG, "Failed to find rate converter before playback");
+        rate_el == NULL ||
+        esp_gmf_pipeline_get_el_by_name(pipeline, "aud_ch_cvt", &channel_el) != ESP_GMF_ERR_OK ||
+        channel_el == NULL ||
+        esp_gmf_pipeline_get_el_by_name(pipeline, "aud_bit_cvt", &bit_el) != ESP_GMF_ERR_OK ||
+        bit_el == NULL) {
+        ESP_LOGE(TAG, "Failed to find PCM converters before playback");
         return -1;
     }
-    if (esp_gmf_rate_cvt_set_max_dest_rate(rate_el, CONFIG_AUDIO_RADIO_SAMPLE_RATE) != ESP_GMF_ERR_OK) {
+    audio_radio_load_output_mode();
+    bool use_usb_format = false;
+    const uint32_t source_rate = s_source_format_valid
+                                     ? s_source_sample_rate
+                                     : CONFIG_AUDIO_RADIO_SAMPLE_RATE;
+    const uint8_t source_channels = s_source_format_valid
+                                        ? s_source_channels
+                                        : AUDIO_RADIO_CHANNELS;
+    const uint8_t source_bits = s_source_format_valid ? s_source_bits : AUDIO_RADIO_BITS;
+    uint32_t usb_rate = 0;
+    uint8_t usb_channels = 0;
+    uint8_t usb_bits = 0;
+    if (s_output_mode != AUDIO_OUTPUT_SPEAKER) {
+        if (s_output_mode != AUDIO_OUTPUT_USB ||
+            usb_audio_output_wait_connected(AUDIO_USB_CONNECT_WAIT_MS)) {
+            use_usb_format = usb_audio_output_select_format(
+                source_rate, source_channels, source_bits, 0,
+                &usb_rate, &usb_channels, &usb_bits);
+        }
+        if (s_output_mode == AUDIO_OUTPUT_USB && !use_usb_format) {
+            ESP_LOGE(TAG, "No USB PCM format for source %" PRIu32 " Hz/%u ch/%u bit",
+                     source_rate, source_channels, source_bits);
+            return -1;
+        }
+    }
+
+    uint8_t target_channels = AUDIO_RADIO_CHANNELS;
+    uint8_t target_bits = AUDIO_RADIO_BITS;
+    if (use_usb_format) {
+        if (esp_gmf_rate_cvt_clear_max_dest_rate(rate_el) != ESP_GMF_ERR_OK ||
+            esp_gmf_rate_cvt_set_dest_rate(rate_el, usb_rate) != ESP_GMF_ERR_OK) {
+            ESP_LOGE(TAG, "Failed to force USB destination rate");
+            return -1;
+        }
+        target_channels = usb_channels;
+        target_bits = usb_bits;
+        ESP_LOGI(TAG, "USB PCM target: source=%" PRIu32 "/%u/%u target=%" PRIu32
+                 "/%u/%u (no USB rate ceiling)", source_rate, source_channels,
+                 source_bits, usb_rate, usb_channels, usb_bits);
+    } else if (esp_gmf_rate_cvt_set_max_dest_rate(
+                   rate_el, CONFIG_AUDIO_RADIO_SAMPLE_RATE) != ESP_GMF_ERR_OK) {
         ESP_LOGE(TAG, "Failed to set adaptive sample-rate cap");
         return -1;
     }
+    if (esp_gmf_ch_cvt_set_dest_channel(channel_el, target_channels) != ESP_GMF_ERR_OK ||
+        esp_gmf_bit_cvt_set_dest_bits(bit_el, target_bits) != ESP_GMF_ERR_OK) {
+        ESP_LOGE(TAG, "Failed to configure USB PCM channel/bit converters");
+        return -1;
+    }
+    s_output_sample_rate = use_usb_format ? usb_rate
+                                         : (source_rate > CONFIG_AUDIO_RADIO_SAMPLE_RATE
+                                                ? CONFIG_AUDIO_RADIO_SAMPLE_RATE
+                                                : source_rate);
+    s_output_channels = target_channels;
+    s_output_bits = target_bits;
     return 0;
 }
 
@@ -619,7 +926,7 @@ static esp_err_t audio_radio_init_player(void)
     esp_asp_cfg_t player_cfg = {
         .out = {
             .cb = audio_radio_write_cb,
-            .user_ctx = s_codec_dev,
+            .user_ctx = NULL,
         },
         .task_prio = 5,
         .task_stack = 6 * 1024,
@@ -644,9 +951,11 @@ static esp_err_t audio_radio_init_player(void)
         .io_cfg = {
             .thread = {
                 .stack = AUDIO_RADIO_HLS_TASK_STACK,
-                // Keep the HTTP producer (priority 10) ahead of the HLS
-                // consumer during segment reload so the old HTTP job can
-                // finish cleanup before HLS registers the next one.
+                // Keep playlist/segment feeding above the decode pipeline.
+                // Dropping this below the player can starve PCM delivery and
+                // produces audible gaps on both UAC1 and UAC2. Radio UI runs at
+                // the nested HTTP reader's priority (10), so it remains
+                // responsive without weakening this producer.
                 .prio = 9,
                 // Core 1 is reserved for the EPD update/scan pipeline.
                 .core = 0,
@@ -670,8 +979,13 @@ static esp_err_t audio_radio_init_player(void)
 
 esp_err_t audio_radio_init(void)
 {
+    audio_radio_load_output_mode();
     ESP_RETURN_ON_ERROR(audio_radio_init_i2s(), TAG, "I2S init failed");
     ESP_RETURN_ON_ERROR(audio_radio_init_codec(), TAG, "Codec init failed");
+    if (s_output_mode != AUDIO_OUTPUT_SPEAKER) {
+        esp_err_t usb_ret = usb_audio_output_init();
+        if (usb_ret != ESP_OK && s_output_mode == AUDIO_OUTPUT_USB) return usb_ret;
+    }
     ESP_RETURN_ON_ERROR(audio_radio_init_player(), TAG, "Player init failed");
     return ESP_OK;
 }
@@ -698,15 +1012,27 @@ esp_err_t audio_radio_play(const char *url)
     ESP_RETURN_ON_ERROR(audio_radio_init(), TAG, "Audio radio init failed");
 
     ESP_LOGI(TAG, "Playing radio URL: %s", url);
+    const bool is_file = strncmp(url, "file://", 7) == 0;
+    if (!is_file) s_source_format_valid = false;
     s_playback_ready = false;
     portENTER_CRITICAL(&s_timing_lock);
     s_file_pcm_bytes = 0;
     s_file_duration_ms = 0;
-    s_current_source_is_file = strncmp(url, "file://", 7) == 0;
+    s_current_source_is_file = is_file;
     portEXIT_CRITICAL(&s_timing_lock);
     s_output_format_ok = true;
-    int run_ret = esp_audio_simple_player_run(s_player, url, NULL);
+    s_output_write_gated = false;
+    esp_asp_music_info_t source_info = {0};
+    esp_asp_music_info_t *source_info_ptr = NULL;
+    if (is_file && s_source_format_valid) {
+        source_info.sample_rate = s_source_sample_rate;
+        source_info.channels = s_source_channels;
+        source_info.bits = s_source_bits;
+        source_info_ptr = &source_info;
+    }
+    int run_ret = esp_audio_simple_player_run(s_player, url, source_info_ptr);
     if (run_ret != ESP_GMF_ERR_OK) {
+        s_output_write_gated = true;
         s_current_source_is_file = false;
         s_playback_ready = false;
         s_playback_active = false;
@@ -716,6 +1042,9 @@ esp_err_t audio_radio_play(const char *url)
     }
     s_playback_active = true;
     s_playback_state = AUDIO_PLAYBACK_PLAYING;
+    // A fresh pipeline has no history to claim back, and any unplug this session
+    // has already been accounted for by the source it just picked.
+    s_paused_after_usb_loss = false;
     return ESP_OK;
 }
 
@@ -729,6 +1058,10 @@ esp_err_t audio_radio_play_file(const char *path)
                             "Failed to stop current audio before reading metadata");
     }
 
+    s_source_format_valid = false;
+    s_source_sample_rate = 0;
+    s_source_channels = 0;
+    s_source_bits = 0;
     uint32_t duration_ms = 0;
     if (audio_radio_read_file_duration(path, &duration_ms) != ESP_OK) {
         // Duration is presentation metadata; playback remains available when
@@ -758,6 +1091,24 @@ esp_err_t audio_radio_play_default(void)
 
 esp_err_t audio_radio_stop(void)
 {
+    const int64_t stop_begin_us = esp_timer_get_time();
+    // Close the output gate before stopping a sink. A callback already inside
+    // usb_audio_output_write() is bounded by AUDIO_USB_WRITE_TIMEOUT_MS; all
+    // subsequent callbacks are consumed without reaching the UAC device.
+    s_output_write_gated = true;
+    if (s_active_output_usb) {
+        const int64_t usb_begin_us = esp_timer_get_time();
+        ESP_LOGI(TAG, "Stop: USB stream begin");
+        esp_err_t usb_ret = usb_audio_output_stop();
+        ESP_LOGI(TAG, "Stop: USB stream complete ret=%s elapsed=%lld ms",
+                 esp_err_to_name(usb_ret),
+                 (long long)((esp_timer_get_time() - usb_begin_us) / 1000));
+        if (usb_ret != ESP_OK) {
+            ESP_LOGW(TAG, "USB stream stop failed: %s", esp_err_to_name(usb_ret));
+        }
+    }
+
+    s_paused_after_usb_loss = false;
     if (s_player == NULL) {
         s_playback_active = false;
         s_playback_ready = false;
@@ -771,12 +1122,17 @@ esp_err_t audio_radio_stop(void)
         return ESP_OK;
     }
 
-    ESP_LOGI(TAG, "Stopping current radio stream before switching");
+    ESP_LOGI(TAG, "Stopping current audio playback");
+    const int64_t gmf_begin_us = esp_timer_get_time();
     ESP_RETURN_ON_FALSE(esp_audio_simple_player_stop(s_player) == ESP_GMF_ERR_OK,
                         ESP_FAIL, TAG, "Failed to stop playback");
+    ESP_LOGI(TAG, "Stop: GMF complete elapsed=%lld ms",
+             (long long)((esp_timer_get_time() - gmf_begin_us) / 1000));
     s_playback_active = false;
     s_playback_ready = false;
     s_playback_state = AUDIO_PLAYBACK_STOPPED;
+    ESP_LOGI(TAG, "Stop complete total=%lld ms",
+             (long long)((esp_timer_get_time() - stop_begin_us) / 1000));
     return ESP_OK;
 }
 
@@ -797,10 +1153,20 @@ esp_err_t audio_radio_resume(void)
     ESP_RETURN_ON_FALSE(s_player != NULL, ESP_ERR_INVALID_STATE, TAG, "Player is not initialized");
     ESP_RETURN_ON_FALSE(s_playback_state == AUDIO_PLAYBACK_PAUSED,
                         ESP_ERR_INVALID_STATE, TAG, "Playback is not paused");
+    // A pause caused by losing the USB sink leaves the pipeline pointed at an
+    // output that is gone. Move it to a live one before resuming, otherwise the
+    // very write that caused the pause fails again. Skipped when a headset has
+    // since been replugged and audio_radio_service_output() already claimed it.
+    if (s_active_output_usb && !audio_radio_usb_connected()) {
+        uint32_t target_rate = s_output_sample_rate;
+        ESP_RETURN_ON_ERROR(audio_radio_fall_back_to_speaker(&target_rate), TAG,
+                            "Failed to move playback off the missing USB output");
+    }
     ESP_RETURN_ON_FALSE(esp_audio_simple_player_resume(s_player) == ESP_GMF_ERR_OK,
                         ESP_FAIL, TAG, "Failed to resume playback");
     s_playback_active = true;
     s_playback_state = AUDIO_PLAYBACK_PLAYING;
+    s_paused_after_usb_loss = false;
     return ESP_OK;
 }
 
@@ -866,7 +1232,7 @@ esp_err_t audio_radio_get_file_timing(uint32_t *elapsed_ms, uint32_t *duration_m
     if (!is_file) return ESP_ERR_NOT_SUPPORTED;
 
     uint64_t bytes_per_second = (uint64_t)s_output_sample_rate *
-                                AUDIO_RADIO_CHANNELS * AUDIO_RADIO_BITS / 8;
+                                s_output_channels * s_output_bits / 8;
     if (bytes_per_second == 0) return ESP_ERR_INVALID_STATE;
     uint64_t elapsed = pcm_bytes * 1000u / bytes_per_second;
     if (duration > 0 && elapsed > duration) elapsed = duration;
@@ -879,18 +1245,282 @@ esp_err_t audio_radio_set_volume(int volume)
 {
     ESP_RETURN_ON_FALSE(volume >= 0 && volume <= 100, ESP_ERR_INVALID_ARG,
                         TAG, "Volume must be in the range 0..100");
-    if (s_codec_dev != NULL && s_codec_opened) {
+    const bool usb = s_active_output_usb;
+    if (!usb && s_codec_dev != NULL && s_codec_opened) {
         ESP_RETURN_ON_ERROR(audio_radio_codec_ret_to_esp(esp_codec_dev_set_out_vol(s_codec_dev, volume)),
                             TAG, "Failed to set output volume");
     }
     s_output_volume = volume;
-    ESP_LOGI(TAG, "Output volume: %d", s_output_volume);
+    if (usb) {
+        s_usb_volume = volume;
+        esp_err_t usb_ret = usb_audio_output_set_volume((uint8_t)volume);
+        if (usb_ret != ESP_OK) {
+            ESP_LOGW(TAG, "USB volume update failed: %s", esp_err_to_name(usb_ret));
+        }
+    } else {
+        s_speaker_volume = volume;
+    }
+    audio_radio_save_volume(usb, volume);
+    const int usb_gain_basis_points =
+        volume * CONFIG_MYPAPER_USB_AUDIO_MAX_VOLUME;
+    if (usb) {
+        ESP_LOGI(TAG, "USB volume saved: %d (effective=%d.%02d%%, ceiling=%d%%)",
+                 volume, usb_gain_basis_points / 100, usb_gain_basis_points % 100,
+                 CONFIG_MYPAPER_USB_AUDIO_MAX_VOLUME);
+    } else {
+        ESP_LOGI(TAG, "Speaker volume saved: %d", volume);
+    }
     return ESP_OK;
 }
 
 int audio_radio_get_volume(void)
 {
+    audio_radio_load_output_mode();
     return s_output_volume;
+}
+
+static esp_err_t audio_radio_retarget_running_pipeline(audio_output_mode_t mode,
+                                                       uint32_t *target_rate)
+{
+    ESP_RETURN_ON_FALSE(target_rate != NULL, ESP_ERR_INVALID_ARG, TAG,
+                        "Target-rate output is null");
+    ESP_RETURN_ON_FALSE(s_player != NULL, ESP_ERR_INVALID_STATE, TAG,
+                        "Player is not initialized");
+
+    esp_gmf_pipeline_handle_t pipeline = NULL;
+    esp_gmf_element_handle_t rate_el = NULL;
+    esp_gmf_element_handle_t channel_el = NULL;
+    esp_gmf_element_handle_t bit_el = NULL;
+    ESP_RETURN_ON_FALSE(
+        esp_audio_simple_player_get_pipeline(s_player, &pipeline) == ESP_GMF_ERR_OK &&
+            pipeline != NULL &&
+            esp_gmf_pipeline_get_el_by_name(pipeline, "aud_rate_cvt", &rate_el) ==
+                ESP_GMF_ERR_OK &&
+            rate_el != NULL &&
+            esp_gmf_pipeline_get_el_by_name(pipeline, "aud_ch_cvt", &channel_el) ==
+                ESP_GMF_ERR_OK && channel_el != NULL &&
+            esp_gmf_pipeline_get_el_by_name(pipeline, "aud_bit_cvt", &bit_el) ==
+                ESP_GMF_ERR_OK && bit_el != NULL,
+        ESP_FAIL, TAG, "Failed to find PCM converters while switching output");
+
+    if (mode != AUDIO_OUTPUT_SPEAKER) {
+        ESP_RETURN_ON_ERROR(usb_audio_output_init(), TAG,
+                            "Failed to initialize USB audio while switching output");
+        const bool wait_for_usb = mode == AUDIO_OUTPUT_USB;
+        if (wait_for_usb && !usb_audio_output_wait_connected(AUDIO_USB_CONNECT_WAIT_MS)) {
+            return ESP_ERR_NOT_FOUND;
+        }
+        uint32_t usb_rate = 0;
+        uint8_t usb_channels = 0;
+        uint8_t usb_bits = 0;
+        const uint32_t source_rate = s_source_format_valid ? s_source_sample_rate
+                                                           : s_output_sample_rate;
+        const uint8_t source_channels = s_source_format_valid ? s_source_channels
+                                                               : s_output_channels;
+        const uint8_t source_bits = s_source_format_valid ? s_source_bits : s_output_bits;
+        if (usb_audio_output_select_format(source_rate, source_channels, source_bits, 0,
+                                           &usb_rate, &usb_channels, &usb_bits)) {
+            ESP_RETURN_ON_FALSE(
+                esp_gmf_rate_cvt_clear_max_dest_rate(rate_el) == ESP_GMF_ERR_OK &&
+                    esp_gmf_rate_cvt_set_dest_rate(rate_el, usb_rate) == ESP_GMF_ERR_OK &&
+                    esp_gmf_ch_cvt_set_dest_channel(channel_el, usb_channels) ==
+                        ESP_GMF_ERR_OK &&
+                    esp_gmf_bit_cvt_set_dest_bits(bit_el, usb_bits) == ESP_GMF_ERR_OK,
+                ESP_FAIL, TAG, "Failed to retarget running pipeline for USB");
+            *target_rate = usb_rate;
+            s_output_channels = usb_channels;
+            s_output_bits = usb_bits;
+            ESP_LOGI(TAG, "Running pipeline retargeted for USB: %" PRIu32
+                     " Hz/%u ch/%u bit", usb_rate, usb_channels, usb_bits);
+            return ESP_OK;
+        }
+        if (mode == AUDIO_OUTPUT_USB) return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    // Speaker (or Auto without a headset) restores adaptive behavior. The
+    // converter retains its decoded source rate and immediately recalculates
+    // the correct destination, so 44.1 kHz returns to native playback.
+    ESP_RETURN_ON_FALSE(
+        esp_gmf_rate_cvt_set_max_dest_rate(rate_el, CONFIG_AUDIO_RADIO_SAMPLE_RATE) ==
+            ESP_GMF_ERR_OK &&
+            esp_gmf_rate_cvt_get_dest_rate(rate_el, target_rate) == ESP_GMF_ERR_OK &&
+            esp_gmf_ch_cvt_set_dest_channel(channel_el, AUDIO_RADIO_CHANNELS) ==
+                ESP_GMF_ERR_OK &&
+            esp_gmf_bit_cvt_set_dest_bits(bit_el, AUDIO_RADIO_BITS) == ESP_GMF_ERR_OK,
+        ESP_FAIL, TAG, "Failed to restore adaptive speaker rate");
+    s_output_channels = AUDIO_RADIO_CHANNELS;
+    s_output_bits = AUDIO_RADIO_BITS;
+    return ESP_OK;
+}
+
+/**
+ * @brief Point a live pipeline at the built-in speaker.
+ *
+ * Mirrors the speaker half of audio_radio_set_output_sample_rate(), minus the
+ * output-mode policy: the pinned mode may still name a headset that is
+ * physically gone, and moving a paused track to the speaker beats dropping it.
+ * Assumes the caller holds the player paused, so the swap cannot race a write.
+ */
+static esp_err_t audio_radio_fall_back_to_speaker(uint32_t *target_rate)
+{
+    ESP_RETURN_ON_FALSE(target_rate != NULL, ESP_ERR_INVALID_ARG, TAG,
+                        "Target-rate output is null");
+    ESP_RETURN_ON_ERROR(
+        audio_radio_retarget_running_pipeline(AUDIO_OUTPUT_SPEAKER, target_rate), TAG,
+        "Failed to retarget the running pipeline for the speaker");
+    (void)usb_audio_output_stop();
+    s_active_output_usb = false;
+    ESP_RETURN_ON_ERROR(audio_radio_configure_speaker(*target_rate), TAG,
+                        "Failed to configure the speaker output");
+    ESP_LOGI(TAG, "Active audio output: speaker (fallback, %" PRIu32 " Hz)", *target_rate);
+    return ESP_OK;
+}
+
+esp_err_t audio_radio_set_output_mode(audio_output_mode_t mode)
+{
+    ESP_RETURN_ON_FALSE(mode >= AUDIO_OUTPUT_SPEAKER && mode <= AUDIO_OUTPUT_AUTO,
+                        ESP_ERR_INVALID_ARG, TAG, "Invalid audio output mode: %d", mode);
+    audio_radio_load_output_mode();
+    if (mode == s_output_mode) return ESP_OK;
+
+    audio_output_mode_t previous_mode = s_output_mode;
+    uint32_t previous_rate = s_output_sample_rate;
+    bool was_playing = s_playback_state == AUDIO_PLAYBACK_PLAYING;
+    if (was_playing) {
+        ESP_RETURN_ON_ERROR(audio_radio_pause(), TAG,
+                            "Failed to pause before changing audio output");
+    }
+
+    s_output_mode = mode;
+    uint32_t target_rate = s_output_sample_rate;
+    esp_err_t ret = was_playing
+                        ? audio_radio_retarget_running_pipeline(mode, &target_rate)
+                        : ESP_OK;
+    if (ret == ESP_OK) {
+        if (!was_playing && mode == AUDIO_OUTPUT_SPEAKER) {
+            s_output_channels = AUDIO_RADIO_CHANNELS;
+            s_output_bits = AUDIO_RADIO_BITS;
+            if (target_rate > CONFIG_AUDIO_RADIO_SAMPLE_RATE) {
+                target_rate = CONFIG_AUDIO_RADIO_SAMPLE_RATE;
+            }
+        }
+        ret = audio_radio_set_output_sample_rate(target_rate);
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Audio output switch to %s failed: %s",
+                 audio_radio_get_output_mode_name(), esp_err_to_name(ret));
+        s_output_mode = previous_mode;
+        if (was_playing) {
+            uint32_t rollback_rate = previous_rate;
+            (void)audio_radio_retarget_running_pipeline(previous_mode, &rollback_rate);
+            (void)audio_radio_set_output_sample_rate(rollback_rate);
+        } else {
+            (void)audio_radio_set_output_sample_rate(previous_rate);
+        }
+    } else {
+        audio_radio_save_output_mode(mode);
+    }
+
+    if (was_playing) {
+        esp_err_t resume_ret = audio_radio_resume();
+        if (ret == ESP_OK && resume_ret != ESP_OK) ret = resume_ret;
+    }
+    return ret;
+}
+
+audio_output_mode_t audio_radio_get_output_mode(void)
+{
+    audio_radio_load_output_mode();
+    return s_output_mode;
+}
+
+const char *audio_radio_get_output_mode_name(void)
+{
+    switch (audio_radio_get_output_mode()) {
+        case AUDIO_OUTPUT_USB: return "USB";
+        case AUDIO_OUTPUT_AUTO: return "AUTO";
+        case AUDIO_OUTPUT_SPEAKER:
+        default: return "SPK";
+    }
+}
+
+const char *audio_radio_get_active_output_name(void)
+{
+    return s_active_output_usb ? "USB" : "SPK";
+}
+
+bool audio_radio_usb_connected(void)
+{
+    return usb_audio_output_is_connected();
+}
+
+void audio_radio_service_output(void)
+{
+    const int64_t now_us = esp_timer_get_time();
+    if (s_last_output_service_us != 0 &&
+        now_us - s_last_output_service_us < AUDIO_OUTPUT_SERVICE_INTERVAL_US) {
+        return;
+    }
+    s_last_output_service_us = now_us;
+
+    bool connected = audio_radio_usb_connected();
+    if (connected == s_last_usb_connected) return;
+    s_last_usb_connected = connected;
+
+    if (!connected) {
+        if (!s_active_output_usb || s_playback_state != AUDIO_PLAYBACK_PLAYING) return;
+        // The headset supplying the active output is gone. Pause instead of
+        // tearing the player down: the sink write is no longer fatal to the
+        // pipeline, so the decode position survives, and that is the only way to
+        // keep it - esp_gmf_pipeline_seek does not support FLAC, which is most of
+        // what the library holds. The user's next play moves the track to the
+        // speaker; a replugged headset claims it back below.
+        if (audio_radio_pause() != ESP_OK) {
+            ESP_LOGW(TAG, "Failed to pause playback after losing the USB output");
+            return;
+        }
+        s_paused_after_usb_loss = true;
+        return;
+    }
+
+    // A headset arrived. One the user pinned away from is left untouched; in Auto
+    // and USB modes it is the preferred output.
+    if (s_output_mode == AUDIO_OUTPUT_SPEAKER) return;
+
+    if (s_paused_after_usb_loss) {
+        // Claim back the track this function paused when the previous headset
+        // left, so a replug resumes the music on its own and at its old position.
+        // s_active_output_usb is still set but its stream died with the device, so
+        // the sink has to be armed again rather than merely resumed into.
+        if (s_playback_state != AUDIO_PLAYBACK_PAUSED) return;
+        uint32_t target_rate = s_output_sample_rate;
+        esp_err_t ret =
+            audio_radio_retarget_running_pipeline(AUDIO_OUTPUT_AUTO, &target_rate);
+        if (ret == ESP_OK) ret = audio_radio_set_output_sample_rate(target_rate);
+        if (ret != ESP_OK) {
+            // Stay paused rather than resume onto a sink that would swallow the
+            // audio. The user still has a working play button.
+            ESP_LOGW(TAG, "Failed to reclaim playback for the replugged headset: %s",
+                     esp_err_to_name(ret));
+            return;
+        }
+        (void)audio_radio_resume();
+        return;
+    }
+
+    // A headset arrived mid-playback on the speaker. That switch is live, so
+    // repoint the running pipeline rather than restarting the track.
+    if (s_active_output_usb) return;
+    bool was_playing = s_playback_state == AUDIO_PLAYBACK_PLAYING;
+    if (!was_playing) return;
+    if (audio_radio_pause() != ESP_OK) return;
+    uint32_t target_rate = s_output_sample_rate;
+    esp_err_t ret = audio_radio_retarget_running_pipeline(AUDIO_OUTPUT_AUTO, &target_rate);
+    if (ret == ESP_OK) ret = audio_radio_set_output_sample_rate(target_rate);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "Auto output reconciliation failed: %s", esp_err_to_name(ret));
+    }
+    (void)audio_radio_resume();
 }
 
 esp_err_t audio_radio_record_wav(const char *path, uint32_t duration_ms)
@@ -905,7 +1535,7 @@ esp_err_t audio_radio_record_wav(const char *path, uint32_t duration_ms)
     ESP_RETURN_ON_FALSE(!s_recording, ESP_ERR_INVALID_STATE, TAG, "Recording is already running");
     ESP_RETURN_ON_ERROR(audio_radio_normalize_record_path(path, vfs_path, sizeof(vfs_path)), TAG, "Invalid record path");
     ESP_RETURN_ON_ERROR(audio_radio_init(), TAG, "Audio radio init failed");
-    ESP_RETURN_ON_ERROR(audio_radio_set_output_sample_rate(CONFIG_AUDIO_RADIO_SAMPLE_RATE),
+    ESP_RETURN_ON_ERROR(audio_radio_configure_speaker(CONFIG_AUDIO_RADIO_SAMPLE_RATE),
                         TAG, "Failed to configure recording sample rate");
 
     const uint32_t block_align = AUDIO_RADIO_CHANNELS * AUDIO_RADIO_BITS / 8;
@@ -967,9 +1597,15 @@ esp_err_t audio_radio_record_wav(const char *path, uint32_t duration_ms)
 
 void audio_radio_deinit(void)
 {
+    const int64_t deinit_begin_us = esp_timer_get_time();
+    ESP_LOGI(TAG, "Deinit begin output=%s", s_active_output_usb ? "USB" : "SPK");
     if (s_player != NULL) {
-        audio_radio_stop();
-        esp_audio_simple_player_destroy(s_player);
+        esp_err_t stop_ret = audio_radio_stop();
+        ESP_LOGI(TAG, "Deinit: player stop returned %s", esp_err_to_name(stop_ret));
+        const int64_t destroy_begin_us = esp_timer_get_time();
+        int destroy_ret = esp_audio_simple_player_destroy(s_player);
+        ESP_LOGI(TAG, "Deinit: player destroy ret=%d elapsed=%lld ms", destroy_ret,
+                 (long long)((esp_timer_get_time() - destroy_begin_us) / 1000));
         s_player = NULL;
     }
     s_playback_active = false;
@@ -978,12 +1614,24 @@ void audio_radio_deinit(void)
     s_hls_last_format = 0;
     s_output_sample_rate = CONFIG_AUDIO_RADIO_SAMPLE_RATE;
     s_output_format_ok = true;
+    s_output_write_gated = true;
+    s_active_output_usb = false;
+    s_last_usb_connected = false;
+    s_last_output_service_us = 0;
+    // Per-session. The next activity in is a fresh playback context and must not
+    // inherit a pause that was only ever about the output the last one used.
+    s_paused_after_usb_loss = false;
     portENTER_CRITICAL(&s_timing_lock);
     s_file_pcm_bytes = 0;
     s_file_duration_ms = 0;
     s_current_source_is_file = false;
     portEXIT_CRITICAL(&s_timing_lock);
     s_hls_io = NULL;
+    const int64_t usb_deinit_begin_us = esp_timer_get_time();
+    ESP_LOGI(TAG, "Deinit: USB host begin");
+    usb_audio_output_deinit();
+    ESP_LOGI(TAG, "Deinit: USB host complete elapsed=%lld ms",
+             (long long)((esp_timer_get_time() - usb_deinit_begin_us) / 1000));
 
     if (s_codec_dev != NULL) {
         if (s_codec_opened) {
@@ -1023,7 +1671,8 @@ void audio_radio_deinit(void)
         i2s_del_channel(s_i2s_rx);
         s_i2s_rx = NULL;
     }
-
+    ESP_LOGI(TAG, "Deinit complete total=%lld ms",
+             (long long)((esp_timer_get_time() - deinit_begin_us) / 1000));
 }
 
 void *audio_radio_get_player(void)

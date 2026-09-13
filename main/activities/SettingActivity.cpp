@@ -7,6 +7,8 @@
 #include "activities/TextInputActivity.h"
 #include "deepseek/DeepSeekConfig.h"
 #include "deepseek/DeepSeekClient.h"
+#include "map/AmapConfig.h"
+#include "storage/app_paths.h"
 #include "ui/SystemFont.h"
 #include "ui/VirtualKeyboard.h"
 #include "wifi/wifi_setting.h"
@@ -31,7 +33,7 @@ constexpr int PAD = 20;
 constexpr int SETTINGS_ROW_Y = 106;
 constexpr int SETTINGS_ROW_H = 126;
 constexpr int SETTINGS_ROW_GAP = 14;
-constexpr int SETTINGS_ITEM_COUNT = 5;
+constexpr int SETTINGS_ITEM_COUNT = 6;
 
 constexpr int SCAN_TOP = 94;
 constexpr int SCAN_ROW_H = 92;
@@ -708,6 +710,129 @@ private:
     }
 };
 
+class MapSettingsActivity final : public Activity {
+public:
+    void on_create() override { draw(true); }
+
+    void on_show() override
+    {
+        if (!_seen_show) {
+            _seen_show = true;
+            return;
+        }
+        draw(false);
+    }
+
+    bool on_touch(const TouchEvent &event) override
+    {
+        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+            ActivityManager::instance().pop();
+            return true;
+        }
+        if (event.type != TouchEventType::Tap) return false;
+        if (event.y >= 180 && event.y < 320) {
+            _focus = 0;
+            edit_api_key();
+            return true;
+        }
+        if (event.y >= 340 && event.y < 480) {
+            _focus = 1;
+            clear_cache();
+            return true;
+        }
+        return false;
+    }
+
+    bool on_key(int key) override
+    {
+        if (key == APP_KEY_BACK) {
+            ActivityManager::instance().pop();
+            return true;
+        }
+        if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
+            _focus = 1 - _focus;
+            draw(false);
+            return true;
+        }
+        if (key == APP_KEY_OK) {
+            if (_focus == 0) edit_api_key();
+            else clear_cache();
+            return true;
+        }
+        return false;
+    }
+
+private:
+    bool _seen_show = false;
+    int _focus = 0;
+    std::string _message;
+
+    void edit_api_key()
+    {
+        TextInputOptions options;
+        options.title = "AMap Web Service Key";
+        options.submit_label = "Save";
+        options.max_bytes = 255;
+        options.start_in_chinese = false;
+        options.secret = true;
+        launch_text_input(options, [](const std::string &value) {
+            if (!amap_config_save_api_key(value)) {
+                ESP_LOGE(TAG, "Failed to save AMap API key");
+            } else {
+                ESP_LOGI(TAG, "AMap API key stored length=%u",
+                         static_cast<unsigned>(value.size()));
+            }
+        });
+    }
+
+    void clear_cache()
+    {
+        const int removed = std::remove(app_paths::map_image_file());
+        _message = removed == 0 ? "Map cache cleared" : "Map cache is already empty";
+        draw(false);
+    }
+
+    void draw_row(int y, const char *title, const std::string &detail, bool selected)
+    {
+        const int width = M5.Display.width();
+        const uint16_t background = selected ? TFT_BLACK : TFT_WHITE;
+        const uint16_t foreground = selected ? TFT_WHITE : TFT_BLACK;
+        M5.Display.fillRoundRect(PAD, y, width - PAD * 2, 140, 8, background);
+        M5.Display.drawRoundRect(PAD, y, width - PAD * 2, 140, 8, TFT_BLACK);
+        system_font::draw_left(M5.Display, title, PAD + 18, y + 14, foreground);
+        system_font::draw_left(M5.Display,
+                               system_font::ellipsize(detail, width - PAD * 2 - 80),
+                               PAD + 18, y + 74, foreground);
+        system_font::draw_right(M5.Display, ">", width - PAD - 20, y + 48, foreground);
+    }
+
+    void draw(bool quality)
+    {
+        AmapConfig config;
+        const bool configured = amap_config_load(&config);
+        FILE *cache = std::fopen(app_paths::map_image_file(), "rb");
+        const bool cached = cache != nullptr;
+        if (cache) std::fclose(cache);
+
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_text);
+        M5.Display.fillScreen(TFT_WHITE);
+        draw_header("Map Settings");
+        draw_row(180, "AMap API Key",
+                 configured ? "Configured (tap to replace)" : "Not configured",
+                 _focus == 0);
+        draw_row(340, "Clear Map Cache",
+                 cached ? "Cached map is available" : "No cached map",
+                 _focus == 1);
+        system_font::draw_center(M5.Display,
+                                 _message.empty() ? "The API key is stored in device NVS"
+                                                  : _message,
+                                 M5.Display.width() / 2, 550, TFT_BLACK);
+        M5.Display.display();
+        M5.Display.endWrite();
+    }
+};
+
 static std::string format_cache_bytes(uint64_t bytes)
 {
     char text[32] = {};
@@ -943,7 +1068,8 @@ private:
         if (_focus == 0) ActivityManager::instance().push(new WifiSettingsActivity());
         else if (_focus == 1) ActivityManager::instance().push(new DeepSeekSettingsActivity());
         else if (_focus == 2) ActivityManager::instance().push(new ZhihuSettingsActivity());
-        else if (_focus == 3) launch_epd_diagnostics();
+        else if (_focus == 3) ActivityManager::instance().push(new MapSettingsActivity());
+        else if (_focus == 4) launch_epd_diagnostics();
         else ActivityManager::instance().push(new RssCacheSettingsActivity());
     }
 
@@ -989,14 +1115,18 @@ private:
         draw_item(2, "ZhiHu",
                   zhihu_config_load(&zhihu) ? "Access Secret configured"
                                             : "Access Secret not configured");
-        draw_item(3, "EPD Diagnostics",
+        AmapConfig amap;
+        draw_item(3, "Map",
+                  amap_config_load(&amap) ? "AMap API key configured"
+                                          : "AMap API key not configured");
+        draw_item(4, "EPD Diagnostics",
                   "Direction, grayscale, transitions and VCOM");
         RssCacheInfo rss_cache = rss_cache_info();
         char rss_detail[64] = {};
         std::snprintf(rss_detail, sizeof(rss_detail), "%u files, %s",
                       static_cast<unsigned>(rss_cache.files),
                       format_cache_bytes(rss_cache.bytes).c_str());
-        draw_item(4, "Clear RSS Cache", rss_detail);
+        draw_item(5, "Clear RSS Cache", rss_detail);
         M5.Display.display();
         M5.Display.endWrite();
     }
