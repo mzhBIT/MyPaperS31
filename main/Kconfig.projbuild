@@ -116,3 +116,18 @@ menu "Audio Radio Configuration"
         default 53
 
 endmenu
+
+menu "USB Modem Development"
+
+    config MYPAPER_USB_MODEM_PROBE
+        bool "Enable ML307A USB descriptor and AT probe on boot"
+        depends on IDF_TARGET_ESP32P4
+        default y
+        help
+            Install the ESP32-P4 High-Speed USB Host after display startup and
+            log its descriptors, claim vendor interface 2, and validate it
+            with AT/ATI/SIM/signal/registration queries. RNDIS interfaces 0/1,
+            auxiliary AT interface 3, and DIAG interface 4 remain unclaimed.
+            Disable this option when HS is used by USB Audio or USB MSC.
+
+endmenu

@@ -7,6 +7,7 @@
 #include "activities/TextInputActivity.h"
 #include "deepseek/DeepSeekConfig.h"
 #include "deepseek/DeepSeekClient.h"
+#include "frontlight/frontlight.h"
 #include "map/AmapConfig.h"
 #include "storage/app_paths.h"
 #include "ui/SystemFont.h"
@@ -33,7 +34,7 @@ constexpr int PAD = 20;
 constexpr int SETTINGS_ROW_Y = 106;
 constexpr int SETTINGS_ROW_H = 126;
 constexpr int SETTINGS_ROW_GAP = 14;
-constexpr int SETTINGS_ITEM_COUNT = 6;
+constexpr int SETTINGS_ITEM_COUNT = 8;
 
 constexpr int SCAN_TOP = 94;
 constexpr int SCAN_ROW_H = 92;
@@ -1001,6 +1002,206 @@ private:
     }
 };
 
+class NetworkSettingsActivity final : public Activity {
+public:
+    void on_create() override
+    {
+        _mode = wifi_setting_get_network_mode();
+        draw(true);
+    }
+
+    bool on_touch(const TouchEvent &event) override
+    {
+        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+            ActivityManager::instance().pop();
+            return true;
+        }
+        if (event.type != TouchEventType::Tap) return false;
+        const int first_y = 210;
+        for (int i = 0; i < 2; ++i) {
+            const int top = first_y + i * 156;
+            if (event.y >= top && event.y < top + 126) {
+                select(i == 0 ? WIFI_SETTING_NETWORK_WIFI
+                              : WIFI_SETTING_NETWORK_CELLULAR);
+                return true;
+            }
+        }
+        return true;
+    }
+
+    bool on_key(int key) override
+    {
+        if (key == APP_KEY_BACK) {
+            ActivityManager::instance().pop();
+            return true;
+        }
+        if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
+            _mode = _mode == WIFI_SETTING_NETWORK_WIFI
+                        ? WIFI_SETTING_NETWORK_CELLULAR
+                        : WIFI_SETTING_NETWORK_WIFI;
+            draw(false);
+            return true;
+        }
+        if (key == APP_KEY_OK) {
+            select(_mode);
+            return true;
+        }
+        return false;
+    }
+
+private:
+    wifi_setting_network_mode_t _mode = WIFI_SETTING_NETWORK_WIFI;
+
+    void select(wifi_setting_network_mode_t mode)
+    {
+        esp_err_t ret = wifi_setting_set_network_mode(mode);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "save network preference failed: %s", esp_err_to_name(ret));
+            return;
+        }
+        _mode = mode;
+        ActivityManager::instance().pop();
+    }
+
+    void draw_option(int index, const char *title, const char *detail)
+    {
+        const int top = 210 + index * 156;
+        const bool active = (index == 0) == (_mode == WIFI_SETTING_NETWORK_WIFI);
+        M5.Display.drawFastHLine(PAD, top, M5.Display.width() - PAD * 2, TFT_BLACK);
+        system_font::draw_left(M5.Display, title, PAD + 18, top + 20, TFT_BLACK);
+        system_font::draw_left(M5.Display, detail, PAD + 18, top + 68,
+                               active ? TFT_BLACK : 0x8410);
+        system_font::draw_right(M5.Display, active ? "Selected" : "",
+                                M5.Display.width() - PAD - 18, top + 20, TFT_BLACK);
+        M5.Display.drawFastHLine(PAD, top + 125, M5.Display.width() - PAD * 2, TFT_BLACK);
+    }
+
+    void draw(bool quality)
+    {
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
+        M5.Display.fillScreen(TFT_WHITE);
+        draw_header("Network");
+        system_font::draw_center(M5.Display, "Choose the connection used for online services",
+                                 M5.Display.width() / 2, 130, 0x8410);
+        draw_option(0, "WiFi", "Use saved WiFi; 4G data is not selected");
+        draw_option(1, "4G", "Use ML307A cellular data; C6 WiFi powers off");
+        M5.Display.display();
+        M5.Display.endWrite();
+    }
+};
+
+class FrontlightSettingsActivity final : public Activity {
+public:
+    void on_create() override { draw(true); }
+
+    bool on_touch(const TouchEvent &event) override
+    {
+        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+            ActivityManager::instance().pop();
+            return true;
+        }
+        if (event.type != TouchEventType::Tap) return false;
+        const Layout layout = make_layout(M5.Display.width());
+        if (event.y >= CONTROL_Y && event.y < CONTROL_Y + CONTROL_H) {
+            if (event.x >= layout.minus_x && event.x < layout.minus_x + layout.button_w) change(-1);
+            else if (event.x >= layout.plus_x && event.x < layout.plus_x + layout.button_w) change(1);
+            else if (event.x >= layout.bar_x && event.x < layout.bar_x + layout.bar_area_w) {
+                const int level = std::clamp(
+                    ((event.x - layout.bar_x) * 10 + layout.bar_area_w - 1)
+                        / layout.bar_area_w,
+                    0, 10);
+                frontlight_set_level(level);
+                draw(false);
+            }
+            return true;
+        }
+        return false;
+    }
+
+    bool on_key(int key) override
+    {
+        if (key == APP_KEY_BACK) {
+            ActivityManager::instance().pop();
+            return true;
+        }
+        if (key == APP_KEY_UP) { change(1); return true; }
+        if (key == APP_KEY_DOWN) { change(-1); return true; }
+        return false;
+    }
+
+private:
+    static constexpr int CONTROL_Y = 492;
+    static constexpr int CONTROL_H = 132;
+
+    struct Layout {
+        int minus_x;
+        int plus_x;
+        int button_w;
+        int bar_x;
+        int bar_area_w;
+        int bar_w;
+        int bar_gap;
+    };
+
+    static Layout make_layout(int width)
+    {
+        constexpr int margin = 20;
+        constexpr int side_gap = 12;
+        constexpr int bar_gap = 6;
+        // The page is portrait (684 px wide).  Keep the - / bars / + groups
+        // within that live width rather than using the panel's 1216 px axis.
+        const int button_w = std::clamp(width / 8, 72, 88);
+        const int minus_x = margin;
+        const int plus_x = width - margin - button_w;
+        const int bar_x = minus_x + button_w + side_gap;
+        const int bar_area_w = std::max(10, plus_x - side_gap - bar_x);
+        const int bar_w = std::max(4, (bar_area_w - 9 * bar_gap) / 10);
+        return {minus_x, plus_x, button_w, bar_x, bar_area_w, bar_w, bar_gap};
+    }
+
+    void change(int delta)
+    {
+        frontlight_set_level(std::clamp(frontlight_get_level() + delta, 0, 10));
+        draw(false);
+    }
+
+    void draw(bool quality)
+    {
+        const int level = frontlight_get_level();
+        const int width = M5.Display.width();
+        const Layout layout = make_layout(width);
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_text);
+        M5.Display.fillScreen(TFT_WHITE);
+        draw_header("Frontlight");
+        system_font::draw_center(M5.Display, "Brightness", width / 2, 250, TFT_BLACK);
+        system_font::draw_center(M5.Display, std::to_string(frontlight_get_percent()) + "%",
+                                 width / 2, 334, TFT_BLACK);
+
+        M5.Display.drawRoundRect(layout.minus_x, CONTROL_Y, layout.button_w, CONTROL_H,
+                                 10, TFT_BLACK);
+        M5.Display.drawRoundRect(layout.plus_x, CONTROL_Y, layout.button_w, CONTROL_H,
+                                 10, TFT_BLACK);
+        system_font::draw_center(M5.Display, "-", layout.minus_x + layout.button_w / 2,
+                                 CONTROL_Y + 38, TFT_BLACK);
+        system_font::draw_center(M5.Display, "+", layout.plus_x + layout.button_w / 2,
+                                 CONTROL_Y + 38, TFT_BLACK);
+        for (int i = 0; i < 10; ++i) {
+            const int x = layout.bar_x + i * (layout.bar_w + layout.bar_gap);
+            const bool on = i < level;
+            if (on) M5.Display.fillRoundRect(x, CONTROL_Y + 43, layout.bar_w, 46, 5, TFT_BLACK);
+            else M5.Display.drawRoundRect(x, CONTROL_Y + 43, layout.bar_w, 46, 5, TFT_BLACK);
+        }
+        system_font::draw_center(M5.Display, "Tap - / + to adjust by 5%",
+                                 width / 2, 730, TFT_DARKGRAY);
+        system_font::draw_center(M5.Display, "0% turns the frontlight off",
+                                 width / 2, 786, TFT_DARKGRAY);
+        M5.Display.display();
+        M5.Display.endWrite();
+    }
+};
+
 class SettingActivity final : public Activity {
 public:
     void on_create() override
@@ -1065,11 +1266,13 @@ private:
 
     void open_focused()
     {
-        if (_focus == 0) ActivityManager::instance().push(new WifiSettingsActivity());
-        else if (_focus == 1) ActivityManager::instance().push(new DeepSeekSettingsActivity());
-        else if (_focus == 2) ActivityManager::instance().push(new ZhihuSettingsActivity());
-        else if (_focus == 3) ActivityManager::instance().push(new MapSettingsActivity());
-        else if (_focus == 4) launch_epd_diagnostics();
+        if (_focus == 0) ActivityManager::instance().push(new NetworkSettingsActivity());
+        else if (_focus == 1) ActivityManager::instance().push(new WifiSettingsActivity());
+        else if (_focus == 2) ActivityManager::instance().push(new FrontlightSettingsActivity());
+        else if (_focus == 3) ActivityManager::instance().push(new DeepSeekSettingsActivity());
+        else if (_focus == 4) ActivityManager::instance().push(new ZhihuSettingsActivity());
+        else if (_focus == 5) ActivityManager::instance().push(new MapSettingsActivity());
+        else if (_focus == 6) launch_epd_diagnostics();
         else ActivityManager::instance().push(new RssCacheSettingsActivity());
     }
 
@@ -1105,28 +1308,33 @@ private:
         draw_header("Settings");
         std::string detail = configured ? std::string("Default: ") + ssid
                                         : "Not configured";
-        draw_item(0, "WiFi", detail);
+        const wifi_setting_network_mode_t network_mode = wifi_setting_get_network_mode();
+        draw_item(0, "Network", network_mode == WIFI_SETTING_NETWORK_CELLULAR
+                                      ? "4G cellular data"
+                                      : "WiFi");
+        draw_item(1, "WiFi", detail);
+        draw_item(2, "Frontlight", std::to_string(frontlight_get_percent()) + "%");
         DeepSeekConfig deepseek;
         bool has_api_key = deepseek_config_load(&deepseek);
-        draw_item(1, "DeepSeek",
+        draw_item(3, "DeepSeek",
                   has_api_key ? std::string("Configured, ") + deepseek_model_label(deepseek.default_model)
                               : "API key not configured");
         ZhihuConfig zhihu;
-        draw_item(2, "ZhiHu",
+        draw_item(4, "ZhiHu",
                   zhihu_config_load(&zhihu) ? "Access Secret configured"
                                             : "Access Secret not configured");
         AmapConfig amap;
-        draw_item(3, "Map",
+        draw_item(5, "Map",
                   amap_config_load(&amap) ? "AMap API key configured"
                                           : "AMap API key not configured");
-        draw_item(4, "EPD Diagnostics",
+        draw_item(6, "EPD Diagnostics",
                   "Direction, grayscale, transitions and VCOM");
         RssCacheInfo rss_cache = rss_cache_info();
         char rss_detail[64] = {};
         std::snprintf(rss_detail, sizeof(rss_detail), "%u files, %s",
                       static_cast<unsigned>(rss_cache.files),
                       format_cache_bytes(rss_cache.bytes).c_str());
-        draw_item(5, "Clear RSS Cache", rss_detail);
+        draw_item(7, "Clear RSS Cache", rss_detail);
         M5.Display.display();
         M5.Display.endWrite();
     }
@@ -1195,6 +1403,9 @@ void launch_settings()
 
 bool ensure_wifi_configured_or_show_guide()
 {
+    if (wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_CELLULAR) {
+        return true;
+    }
     char ssid[WIFI_SETTING_SSID_MAX_LEN + 1] = {};
     char password[WIFI_SETTING_PASSWORD_MAX_LEN + 1] = {};
     if (wifi_setting_load_credentials(ssid, sizeof(ssid), password, sizeof(password))) {

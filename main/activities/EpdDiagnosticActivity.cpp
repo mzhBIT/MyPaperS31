@@ -9,6 +9,7 @@
 
 #include "lgfx/v1/platforms/esp32/MyPaper_EPD_Config.hpp"
 #include "lgfx/v1/platforms/esp32/Panel_EPD_2D.hpp"
+#include "lgfx/v1/platforms/esp32/EpdScan2DContinuous.hpp"
 
 #include <algorithm>
 #include <cstdio>
@@ -18,9 +19,9 @@ namespace {
 constexpr int HEADER_H = 76;
 constexpr int PAD = 20;
 constexpr int MENU_TOP = 108;
-constexpr int MENU_ROW_H = 94;
+constexpr int MENU_ROW_H = 84;
 constexpr int MENU_ROW_GAP = 8;
-constexpr int MENU_COUNT = 9;
+constexpr int MENU_COUNT = 11;
 
 const char *TAG = "EPD_DIAG";
 
@@ -33,6 +34,8 @@ const char *MENU_LABELS[MENU_COUNT] = {
     "Quality black -> white",
     "Text / DU4 four-gray",
     "Fastest / A2 binary",
+    "Quality timing A/B (20 / 16 us)",
+    "DU4 neutral-mask partial",
     "VCOM measurement",
 };
 
@@ -81,6 +84,13 @@ void finish_draw(bool wait = true)
     if (wait) M5.Display.waitDisplay();
 }
 
+void finish_draw_area(int x, int y, int w, int h, bool wait = true)
+{
+    M5.Display.display(x, y, w, h);
+    M5.Display.endWrite();
+    if (wait) M5.Display.waitDisplay();
+}
+
 void draw_vertical_stripes(int x, int y, int w, int h, int stripe)
 {
     M5.Display.fillRect(x, y, w, h, TFT_WHITE);
@@ -101,6 +111,11 @@ void draw_horizontal_stripes(int x, int y, int w, int h, int stripe)
 
 class EpdDiagnosticActivity final : public Activity {
 public:
+    ~EpdDiagnosticActivity() override
+    {
+        restore_default_timing();
+    }
+
     void on_create() override
     {
         draw_menu(true);
@@ -131,6 +146,15 @@ public:
         }
         if (_view == View::GhostSource) {
             draw_ghost_target();
+            return true;
+        }
+        if (_view == View::QualityTimingAB) {
+            _timing_line_us = (_timing_line_us == 20u) ? 16u : 20u;
+            draw_quality_timing_ab();
+            return true;
+        }
+        if (_view == View::NeutralMaskSource || _view == View::NeutralMaskTarget) {
+            draw_neutral_mask_partial();
             return true;
         }
 
@@ -167,6 +191,16 @@ public:
             draw_ghost_target();
             return true;
         }
+        if (_view == View::QualityTimingAB && key == APP_KEY_OK) {
+            _timing_line_us = (_timing_line_us == 20u) ? 16u : 20u;
+            draw_quality_timing_ab();
+            return true;
+        }
+        if ((_view == View::NeutralMaskSource || _view == View::NeutralMaskTarget)
+         && key == APP_KEY_OK) {
+            draw_neutral_mask_partial();
+            return true;
+        }
         if (key == APP_KEY_OK || key == APP_KEY_EXTRA) {
             draw_menu(false);
             return true;
@@ -185,11 +219,30 @@ private:
         GhostTarget,
         Text4Gray,
         A2Binary,
+        QualityTimingAB,
+        NeutralMaskSource,
+        NeutralMaskTarget,
         Vcom,
     };
 
     View _view = View::Menu;
     int _focus = 0;
+    bool _neutral_mask_dark = true;
+    uint32_t _timing_line_us = MYPAPER_EPD_2D_LINE_PERIOD_US;
+
+    void restore_default_timing()
+    {
+#if MYPAPER_EPD_USE_2D_ENGINE
+        if (_timing_line_us != MYPAPER_EPD_2D_LINE_PERIOD_US) {
+            if (lgfx::epd2d_continuous_scan_set_line_period_us(
+                    MYPAPER_EPD_2D_LINE_PERIOD_US)) {
+                ESP_LOGI(TAG, "timing A/B: restored default %u us",
+                         (unsigned)MYPAPER_EPD_2D_LINE_PERIOD_US);
+            }
+            _timing_line_us = MYPAPER_EPD_2D_LINE_PERIOD_US;
+        }
+#endif
+    }
 
     bool go_back()
     {
@@ -203,6 +256,9 @@ private:
 
     void draw_menu(bool quality)
     {
+        if (_view == View::QualityTimingAB) {
+            restore_default_timing();
+        }
         _view = View::Menu;
         begin_draw(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
@@ -242,9 +298,98 @@ private:
             case 5: draw_ghost_source(); break;
             case 6: draw_text_four_gray(); break;
             case 7: draw_a2_binary(); break;
-            case 8: run_vcom_measurement(); break;
+            case 8: draw_quality_timing_ab(); break;
+            case 9: draw_neutral_mask_source(); break;
+            case 10: run_vcom_measurement(); break;
             default: break;
         }
+    }
+
+    struct TestRect {
+        int x;
+        int y;
+        int w;
+        int h;
+    };
+
+    TestRect neutral_mask_rect() const
+    {
+        const int width = M5.Display.width();
+        const int height = M5.Display.height();
+        return {width / 4, height / 4, width / 2, height / 2};
+    }
+
+    void draw_neutral_mask_outer_pattern()
+    {
+        const int width = M5.Display.width();
+        const int height = M5.Display.height();
+        const TestRect r = neutral_mask_rect();
+        draw_header("DU4 Neutral-Mask Partial");
+        system_font::draw_center(M5.Display, "OUTER PATTERN MUST NOT FADE",
+                                 width / 2, 102, TFT_BLACK);
+        system_font::draw_center(M5.Display, "Tap to toggle only the center",
+                                 width / 2, height - 74, TFT_BLACK);
+
+        // These high-contrast marks are deliberately outside the requested
+        // update rectangle. During each Text/DU4 partial refresh they must be
+        // scanned with 00 (idle) drive values and retain their original ink.
+        for (int y = 142; y < height - 130; y += 30) {
+            M5.Display.fillRect(28, y, r.x - 56, 12, TFT_BLACK);
+            M5.Display.fillRect(r.x + r.w + 28, y, width - (r.x + r.w) - 56,
+                                12, TFT_BLACK);
+        }
+        for (int x = 34; x < width - 34; x += 46) {
+            M5.Display.drawFastVLine(x, 132, r.y - 152, TFT_BLACK);
+            M5.Display.drawFastVLine(x, r.y + r.h + 20,
+                                     height - (r.y + r.h) - 130, TFT_BLACK);
+        }
+        M5.Display.drawRect(r.x - 1, r.y - 1, r.w + 2, r.h + 2, TFT_BLACK);
+    }
+
+    void draw_neutral_mask_source()
+    {
+        _view = View::NeutralMaskSource;
+        _neutral_mask_dark = true;
+        const TestRect r = neutral_mask_rect();
+        ESP_LOGI(TAG, "neutral-mask: establish outer reference Quality begin");
+        begin_draw(epd_mode_t::epd_quality);
+        M5.Display.fillScreen(TFT_WHITE);
+        draw_neutral_mask_outer_pattern();
+        M5.Display.fillRect(r.x, r.y, r.w, r.h, TFT_BLACK);
+        system_font::draw_center(M5.Display, "CENTER: BLACK", r.x + r.w / 2,
+                                 r.y + r.h / 2 - 24, TFT_WHITE);
+        system_font::draw_center(M5.Display, "TAP FOR DU4 PARTIAL", r.x + r.w / 2,
+                                 r.y + r.h / 2 + 22, TFT_WHITE);
+        finish_draw();
+        ESP_LOGI(TAG, "neutral-mask: reference complete; tap for partial DU4");
+    }
+
+    void draw_neutral_mask_partial()
+    {
+        _view = View::NeutralMaskTarget;
+        const TestRect r = neutral_mask_rect();
+        _neutral_mask_dark = !_neutral_mask_dark;
+
+        // Only the centre rectangle is written and submitted. Panel_EPD_2D
+        // still scans every row, but it clears every non-centre output byte to
+        // 00, the panel's idle drive. Repeated taps make any outer ink loss
+        // immediately visible without changing the reference framebuffer.
+        ESP_LOGI(TAG,
+                 "neutral-mask: DU4 partial %s area=%d,%d %dx%d; exterior=00 idle",
+                 _neutral_mask_dark ? "black" : "white", r.x, r.y, r.w, r.h);
+        begin_draw(epd_mode_t::epd_text);
+        M5.Display.fillRect(r.x, r.y, r.w, r.h,
+                             _neutral_mask_dark ? TFT_BLACK : TFT_WHITE);
+        M5.Display.drawRect(r.x + 20, r.y + 20, r.w - 40, r.h - 40,
+                             _neutral_mask_dark ? TFT_WHITE : TFT_BLACK);
+        const uint16_t text_color = _neutral_mask_dark ? TFT_WHITE : TFT_BLACK;
+        system_font::draw_center(M5.Display,
+                                 _neutral_mask_dark ? "CENTER: BLACK" : "CENTER: WHITE",
+                                 r.x + r.w / 2, r.y + r.h / 2 - 24, text_color);
+        system_font::draw_center(M5.Display, "TAP TO TOGGLE", r.x + r.w / 2,
+                                 r.y + r.h / 2 + 22, text_color);
+        finish_draw_area(r.x, r.y, r.w, r.h);
+        ESP_LOGI(TAG, "neutral-mask: partial DU4 complete; inspect outer reference");
     }
 
     void draw_text_four_gray()
@@ -337,6 +482,69 @@ private:
         ESP_LOGI(TAG, "A2 binary: epd_fastest refresh begin");
         finish_draw();
         ESP_LOGI(TAG, "A2 binary: complete");
+    }
+
+    void draw_quality_timing_ab()
+    {
+        _view = View::QualityTimingAB;
+        // Each run recreates the split physical source at the selected scan
+        // period.  This prevents A and B from inheriting one another's ink
+        // state while leaving both the Quality LUT and its phase count intact.
+        const uint32_t requested = _timing_line_us;
+#if MYPAPER_EPD_USE_2D_ENGINE
+        if (!lgfx::epd2d_continuous_scan_set_line_period_us(requested)) {
+            ESP_LOGE(TAG, "timing A/B: cannot select %lu us", (unsigned long)requested);
+            draw_menu(false);
+            return;
+        }
+#endif
+        const uint32_t actual = lgfx::epd2d_continuous_scan_get_line_period_us();
+        const int width = M5.Display.width();
+        const int height = M5.Display.height();
+        constexpr int top = 108;
+        constexpr int bottom_margin = 122;
+        const int bottom = height - bottom_margin;
+        const int split_y = top + (bottom - top) / 2;
+
+        ESP_LOGI(TAG,
+                 "timing A/B: begin line=%lu us nominal_phase=%lu us nominal_hz=%.1f",
+                 (unsigned long)actual,
+                 (unsigned long)(actual * MYPAPER_EPD_PANEL_HEIGHT),
+                 actual ? 1000000.0f /
+                              (float)(actual * MYPAPER_EPD_PANEL_HEIGHT) : 0.0f);
+
+        begin_draw(epd_mode_t::epd_quality);
+        M5.Display.fillScreen(TFT_WHITE);
+        M5.Display.fillRect(0, split_y, width, bottom - split_y, TFT_BLACK);
+        finish_draw();
+
+        begin_draw(epd_mode_t::epd_quality);
+        M5.Display.fillScreen(TFT_WHITE);
+        char title[64] = {};
+        snprintf(title, sizeof(title), "Quality Timing: %lu us / line",
+                 (unsigned long)actual);
+        draw_header(title);
+        for (int level = 0; level < 16; ++level) {
+            const int x0 = level * width / 16;
+            const int x1 = (level + 1) * width / 16;
+            M5.Display.fillRect(x0, top, x1 - x0, bottom - top,
+                                gray_color(level));
+            char label[4] = {};
+            snprintf(label, sizeof(label), "%d", level);
+            system_font::draw_center(M5.Display, label, (x0 + x1) / 2,
+                                     top + 12, level < 7 ? TFT_WHITE : TFT_BLACK);
+        }
+        M5.Display.fillRect(0, bottom, width, bottom_margin, TFT_WHITE);
+        M5.Display.drawFastHLine(0, bottom, width, TFT_BLACK);
+        draw_center_fit(actual == 20
+                            ? "A: 20 us / line (~73 Hz) - tap for B"
+                            : "B: 16 us / line (~91 Hz) - tap for A",
+                        bottom + 18);
+        draw_center_fit("Top started white; bottom started black", bottom + 54);
+        draw_center_fit("Compare gray match, ghosting and scan stability", bottom + 86);
+        finish_draw();
+        ESP_LOGI(TAG, "timing A/B: complete line=%lu us", (unsigned long)actual);
+
     }
 
     void draw_direction_pattern()

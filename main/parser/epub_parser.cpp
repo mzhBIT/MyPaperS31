@@ -836,6 +836,18 @@ bool EpubBook::read_item_to_string(const std::string &href, std::string *out)
     return _zip.read_entry_to_string(href, out, true);
 }
 
+bool EpubBook::read_item_prefix(const std::string &href, std::vector<uint8_t> *out,
+                                size_t max_bytes)
+{
+    return _zip.read_entry_prefix(href, out, max_bytes);
+}
+
+bool EpubBook::read_item_to_memory(const std::string &href, std::vector<uint8_t> *out,
+                                   uint32_t max_size)
+{
+    return _zip.read_entry_to_memory(href, out, max_size);
+}
+
 bool EpubBook::extract_item_to_file(const std::string &href, const std::string &out_path)
 {
     return _zip.extract_entry_to_file(href, out_path);

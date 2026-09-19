@@ -11,6 +11,7 @@
 #include "storage/app_paths.h"
 #include "ui/SystemFont.h"
 #include "ui/reader_background.h"
+#include "utils/CooperativeYield.h"
 #include "wifi/wifi_setting.h"
 
 #include <M5Unified.h>
@@ -175,6 +176,8 @@ static epd_mode_t reader_epd_mode()
         return epd_mode_t::epd_fast;
     case 4:
         return epd_mode_t::epd_fastest;
+    case 5:
+        return epd_mode_t::epd_hd;
     default:
         return epd_mode_t::epd_fast;
     }
@@ -385,11 +388,12 @@ static std::string xml_unescape(const std::string &s)
 {
     std::string out;
     out.reserve(s.size());
-    size_t next_yield = 16 * 1024;
+    size_t next_yield_check = 256 * 1024;
+    CooperativeYield cooperative_yield;
     for (size_t i = 0; i < s.size();) {
-        if (i >= next_yield) {
-            vTaskDelay(1);
-            next_yield = i + 16 * 1024;
+        if (i >= next_yield_check) {
+            cooperative_yield.ifDue();
+            next_yield_check = i + 256 * 1024;
         }
         if (s[i] == '&') {
             // Search only inside the maximum supported entity length. The old
@@ -439,11 +443,12 @@ static std::string strip_html(const std::string &s)
     std::string out;
     out.reserve(s.size());
     bool in_tag = false;
-    size_t next_yield = 16 * 1024;
+    size_t next_yield_check = 256 * 1024;
+    CooperativeYield cooperative_yield;
     for (size_t i = 0; i < s.size(); ++i) {
-        if (i >= next_yield) {
-            vTaskDelay(1);
-            next_yield = i + 16 * 1024;
+        if (i >= next_yield_check) {
+            cooperative_yield.ifDue();
+            next_yield_check = i + 256 * 1024;
         }
         char c = s[i];
         if (c == '<') {
@@ -487,11 +492,12 @@ static std::string normalize_article_text(const std::string &s)
 {
     std::string out;
     out.reserve(s.size());
-    size_t next_yield = 16 * 1024;
+    size_t next_yield_check = 256 * 1024;
+    CooperativeYield cooperative_yield;
     for (size_t i = 0; i < s.size();) {
-        if (i >= next_yield) {
-            vTaskDelay(1);
-            next_yield = i + 16 * 1024;
+        if (i >= next_yield_check) {
+            cooperative_yield.ifDue();
+            next_yield_check = i + 256 * 1024;
         }
         unsigned char c = (unsigned char)s[i];
         if (std::isspace(c)) {
@@ -788,7 +794,7 @@ static bool parse_rss_items(const std::string &xml, std::vector<RssItem> *items)
     int64_t t0 = esp_timer_get_time();
     items->clear();
     size_t pos = 0;
-    unsigned processed = 0;
+    CooperativeYield cooperative_yield;
     while (items->size() < 40) {
         size_t start = xml.find("<item", pos);
         if (start == std::string::npos) break;
@@ -807,7 +813,7 @@ static bool parse_rss_items(const std::string &xml, std::vector<RssItem> *items)
         item.images = extract_image_refs(item_xml, body_html);
         if (!item.title.empty()) items->push_back(item);
         pos = end + 7;
-        if ((++processed & 3u) == 0) vTaskDelay(1);
+        cooperative_yield.ifDue();
     }
     ESP_LOGI(TAG, "parse feed bytes=%u items=%u time=%lld ms",
              (unsigned)xml.size(),
@@ -1064,6 +1070,11 @@ public:
         }
         load_feeds();
         draw_status("RSS", "Loading WiFi...");
+        // Do not start a Wi-Fi/RNDIS handshake while the EPD high-voltage rails
+        // are powering up.  On the cellular module this overlap can produce a
+        // supply-current peak large enough to reboot it into the 2ECC:3004 ROM
+        // boot port before it returns as the normal 2ECC:3012 device.
+        M5.Display.waitDisplay();
         _wifi_ok = connect_wifi();
         if (!_wifi_ok) g_status = "Configure WiFi in Settings";
         _view = View::Feeds;
@@ -2002,6 +2013,10 @@ private:
         RssFeed feed = g_feeds[g_focus];
         _current_feed_is_bing = feed.url == "https://rsshub.app/bing";
         draw_status(feed.title.c_str(), "Fetching...");
+        // The status frame must be physically complete before DNS/HTTP starts.
+        // RNDIS data activity and an EPD full refresh otherwise overlap on the
+        // board supply and have been observed to reset the ML307A.
+        M5.Display.waitDisplay();
         std::string xml;
         g_items.clear();
         bool ok = false;
@@ -2423,6 +2438,7 @@ private:
     {
         ReaderStyle style = reader_style_get();
         epd_mode_t preferred = reader_epd_mode();
+        // Do not bypass image-page Quality handling when HD is selected.
         if (preferred == epd_mode_t::epd_quality) {
             _non_quality_refresh_count = 0;
             _post_image_quality_pending = false;
@@ -2517,8 +2533,9 @@ private:
         if (!page_text.empty()) reader_text_renderer().preparePage(page_text);
 
         if (page) {
+            CooperativeYield cooperative_yield;
             for (size_t i = 0; i < page->size(); ++i) {
-                if ((i & 7u) == 0) vTaskDelay(1);
+                cooperative_yield.ifDue();
                 const auto &layout_item = (*page)[i];
                 if (layout_item.type == document_layout::PageItemType::Text) {
                     if (!layout_item.text.empty()) {

@@ -8,6 +8,7 @@
 #include "renderer/TextRenderer.h"
 #include "ui/SystemFont.h"
 #include "ui/reader_background.h"
+#include "utils/CooperativeYield.h"
 #include <M5Unified.h>
 #include <esp_log.h>
 #include <esp_timer.h>
@@ -36,6 +37,8 @@ static epd_mode_t reader_epd_mode() {
         return epd_mode_t::epd_fast;
     case 4:
         return epd_mode_t::epd_fastest;
+    case 5:
+        return epd_mode_t::epd_hd;
     default:
         return epd_mode_t::epd_fast;
     }
@@ -109,9 +112,11 @@ static void draw_content(int w, int h) {
     int64_t t_prepare = esp_timer_get_time();
     int line_count = 0;
     int char_count = 0;
+    CooperativeYield cooperative_yield;
     for (const auto &page_line : g_page.lines) {
         if (y >= max_y) break;
-        if ((line_count++ & 7) == 0) vTaskDelay(1);
+        ++line_count;
+        cooperative_yield.ifDue();
 
         const size_t start = page_line.text_offset;
         const size_t length = page_line.text_length;
@@ -307,7 +312,8 @@ public:
         if (reader_background_enabled()) {
             reader_background_draw(M5.Display, w, h);
             if (reader_header_visible()) draw_topbar(w);
-        } else if (mode == epd_mode_t::epd_quality) {
+        } else if (mode == epd_mode_t::epd_quality
+                || mode == epd_mode_t::epd_hd) {
             M5.Display.fillScreen(TFT_WHITE);
             if (reader_header_visible()) draw_topbar(w);
         } else {
@@ -316,7 +322,9 @@ public:
             M5.Display.fillRect(0, clear_y, w, h - clear_y, TFT_WHITE);
         }
         int64_t t1 = esp_timer_get_time();
-        if (mode != epd_mode_t::epd_quality) draw_page_number(w);
+        if (mode != epd_mode_t::epd_quality && mode != epd_mode_t::epd_hd) {
+            draw_page_number(w);
+        }
         int64_t t2 = esp_timer_get_time();
         draw_content(w, h);
         if (m_overlay.visible()) m_overlay.draw();
@@ -329,7 +337,6 @@ public:
         }
         ESP_LOGI(TAG, "redraw: mode=%d clear=%lld pagenum=%lld content=%lld display=%lld total=%lld ms",
                  (int)mode, (t1-t0)/1000, (t2-t1)/1000, (t3-t2)/1000, (t4-t3)/1000, (t4-t0)/1000);
-        vTaskDelay(1);
     }
 
     void redraw_all(int w, int h, epd_mode_t mode = reader_epd_mode()) {
@@ -348,7 +355,6 @@ public:
             M5.Display.setEpdMode(default_mode);
         }
         ESP_LOGI(TAG, "redraw_all: mode=%d total=%lld ms", (int)mode, (esp_timer_get_time() - t0) / 1000);
-        vTaskDelay(1);
     }
 
 private:
@@ -374,7 +380,8 @@ private:
     {
         ReaderStyle style = reader_style_get();
         epd_mode_t preferred = reader_epd_mode();
-        if (preferred == epd_mode_t::epd_quality) {
+        if (preferred == epd_mode_t::epd_quality
+         || preferred == epd_mode_t::epd_hd) {
             m_non_quality_refresh_count = 0;
             return preferred;
         }
@@ -396,7 +403,7 @@ private:
 
     void note_page_refresh_mode(epd_mode_t mode)
     {
-        if (mode == epd_mode_t::epd_quality) {
+        if (mode == epd_mode_t::epd_quality || mode == epd_mode_t::epd_hd) {
             m_non_quality_refresh_count = 0;
         }
     }

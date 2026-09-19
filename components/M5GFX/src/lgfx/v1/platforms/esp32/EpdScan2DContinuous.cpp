@@ -72,6 +72,7 @@ namespace lgfx
       size_t active_words = 0;
       size_t rows = 0;
       size_t frame_bytes = 0;
+      uint32_t line_period_us = MYPAPER_EPD_2D_LINE_PERIOD_US;
       size_t dma_alignment = 64;
       size_t line_bytes = 0;
       size_t bounce_bytes = 0;
@@ -422,7 +423,7 @@ namespace lgfx
 
       const uint32_t total_line_clocks =
           (MYPAPER_EPD_2D_PIXEL_CLOCK_HZ / 1000000u)
-          * MYPAPER_EPD_2D_LINE_PERIOD_US;
+          * state->line_period_us;
       const uint32_t fixed_clocks = MYPAPER_EPD_2D_LE_HIGH_PCLKS
                                   + MYPAPER_EPD_2D_LINE_FRONT_PCLKS
                                   + state->active_words;
@@ -494,6 +495,7 @@ namespace lgfx
     state->active_words = panel_width >> 3; // eight 2-bit EPD pixels per 16-bit word
     state->rows = panel_height;
     state->frame_bytes = state->active_words * sizeof(uint16_t) * state->rows;
+    state->line_period_us = MYPAPER_EPD_2D_LINE_PERIOD_US;
     state->frame_done = xSemaphoreCreateBinary();
     if (state->frame_done == nullptr) {
       ESP_LOGE(TAG, "frame semaphore allocation failed");
@@ -512,10 +514,54 @@ namespace lgfx
              (unsigned)state->active_words, (unsigned)state->rows,
              (unsigned)state->frame_bytes,
              (unsigned long)MYPAPER_EPD_2D_PIXEL_CLOCK_HZ,
-             (unsigned long)MYPAPER_EPD_2D_LINE_PERIOD_US,
+             (unsigned long)state->line_period_us,
              (unsigned long)(MYPAPER_EPD_2D_CKV_HIGH_DUS / 10),
              (unsigned long)(MYPAPER_EPD_2D_CKV_HIGH_DUS % 10));
     return true;
+  }
+
+  bool epd2d_continuous_scan_set_line_period_us(uint32_t line_period_us)
+  {
+    auto* state = &scan_state;
+    if (!state->initialized) {
+      ESP_LOGW(TAG, "line timing change rejected before scan initialization");
+      return false;
+    }
+    const uint32_t clocks_per_us = MYPAPER_EPD_2D_PIXEL_CLOCK_HZ / 1000000u;
+    const uint32_t fixed_clocks = MYPAPER_EPD_2D_LE_HIGH_PCLKS
+                                + MYPAPER_EPD_2D_LINE_FRONT_PCLKS
+                                + state->active_words;
+    const uint32_t total_line_clocks = clocks_per_us * line_period_us;
+    if (line_period_us < 10 || line_period_us > 30
+     || total_line_clocks <= fixed_clocks) {
+      ESP_LOGE(TAG, "invalid runtime line timing: %lu us total=%lu fixed=%lu",
+               (unsigned long)line_period_us, (unsigned long)total_line_clocks,
+               (unsigned long)fixed_clocks);
+      return false;
+    }
+    if (state->line_period_us == line_period_us) {
+      return true;
+    }
+
+    // All callers are required to wait for the preceding phase.  Stop the
+    // LCD first so the timing registers cannot be changed during a scan.
+    lcd_ll_stop(state->lcd_hal.dev);
+    lcd_ll_set_horizontal_timing(state->lcd_hal.dev,
+                                 MYPAPER_EPD_2D_LE_HIGH_PCLKS,
+                                 MYPAPER_EPD_2D_LINE_FRONT_PCLKS,
+                                 state->active_words,
+                                 total_line_clocks - fixed_clocks);
+    state->line_period_us = line_period_us;
+    ESP_LOGI(TAG, "scan timing set: line=%lu us phase_nominal=%lu us (%.1f Hz)",
+             (unsigned long)line_period_us,
+             (unsigned long)(line_period_us * state->rows),
+             1000000.0f / (float)(line_period_us * state->rows));
+    return true;
+  }
+
+  uint32_t epd2d_continuous_scan_get_line_period_us()
+  {
+    return scan_state.initialized ? scan_state.line_period_us : 0;
   }
 
   bool epd2d_continuous_scan_frame(const uint8_t* data, size_t length,
@@ -570,12 +616,12 @@ namespace lgfx
       return false;
     }
 
-    const uint32_t ckv_low_dus = MYPAPER_EPD_2D_LINE_PERIOD_US * 10u
+    const uint32_t ckv_low_dus = state->line_period_us * 10u
                                - MYPAPER_EPD_2D_CKV_HIGH_DUS;
     const rmt_symbol_word_t ckv_symbol = {
       .duration0 = MYPAPER_EPD_2D_CKV_HIGH_DUS,
       .level0 = 1,
-      .duration1 = ckv_low_dus,
+      .duration1 = static_cast<uint16_t>(ckv_low_dus),
       .level1 = 0,
     };
     rmt_transmit_config_t transmit = {};
@@ -592,9 +638,9 @@ namespace lgfx
     }
     // Match epdiy's frame-start sequence: STV low for one row, high for one
     // row, then start active LCD data near the end of the following CKV-high.
-    esp_rom_delay_us(MYPAPER_EPD_2D_LINE_PERIOD_US);
+    esp_rom_delay_us(state->line_period_us);
     gpio_set_level(static_cast<gpio_num_t>(state->bus.pin_spv), 1);
-    esp_rom_delay_us(MYPAPER_EPD_2D_LINE_PERIOD_US);
+    esp_rom_delay_us(state->line_period_us);
     esp_rom_delay_us(MYPAPER_EPD_2D_CKV_HIGH_DUS / 10u);
     lcd_ll_start(state->lcd_hal.dev);
 
@@ -686,12 +732,12 @@ namespace lgfx
       return false;
     }
 
-    const uint32_t ckv_low_dus = MYPAPER_EPD_2D_LINE_PERIOD_US * 10u
+    const uint32_t ckv_low_dus = state->line_period_us * 10u
                                - MYPAPER_EPD_2D_CKV_HIGH_DUS;
     const rmt_symbol_word_t ckv_symbol = {
       .duration0 = MYPAPER_EPD_2D_CKV_HIGH_DUS,
       .level0 = 1,
-      .duration1 = ckv_low_dus,
+      .duration1 = static_cast<uint16_t>(ckv_low_dus),
       .level1 = 0,
     };
     rmt_transmit_config_t transmit = {};
@@ -704,9 +750,9 @@ namespace lgfx
     err = rmt_transmit(state->ckv_channel, state->ckv_encoder,
                        &ckv_symbol, sizeof(ckv_symbol), &transmit);
     if (err == ESP_OK) {
-      esp_rom_delay_us(MYPAPER_EPD_2D_LINE_PERIOD_US);
+      esp_rom_delay_us(state->line_period_us);
       gpio_set_level(static_cast<gpio_num_t>(state->bus.pin_spv), 1);
-      esp_rom_delay_us(MYPAPER_EPD_2D_LINE_PERIOD_US);
+      esp_rom_delay_us(state->line_period_us);
       esp_rom_delay_us(MYPAPER_EPD_2D_CKV_HIGH_DUS / 10u);
       lcd_ll_start(state->lcd_hal.dev);
     }
@@ -762,6 +808,16 @@ namespace lgfx
   bool epd2d_continuous_scan_init(const Bus_EPD::config_t&, size_t, size_t)
   {
     return false;
+  }
+
+  bool epd2d_continuous_scan_set_line_period_us(uint32_t)
+  {
+    return false;
+  }
+
+  uint32_t epd2d_continuous_scan_get_line_period_us()
+  {
+    return 0;
   }
 
   bool epd2d_continuous_scan_frame(const uint8_t*, size_t, uint32_t, uint32_t*)

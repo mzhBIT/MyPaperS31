@@ -236,9 +236,12 @@ void weread_task(void *argument)
         weread::store::PendingProgress pending;
         if (!weread::store::load_pending_progress(&pending)) return;
         std::string sync_error;
-        if (api.upload_progress(pending.book_id, pending.chapter, pending.percent, &sync_error)) {
+        if (api.upload_progress(pending.book_id, pending.chapter, pending.percent,
+                                pending.active_seconds, pending.chapter_offset, pending.summary,
+                                &sync_error)) {
             weread::store::clear_pending_progress();
-            ESP_LOGI(TAG, "pending progress uploaded: %d%%", pending.percent);
+            ESP_LOGI(TAG, "pending progress uploaded: %d%% active=%u s", pending.percent,
+                     static_cast<unsigned>(pending.active_seconds));
         } else {
             ESP_LOGW(TAG, "pending progress retained: %s", sync_error.c_str());
         }
@@ -748,6 +751,8 @@ private:
                                  M5.Display.width() / 2, 760, TFT_BLACK);
         system_font::draw_center(M5.Display, "Waiting for confirmation...",
                                  M5.Display.width() / 2, 820, TFT_BLACK);
+        system_font::draw_center(M5.Display, "Tap < to cancel", M5.Display.width() / 2,
+                                 1060, TFT_DARKGRAY);
         end_frame();
     }
 
@@ -1183,9 +1188,14 @@ private:
             draw_shelf();
             return;
         }
+        if (_view == View::Login && _task) {
+            cancel_login_wait();
+            return;
+        }
         if (_busy) {
             _cancelled = true;
             _exit_when_done = true;
+            draw_loading("Cancelling...");
             return;
         }
         if (_cover_prefetch_active) {
@@ -1216,6 +1226,19 @@ private:
             return;
         }
         ActivityManager::instance().pop();
+    }
+
+    void cancel_login_wait()
+    {
+        // The worker owns its HttpClient and WorkJob. Do not pop this
+        // activity immediately: it would leave the worker with dangling
+        // queue/cancellation pointers. The login wait checks this flag every
+        // 100 ms and sends Cancelled before the activity is popped in loop().
+        _cancelled = true;
+        _exit_when_done = true;
+        _view = View::Loading;
+        draw_loading("Cancelling login...");
+        ESP_LOGI(TAG, "QR login cancellation requested");
     }
 
     void restore_selected_book_shelf_page()

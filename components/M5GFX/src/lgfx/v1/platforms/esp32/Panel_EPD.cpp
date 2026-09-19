@@ -282,12 +282,13 @@ namespace lgfx
     auto dst = _lut_2pixel;
     memset(dst, 0x0F, 256);
     size_t lindex = 0;
-    for (int epd_mode = 0; epd_mode < 5; ++epd_mode) {
+    for (int epd_mode = 0; epd_mode < 6; ++epd_mode) {
       const uint32_t* lut_src = nullptr;
       size_t lut_step = 0;
       switch (epd_mode) {
         default:                      lut_src = lut_eraser; lut_step = lut_eraser_step; break;
         case epd_mode_t::epd_quality: lut_src = _config_detail.lut_quality; lut_step = _config_detail.lut_quality_step; break;
+        case epd_mode_t::epd_hd:      lut_src = _config_detail.lut_quality; lut_step = _config_detail.lut_quality_step; break;
         case epd_mode_t::epd_text:    lut_src = _config_detail.lut_text;    lut_step = _config_detail.lut_text_step;    break;
         case epd_mode_t::epd_fast:    lut_src = _config_detail.lut_fast;    lut_step = _config_detail.lut_fast_step;    break;
         case epd_mode_t::epd_fastest: lut_src = _config_detail.lut_fastest; lut_step = _config_detail.lut_fastest_step; break;

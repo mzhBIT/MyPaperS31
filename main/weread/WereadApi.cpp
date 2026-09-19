@@ -129,16 +129,23 @@ std::string params_json(const std::vector<std::pair<std::string, std::string>> &
     return body;
 }
 
-std::string extract_psvts(std::string_view html)
+struct ReaderState {
+    std::string psvts;
+    std::string pclts;
+    std::string token;
+};
+
+bool extract_reader_state(std::string_view html, ReaderState *state)
 {
+    if (!state) return false;
     constexpr std::string_view marker = "window.__INITIAL_STATE__";
     size_t position = html.find(marker);
-    if (position == std::string_view::npos) return {};
+    if (position == std::string_view::npos) return false;
     position = html.find('=', position + marker.size());
     if (position == std::string_view::npos) return {};
     do { ++position; } while (position < html.size() &&
         (html[position] == ' ' || html[position] == '\t' || html[position] == '\r' || html[position] == '\n'));
-    if (position >= html.size() || html[position] != '{') return {};
+    if (position >= html.size() || html[position] != '{') return false;
 
     int depth = 0;
     bool quoted = false;
@@ -156,16 +163,41 @@ std::string extract_psvts(std::string_view html)
         else if (c == '{') ++depth;
         else if (c == '}' && --depth == 0) { ++end; break; }
     }
-    if (depth != 0) return {};
+    if (depth != 0) return false;
 
     const std::string_view initial = html.substr(position, end - position);
     std::string_view reader;
-    std::string_view raw_psvts;
-    std::string psvts;
+    ReaderState parsed;
     if (!json::member(initial, "reader", &reader) ||
-        !json::member(reader, "psvts", &raw_psvts) ||
-        !json::string(raw_psvts, &psvts)) return {};
-    return psvts;
+        !field_string(reader, "psvts", &parsed.psvts) || parsed.psvts.empty()) return false;
+    // pclts and token are session hints. They are optional in some reader
+    // pages, in which case the Web client uses its documented fallbacks.
+    field_string(reader, "pclts", &parsed.pclts);
+    field_string(reader, "token", &parsed.token);
+    *state = std::move(parsed);
+    return true;
+}
+
+std::string utf8_prefix(std::string_view text, size_t max_chars)
+{
+    size_t offset = 0;
+    size_t count = 0;
+    while (offset < text.size() && count < max_chars) {
+        const unsigned char c = static_cast<unsigned char>(text[offset]);
+        size_t width = 1;
+        if ((c & 0xe0) == 0xc0) width = 2;
+        else if ((c & 0xf0) == 0xe0) width = 3;
+        else if ((c & 0xf8) == 0xf0) width = 4;
+        if (offset + width > text.size()) break;
+        bool valid = true;
+        for (size_t i = 1; i < width; ++i) {
+            if ((static_cast<unsigned char>(text[offset + i]) & 0xc0) != 0x80) valid = false;
+        }
+        if (!valid) width = 1;
+        offset += width;
+        ++count;
+    }
+    return std::string(text.substr(0, offset));
 }
 
 bool is_zip(const uint8_t *data, size_t size)
@@ -727,7 +759,12 @@ bool Api::fetch_psvts(const std::string &book_id, const std::string &chapter_uid
     }
     HttpResponse response = _client->get(*reader_url, *reader_url);
     if (!response.ok()) { if (error) *error = request_error("reader", response); return false; }
-    *psvts = extract_psvts(response_view(response));
+    ReaderState state;
+    if (!extract_reader_state(response_view(response), &state)) {
+        if (error) *error = "reader page has no psvts";
+        return false;
+    }
+    *psvts = state.psvts;
     if (psvts->empty()) { if (error) *error = "reader page has no psvts"; return false; }
     if (*psvts == "dangerMode") {
         ESP_LOGW(TAG, "reader page entered dangerMode");
@@ -741,6 +778,9 @@ bool Api::fetch_psvts(const std::string &book_id, const std::string &chapter_uid
     _psvts_book = book_id;
     _psvts_chapter = chapter_uid;
     _psvts = *psvts;
+    _pclts = std::move(state.pclts);
+    _reader_token = std::move(state.token);
+    _reader_entered = false;
     return true;
 }
 
@@ -837,42 +877,65 @@ bool Api::get_chapter(const std::string &book_id, const Chapter &chapter,
 }
 
 bool Api::upload_progress(const std::string &book_id, const Chapter &chapter,
-                          int progress_percent, std::string *error)
+                          int progress_percent, uint32_t active_seconds,
+                          uint64_t chapter_offset, const std::string &summary,
+                          std::string *error)
 {
     if (!_client || book_id.empty() || chapter.uid.empty()) return false;
     if (!ensure_signed_request_time(error)) return false;
     std::string reader, psvts;
     if (!fetch_psvts(book_id, chapter.uid, &reader, &psvts, error, false)) return false;
     const int64_t now = static_cast<int64_t>(std::time(nullptr));
+    const std::string pclts = _pclts.empty() || _pclts == "0"
+        ? encode_id(std::to_string(now)) : _pclts;
+    const std::string text = utf8_prefix(summary, 20);
+    std::vector<std::pair<std::string, std::string>> base = {
+        {"appId", web_app_id()}, {"b", encode_id(book_id)}, {"c", encode_id(chapter.uid)},
+        {"ci", std::to_string(chapter.index)}, {"co", std::to_string(chapter_offset)},
+        {"sm", text}, {"pr", std::to_string(std::clamp(progress_percent, 0, 100))},
+        {"ct", std::to_string(now)}, {"ps", psvts}, {"pc", pclts},
+    };
+    auto post_read = [&](std::vector<std::pair<std::string, std::string>> params,
+                         const char *stage) -> bool {
+        params.push_back({"s", sign_query(sorted_query(params))});
+        std::string body = "{";
+        for (size_t i = 0; i < params.size(); ++i) {
+            if (i) body.push_back(',');
+            body += "\"" + params[i].first + "\":";
+            const std::string &key = params[i].first;
+            const bool numeric = key == "ci" || key == "co" || key == "pr" || key == "rt" ||
+                                 key == "ts" || key == "rn" || key == "ct";
+            body += numeric ? params[i].second : "\"" + json_escape(params[i].second) + "\"";
+        }
+        body.push_back('}');
+        HttpResponse response = _client->post_json(std::string(WEB_HOST) + "/web/book/read", body, reader);
+        if (!response.ok()) { if (error) *error = request_error(stage, response); return false; }
+        const std::string_view root = response_view(response);
+        const int success = field_int(root, "succ", 0);
+        ESP_LOGI(TAG, "reader %s: succ=%d bytes=%u offset=%llu progress=%d rt=%u",
+                 stage, success, static_cast<unsigned>(response.size()),
+                 static_cast<unsigned long long>(chapter_offset), progress_percent,
+                 static_cast<unsigned>(active_seconds));
+        if (success != 1) {
+            if (error) *error = std::string(stage) + " update rejected";
+            return false;
+        }
+        return true;
+    };
+    if (!_reader_entered) {
+        if (!post_read(base, "enter")) return false;
+        _reader_entered = true;
+    }
     const uint32_t random = esp_random() % 1000;
     const std::string timestamp = std::to_string(now * 1000 + random);
     const std::string random_text = std::to_string(esp_random() % 1000);
-    std::vector<std::pair<std::string, std::string>> params = {
-        {"appId", web_app_id()}, {"b", encode_id(book_id)}, {"c", encode_id(chapter.uid)},
-        {"ci", std::to_string(chapter.index)}, {"co", "0"}, {"sm", ""},
-        {"pr", std::to_string(std::clamp(progress_percent, 0, 100))}, {"rt", "0"},
-        {"ts", timestamp}, {"rn", random_text},
-        {"sg", sha256_hex(timestamp + random_text + READER_TOKEN)},
-        {"ct", std::to_string(now)}, {"ps", psvts}, {"pc", encode_id(std::to_string(now))},
-    };
-    params.push_back({"s", sign_query(sorted_query(params))});
-    std::string body = "{";
-    for (size_t i = 0; i < params.size(); ++i) {
-        if (i) body.push_back(',');
-        body += "\"" + params[i].first + "\":";
-        const std::string &key = params[i].first;
-        const bool numeric = key == "ci" || key == "co" || key == "pr" || key == "rt" ||
-                             key == "ts" || key == "rn" || key == "ct";
-        body += numeric ? params[i].second : "\"" + json_escape(params[i].second) + "\"";
-    }
-    body.push_back('}');
-    HttpResponse response = _client->post_json(std::string(WEB_HOST) + "/web/book/read", body, reader);
-    if (!response.ok()) { if (error) *error = request_error("progress", response); return false; }
-    const std::string_view root = response_view(response);
-    if (field_int(root, "succ") != 1) {
-        if (error) *error = "progress update rejected";
-        return false;
-    }
+    std::vector<std::pair<std::string, std::string>> params = base;
+    params.push_back({"rt", std::to_string(active_seconds)});
+    params.push_back({"ts", timestamp});
+    params.push_back({"rn", random_text});
+    params.push_back({"sg", sha256_hex(timestamp + random_text +
+                                         (_reader_token.empty() ? READER_TOKEN : _reader_token))});
+    if (!post_read(std::move(params), "report")) return false;
     return true;
 }
 

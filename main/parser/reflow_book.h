@@ -57,6 +57,10 @@ public:
     }
 
     bool read_item_to_string(const std::string &href, std::string *out);
+    bool read_resource_prefix(const std::string &href, std::vector<uint8_t> *out,
+                              size_t max_bytes = 64 * 1024);
+    bool read_resource_to_memory(const std::string &href, std::vector<uint8_t> *out,
+                                 uint32_t max_size = 12 * 1024 * 1024);
     bool resolve_footnote(const std::string &target, std::string *out);
     std::string normalize_resource_href(const std::string &href) const;
     bool extract_item_to_file(const std::string &href, const std::string &out_path);

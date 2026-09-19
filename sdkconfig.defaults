@@ -82,6 +82,9 @@ CONFIG_AUDIO_SIMPLE_PLAYER_BIT_CVT_DEST_16BIT=y
 # endpoint descriptors. The 256-byte default rejects working headsets at
 # enumeration, before any of our code runs. One buffer per attached device.
 CONFIG_USB_HOST_CONTROL_TRANSFER_MAX_SIZE=1024
+# RNDIS QUERY responses (notably OID_GEN_SUPPORTED_LIST) may be 1025 bytes.
+# This is one control buffer per opened USB CDC device, not a packet buffer pool.
+CONFIG_USBH_CDC_CONTROL_TRANSFER_BUFFER_SIZE=1025
 # The HCD keeps two DMA buffers per pipe (NUM_BUFFERS in hcd_dwc.c) and refills
 # one from its pending queue the moment the previous completes - in the ISR if a
 # URB is already waiting, otherwise only when the app resubmits from the

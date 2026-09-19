@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 
 namespace lgfx {
 inline namespace v1 {
@@ -37,5 +38,15 @@ bool draw_file(lgfx::LGFXBase &gfx,
                int box_width,
                int box_height,
                DrawStats *stats = nullptr);
+
+bool draw_memory(lgfx::LGFXBase &gfx,
+                 const uint8_t *data,
+                 size_t size,
+                 const char *label,
+                 int x,
+                 int y,
+                 int box_width,
+                 int box_height,
+                 DrawStats *stats = nullptr);
 
 } // namespace turbo_jpeg

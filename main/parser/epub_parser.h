@@ -44,6 +44,10 @@ public:
     static bool cached_progress_info(const char *path, uint32_t spine, uint64_t position,
                                      int *percent, int *chapter, int *chapter_count);
     bool read_item_to_string(const std::string &href, std::string *out);
+    bool read_item_prefix(const std::string &href, std::vector<uint8_t> *out,
+                          size_t max_bytes = 64 * 1024);
+    bool read_item_to_memory(const std::string &href, std::vector<uint8_t> *out,
+                             uint32_t max_size = 12 * 1024 * 1024);
     bool extract_item_to_file(const std::string &href, const std::string &out_path);
 
 private:

@@ -37,6 +37,7 @@ namespace lgfx { inline namespace v1 {
 // ─── PCA9535 bit masks (port 1) ───────────────────────────────────
 #define PCA_BIT_OE       0x01  // PC10
 #define PCA_BIT_MODE     0x02  // PC11
+#define PCA_BIT_FRONTLIGHT 0x04 // PC12 / PCA9535 IO1_2, owned by frontlight
 #define PCA_BIT_PWRUP    0x08  // PC13
 #define PCA_BIT_VCOMCTRL 0x10  // PC14
 #define PCA_BIT_WAKEUP   0x20  // PC15
@@ -365,8 +366,12 @@ bool Bus_EPD_V7::powerControl(bool flg_on) {
                      "INT1(clear)=0x%02X INT2(clear)=0x%02X",
                      pca_out, out, pca_cfg, tps_enable, tps_vcom1, tps_vcom2, tps_pg,
                      tps_int1, tps_int2);
-            if (pca_out != out) {
-                ESP_LOGE(TAG, "PCA output readback mismatch: wrote=0x%02X read=0x%02X", out, pca_out);
+            constexpr uint8_t pca_epd_mask = PCA_BIT_OE | PCA_BIT_MODE | PCA_BIT_PWRUP
+                                           | PCA_BIT_VCOMCTRL | PCA_BIT_WAKEUP;
+            if ((pca_out & pca_epd_mask) != (out & pca_epd_mask)) {
+                ESP_LOGE(TAG,
+                         "PCA EPD output readback mismatch: wrote=0x%02X read=0x%02X",
+                         out & pca_epd_mask, pca_out & pca_epd_mask);
             }
 
         } else {
@@ -472,6 +477,15 @@ bool Bus_EPD_V7::measureVCOM(uint32_t* vcom_mV, uint32_t timeout_ms) {
 #define TPS_ADDR _tps_addr
 
 void Bus_EPD_V7::_pca_write(uint8_t reg, uint8_t val) {
+    // Port 1 is shared with the frontlight enable signal.  EPD power
+    // sequencing historically wrote a complete port image, which cleared
+    // IO1_2 after any display refresh and turned an active frontlight off.
+    // Preserve that independently-owned bit for all runtime EPD writes.
+    if (reg == 3) {
+        const uint8_t current = _pca_read(3);
+        val = (uint8_t)((val & ~PCA_BIT_FRONTLIGHT)
+                        | (current & PCA_BIT_FRONTLIGHT));
+    }
     auto result = i2c::writeRegister8(PCA_PORT, PCA_ADDR, reg, val, 0x00, 100000);
     if (!result.has_value()) {
         ESP_LOGE(TAG, "PCA write failed: addr=0x%02X reg=0x%02X value=0x%02X",

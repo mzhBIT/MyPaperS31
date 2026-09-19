@@ -11,6 +11,12 @@ struct PendingProgress {
     std::string book_id;
     Chapter chapter;
     int percent = 0;
+    // Monotonic, foreground reading time accumulated locally since the last
+    // successful report. This deliberately has no dependency on wall-clock
+    // time or an RTC.
+    uint32_t active_seconds = 0;
+    uint64_t chapter_offset = 0;
+    std::string summary;
 };
 
 bool ensure_directories();

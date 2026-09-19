@@ -85,7 +85,9 @@ public:
                                  ChapterAnnotation *annotation, std::string *error,
                                  int count = 8, bool append = false);
     bool upload_progress(const std::string &book_id, const Chapter &chapter,
-                         int progress_percent, std::string *error);
+                         int progress_percent, uint32_t active_seconds,
+                         uint64_t chapter_offset, const std::string &summary,
+                         std::string *error);
 
 private:
     HttpResponse gateway(const std::string &api_name, const std::string &parameters,
@@ -97,6 +99,9 @@ private:
     std::string _psvts_book;
     std::string _psvts_chapter;
     std::string _psvts;
+    std::string _pclts;
+    std::string _reader_token;
+    bool _reader_entered = false;
 };
 
 }  // namespace weread

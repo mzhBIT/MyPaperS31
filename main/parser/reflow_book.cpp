@@ -305,3 +305,25 @@ bool ReflowBook::extract_item_to_file(const std::string &href, const std::string
     }
     return false;
 }
+
+bool ReflowBook::read_resource_prefix(const std::string &href,
+                                      std::vector<uint8_t> *out,
+                                      size_t max_bytes)
+{
+    if (_format == Format::Epub) return _epub.read_item_prefix(href, out, max_bytes);
+    if (_format == Format::Weread && _weread_epub.spine_count() > 0) {
+        return _weread_epub.read_item_prefix(href, out, max_bytes);
+    }
+    return false;
+}
+
+bool ReflowBook::read_resource_to_memory(const std::string &href,
+                                         std::vector<uint8_t> *out,
+                                         uint32_t max_size)
+{
+    if (_format == Format::Epub) return _epub.read_item_to_memory(href, out, max_size);
+    if (_format == Format::Weread && _weread_epub.spine_count() > 0) {
+        return _weread_epub.read_item_to_memory(href, out, max_size);
+    }
+    return false;
+}

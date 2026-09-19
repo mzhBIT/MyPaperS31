@@ -18,6 +18,9 @@ struct DeepSeekSessionMeta {
 struct DeepSeekMessage {
     std::string role;
     std::string content;
+    // Local SD-card path. The API client encodes this only while sending; the
+    // image data is deliberately never copied into messages.jsonl.
+    std::string image_path;
 };
 
 class DeepSeekSessionStore {
@@ -29,7 +32,8 @@ public:
     bool remove(const std::string &id) const;
     bool append_message(DeepSeekSessionMeta *session,
                         const std::string &role,
-                        const std::string &content) const;
+                        const std::string &content,
+                        const std::string &image_path = {}) const;
     bool set_model(DeepSeekSessionMeta *session, DeepSeekModel model) const;
     bool set_thinking(DeepSeekSessionMeta *session, bool enabled) const;
 

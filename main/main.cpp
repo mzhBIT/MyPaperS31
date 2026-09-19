@@ -14,9 +14,11 @@
 #include "storage/app_paths.h"
 #include "storage/storage_sdcard.h"
 #include "usb/usb_msc_mode.h"
+#include "usb/usb_modem_probe.h"
 #include "usb/usb_transfer_boot.h"
 #include "reader_font.h"
 #include "reader_style.h"
+#include "frontlight/frontlight.h"
 
 extern void launch_home();
 
@@ -74,6 +76,10 @@ extern "C" void app_main(void)
         ESP_LOGE(TAG, "Display init failed");
         esp_restart();
     }
+
+    // M5.begin() initializes the PCA9535/I2C bus used by the EPD. Restore
+    // frontlight only afterwards so its enable line cannot race bus setup.
+    frontlight_init();
 
     if (usb_transfer_mode) {
         touch_input_init();
@@ -142,6 +148,16 @@ extern "C" void app_main(void)
 
     reader_font_init();
     reader_style_init();
+
+#if CONFIG_MYPAPER_USB_MODEM_PROBE
+    // Start after M5/EPD initialization so the diagnostic's USB tasks and DMA
+    // allocations cannot perturb the display engine's latency-sensitive setup.
+    esp_err_t modem_probe_ret = usb_modem_probe_start();
+    if (modem_probe_ret != ESP_OK) {
+        ESP_LOGE(TAG, "USB modem probe start failed: %s",
+                 esp_err_to_name(modem_probe_ret));
+    }
+#endif
 
     // M5.Rtc.init();
     // m5::rtc_datetime_t t = M5.Rtc.getDateTime();

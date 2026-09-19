@@ -8,14 +8,20 @@
 #include <esp_log.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
+#include <cstring>
+#include <sys/stat.h>
 
 namespace {
 
 constexpr const char *TAG = "DEEPSEEK_API";
 constexpr const char *CHAT_URL = "https://api.deepseek.com/chat/completions";
 constexpr const char *MODELS_URL = "https://api.deepseek.com/models";
-constexpr size_t MAX_REQUEST_BYTES = 64 * 1024;
+// A 4 MiB source image expands to about 5.34 MiB in Base64. This remains well
+// under DeepSeek's 48 MiB inline limit while keeping PSRAM use bounded.
+constexpr size_t MAX_REQUEST_BYTES = 6 * 1024 * 1024;
+constexpr size_t MAX_INLINE_IMAGE_BYTES = 4 * 1024 * 1024;
 constexpr size_t MAX_RESPONSE_BYTES = 256 * 1024;
 
 class WifiShutdownGuard {
@@ -47,20 +53,82 @@ std::string json_escape(const std::string &value)
     return out;
 }
 
-std::string encoded_message(const DeepSeekMessage &message)
+const char *image_mime_type(const std::string &path)
 {
-    return "{\"role\":\"" + json_escape(message.role) +
-           "\",\"content\":\"" + json_escape(message.content) + "\"}";
+    const size_t dot = path.find_last_of('.');
+    if (dot == std::string::npos) return nullptr;
+    std::string ext = path.substr(dot);
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return std::tolower(c); });
+    if (ext == ".jpg" || ext == ".jpeg") return "image/jpeg";
+    if (ext == ".png") return "image/png";
+    if (ext == ".gif") return "image/gif";
+    if (ext == ".webp") return "image/webp";
+    return nullptr;
 }
 
-std::string build_request(DeepSeekModel model, bool thinking,
-                          const std::vector<DeepSeekMessage> &messages)
+bool base64_image(const std::string &path, std::string *encoded, std::string *error)
+{
+    const char *mime = image_mime_type(path);
+    struct stat st = {};
+    if (!mime || stat(path.c_str(), &st) != 0 || st.st_size <= 0) {
+        *error = "Attached image cannot be opened";
+        return false;
+    }
+    if (static_cast<size_t>(st.st_size) > MAX_INLINE_IMAGE_BYTES) {
+        *error = "Attached image exceeds the 4 MiB device limit";
+        return false;
+    }
+    FILE *file = fopen(path.c_str(), "rb");
+    if (!file) { *error = "Attached image cannot be read"; return false; }
+    static constexpr char table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    encoded->clear();
+    encoded->reserve(std::strlen(mime) + 32 + (static_cast<size_t>(st.st_size) + 2) / 3 * 4);
+    *encoded = std::string("data:") + mime + ";base64,";
+    uint8_t bytes[3];
+    while (true) {
+        const size_t count = fread(bytes, 1, sizeof(bytes), file);
+        if (!count) break;
+        encoded->push_back(table[bytes[0] >> 2]);
+        encoded->push_back(table[((bytes[0] & 0x03) << 4) | (count > 1 ? bytes[1] >> 4 : 0)]);
+        encoded->push_back(count > 1 ? table[((bytes[1] & 0x0f) << 2) | (count > 2 ? bytes[2] >> 6 : 0)] : '=');
+        encoded->push_back(count > 2 ? table[bytes[2] & 0x3f] : '=');
+        if (count < sizeof(bytes)) break;
+    }
+    const bool ok = !ferror(file);
+    fclose(file);
+    if (!ok) { encoded->clear(); *error = "Attached image read failed"; }
+    return ok;
+}
+
+bool encoded_message(const DeepSeekMessage &message, std::string *out, std::string *error)
+{
+    if (message.image_path.empty()) {
+        *out = "{\"role\":\"" + json_escape(message.role) +
+               "\",\"content\":\"" + json_escape(message.content) + "\"}";
+        return true;
+    }
+    std::string image;
+    if (!base64_image(message.image_path, &image, error)) return false;
+    *out = "{\"role\":\"" + json_escape(message.role) + "\",\"content\":[{\"type\":\"text\",\"text\":\"" +
+           json_escape(message.content) + "\"},{\"type\":\"image_url\",\"image_url\":{\"url\":\"" +
+           image + "\"}}]}";
+    return true;
+}
+
+bool build_request(DeepSeekModel model, bool thinking,
+                   const std::vector<DeepSeekMessage> &messages,
+                   std::string *body, std::string *error)
 {
     std::vector<std::string> encoded;
     encoded.reserve(messages.size());
     size_t used = 320;
     for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
-        std::string item = encoded_message(*it);
+        if (!it->image_path.empty() && model != DeepSeekModel::Flash) {
+            *error = "Image understanding requires V4 Flash";
+            return false;
+        }
+        std::string item;
+        if (!encoded_message(*it, &item, error)) return false;
         if (used + item.size() + 1 > MAX_REQUEST_BYTES) break;
         used += item.size() + 1;
         encoded.push_back(std::move(item));
@@ -71,20 +139,20 @@ std::string build_request(DeepSeekModel model, bool thinking,
         if (messages[first_index].role == "assistant") encoded.erase(encoded.begin());
     }
 
-    std::string body;
-    body.reserve(used);
-    body = "{\"model\":\"";
-    body += deepseek_model_id(model);
-    body += "\",\"messages\":[";
+    body->clear();
+    body->reserve(used);
+    *body = "{\"model\":\"";
+    *body += deepseek_model_id(model);
+    *body += "\",\"messages\":[";
     for (size_t i = 0; i < encoded.size(); ++i) {
-        if (i) body.push_back(',');
-        body += encoded[i];
+        if (i) body->push_back(',');
+        *body += encoded[i];
     }
-    body += thinking
+    *body += thinking
                 ? "],\"thinking\":{\"type\":\"enabled\"},\"reasoning_effort\":\"high\","
                 : "],\"thinking\":{\"type\":\"disabled\"},";
-    body += "\"stream\":true,\"max_tokens\":2048}";
-    return body;
+    *body += "\"stream\":true,\"max_tokens\":2048}";
+    return true;
 }
 
 int hex_value(char c)
@@ -312,7 +380,8 @@ DeepSeekClientResult DeepSeekClient::chat(const DeepSeekConfig &config,
         return result;
     }
 
-    std::string request = build_request(model, thinking, messages);
+    std::string request;
+    if (!build_request(model, thinking, messages, &request, &result.error)) return result;
     esp_http_client_config_t http_config = {};
     http_config.url = CHAT_URL;
     http_config.method = HTTP_METHOD_POST;

@@ -17,6 +17,7 @@
 #include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#include "usb/usb_modem_probe.h"
 
 #define WIFI_SETTING_C6_EN_GPIO        GPIO_NUM_54
 #define WIFI_SETTING_C6_BOOT_DELAY_MS  1000
@@ -31,6 +32,7 @@
 #define WIFI_SETTING_NVS_NAMESPACE     "wifi_cfg"
 #define WIFI_SETTING_NVS_SSID_KEY      "ssid"
 #define WIFI_SETTING_NVS_PASSWORD_KEY  "password"
+#define WIFI_SETTING_NVS_NETWORK_KEY   "network"
 
 static const char *TAG = "wifi_setting";
 
@@ -93,6 +95,10 @@ static void wifi_setting_connect_event_handler(void *arg,
         ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
         s_connected = true;
+        if (wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_WIFI &&
+            s_sta_netif != NULL) {
+            (void)esp_netif_set_default_netif(s_sta_netif);
+        }
         if (s_wifi_event_group != NULL) {
             xEventGroupSetBits(s_wifi_event_group, WIFI_SETTING_CONNECTED_BIT);
         }
@@ -107,6 +113,68 @@ static esp_err_t wifi_setting_init_nvs(void)
         ret = nvs_flash_init();
     }
     return ret;
+}
+
+wifi_setting_network_mode_t wifi_setting_get_network_mode(void)
+{
+    uint8_t stored = WIFI_SETTING_NETWORK_WIFI;
+    if (wifi_setting_init_nvs() != ESP_OK) return WIFI_SETTING_NETWORK_WIFI;
+    nvs_handle_t handle = 0;
+    if (nvs_open(WIFI_SETTING_NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
+        (void)nvs_get_u8(handle, WIFI_SETTING_NVS_NETWORK_KEY, &stored);
+        nvs_close(handle);
+    }
+    return stored == WIFI_SETTING_NETWORK_CELLULAR
+               ? WIFI_SETTING_NETWORK_CELLULAR
+               : WIFI_SETTING_NETWORK_WIFI;
+}
+
+esp_err_t wifi_setting_set_network_mode(wifi_setting_network_mode_t mode)
+{
+    ESP_RETURN_ON_FALSE(mode == WIFI_SETTING_NETWORK_WIFI ||
+                            mode == WIFI_SETTING_NETWORK_CELLULAR,
+                        ESP_ERR_INVALID_ARG, TAG, "Invalid network mode");
+    ESP_RETURN_ON_ERROR(wifi_setting_init_nvs(), TAG, "Failed to initialize NVS");
+    nvs_handle_t handle = 0;
+    ESP_RETURN_ON_ERROR(nvs_open(WIFI_SETTING_NVS_NAMESPACE, NVS_READWRITE, &handle),
+                        TAG, "Failed to open network preference NVS");
+    esp_err_t ret = nvs_set_u8(handle, WIFI_SETTING_NVS_NETWORK_KEY, (uint8_t)mode);
+    if (ret == ESP_OK) ret = nvs_commit(handle);
+    nvs_close(handle);
+    if (ret != ESP_OK) return ret;
+
+    ESP_LOGI(TAG, "Network preference saved: %s",
+             mode == WIFI_SETTING_NETWORK_CELLULAR ? "4G" : "Wi-Fi");
+    if (mode == WIFI_SETTING_NETWORK_CELLULAR) {
+        if (s_wifi_started || s_wifi_initialized || s_c6_powered_on) {
+            (void)wifi_setting_deinit(true);
+        }
+    } else if (s_connected && s_sta_netif != NULL) {
+        (void)esp_netif_set_default_netif(s_sta_netif);
+    }
+    return ESP_OK;
+}
+
+esp_err_t wifi_setting_network_stack_init(void)
+{
+    if (!s_netif_initialized) {
+        esp_err_t ret = esp_netif_init();
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "Failed to initialize esp-netif: %s", esp_err_to_name(ret));
+            return ret;
+        }
+        s_netif_initialized = true;
+    }
+
+    if (!s_event_loop_created) {
+        esp_err_t ret = esp_event_loop_create_default();
+        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+            ESP_LOGE(TAG, "Failed to create default event loop: %s", esp_err_to_name(ret));
+            return ret;
+        }
+        s_event_loop_created = true;
+    }
+    return ESP_OK;
 }
 
 static esp_err_t wifi_setting_init_events(void)
@@ -180,19 +248,8 @@ esp_err_t wifi_setting_init(void)
     ESP_RETURN_ON_ERROR(wifi_setting_c6_power_on(), TAG, "Failed to power on C6");
     ESP_RETURN_ON_ERROR(wifi_setting_init_nvs(), TAG, "Failed to initialize NVS");
 
-    if (!s_netif_initialized) {
-        ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "Failed to initialize esp-netif");
-        s_netif_initialized = true;
-    }
-
-    if (!s_event_loop_created) {
-        esp_err_t ret = esp_event_loop_create_default();
-        if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
-            ESP_LOGE(TAG, "Failed to create default event loop: %s", esp_err_to_name(ret));
-            return ret;
-        }
-        s_event_loop_created = true;
-    }
+    ESP_RETURN_ON_ERROR(wifi_setting_network_stack_init(), TAG,
+                        "Failed to initialize shared network stack");
 
     if (s_sta_netif == NULL) {
         s_sta_netif = esp_netif_create_default_wifi_sta();
@@ -423,7 +480,13 @@ esp_err_t wifi_setting_clear_credentials(void)
     nvs_handle_t handle = 0;
     ESP_RETURN_ON_ERROR(nvs_open(WIFI_SETTING_NVS_NAMESPACE, NVS_READWRITE, &handle),
                         TAG, "Failed to open Wi-Fi NVS namespace");
-    esp_err_t ret = nvs_erase_all(handle);
+    // A Wi-Fi credential reset must not silently reset the user's choice of
+    // Wi-Fi versus cellular data.
+    esp_err_t ret = nvs_erase_key(handle, WIFI_SETTING_NVS_SSID_KEY);
+    if (ret == ESP_OK || ret == ESP_ERR_NVS_NOT_FOUND) {
+        ret = nvs_erase_key(handle, WIFI_SETTING_NVS_PASSWORD_KEY);
+    }
+    if (ret == ESP_ERR_NVS_NOT_FOUND) ret = ESP_OK;
     if (ret == ESP_OK) ret = nvs_commit(handle);
     nvs_close(handle);
     return ret;
@@ -432,14 +495,21 @@ esp_err_t wifi_setting_clear_credentials(void)
 bool wifi_setting_is_connected(void)
 {
     esp_netif_ip_info_t ip_info = {0};
-    return s_connected && s_sta_netif != NULL &&
-           esp_netif_is_netif_up(s_sta_netif) &&
-           esp_netif_get_ip_info(s_sta_netif, &ip_info) == ESP_OK &&
-           ip_info.ip.addr != 0;
+    const bool wifi_online = s_connected && s_sta_netif != NULL &&
+                             esp_netif_is_netif_up(s_sta_netif) &&
+                             esp_netif_get_ip_info(s_sta_netif, &ip_info) == ESP_OK &&
+                             ip_info.ip.addr != 0;
+    return wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_CELLULAR
+               ? usb_modem_probe_is_online()
+               : wifi_online;
 }
 
 esp_err_t wifi_setting_connect_saved(int timeout_ms)
 {
+    if (wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_CELLULAR) {
+        ESP_LOGI(TAG, "Using user-selected ML307A 4G connection; C6 Wi-Fi remains off");
+        return usb_modem_probe_wait_online(timeout_ms);
+    }
     char ssid[WIFI_SETTING_SSID_MAX_LEN + 1] = {0};
     char password[WIFI_SETTING_PASSWORD_MAX_LEN + 1] = {0};
     ESP_RETURN_ON_FALSE(wifi_setting_load_credentials(ssid, sizeof(ssid),

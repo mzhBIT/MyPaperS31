@@ -240,7 +240,7 @@ ReaderStyle reader_style_clamp(ReaderStyle style)
     style.margin_right = std::min(120, std::max(0, style.margin_right));
     style.margin_top = std::min(80, std::max(0, style.margin_top));
     style.margin_bottom = std::min(80, std::max(0, style.margin_bottom));
-    style.refresh_mode = std::min(4, std::max(1, style.refresh_mode));
+    style.refresh_mode = std::min(5, std::max(1, style.refresh_mode));
     style.show_images = style.show_images ? 1 : 0;
     style.first_line_indent = std::min(4, std::max(0, style.first_line_indent));
     style.paragraph_spacing = std::min(20, std::max(0, style.paragraph_spacing));
@@ -261,6 +261,8 @@ const char *reader_style_refresh_mode_name(int mode)
         return "Fast";
     case 4:
         return "Fastest";
+    case 5:
+        return "HD";
     default:
         return "Fast";
     }
@@ -268,7 +270,8 @@ const char *reader_style_refresh_mode_name(int mode)
 
 int reader_style_next_refresh_mode(int mode, int delta)
 {
-    static constexpr int kOrder[] = {4, 3, 2, 1}; // Fastest, Fast, Text, Quality.
+    static constexpr int kOrder[] = {4, 3, 2, 5, 1};
+    // Fastest, Fast, Text, HD, Quality.
     int index = 1; // Default to Fast if the stored value is invalid.
     for (int i = 0; i < (int)(sizeof(kOrder) / sizeof(kOrder[0])); ++i) {
         if (kOrder[i] == mode) {

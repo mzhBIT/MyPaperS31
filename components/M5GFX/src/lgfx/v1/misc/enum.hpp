@@ -47,6 +47,7 @@ namespace lgfx
       epd_text    = 2,
       epd_fast    = 3,
       epd_fastest = 4,
+      epd_hd      = 5,
     };
   }
   using namespace epd_mode;

@@ -21,8 +21,17 @@ typedef struct {
     bool secured;
 } wifi_setting_ap_t;
 
+typedef enum {
+    WIFI_SETTING_NETWORK_WIFI = 0,
+    WIFI_SETTING_NETWORK_CELLULAR = 1,
+} wifi_setting_network_mode_t;
+
 esp_err_t wifi_setting_c6_power_on(void);
 esp_err_t wifi_setting_c6_power_off(void);
+// Initializes the process-wide esp-netif/default event-loop services.  USB
+// Ethernet and Wi-Fi both use this entry point so either transport may start
+// first without double-initializing the network stack.
+esp_err_t wifi_setting_network_stack_init(void);
 esp_err_t wifi_setting_init(void);
 esp_err_t wifi_setting_scan(wifi_setting_ap_t *records,
                             size_t capacity,
@@ -30,6 +39,8 @@ esp_err_t wifi_setting_scan(wifi_setting_ap_t *records,
 esp_err_t wifi_setting_connect(const char *ssid, const char *password, int timeout_ms);
 esp_err_t wifi_setting_connect_saved(int timeout_ms);
 bool wifi_setting_is_connected(void);
+wifi_setting_network_mode_t wifi_setting_get_network_mode(void);
+esp_err_t wifi_setting_set_network_mode(wifi_setting_network_mode_t mode);
 bool wifi_setting_load_credentials(char *ssid,
                                    size_t ssid_size,
                                    char *password,

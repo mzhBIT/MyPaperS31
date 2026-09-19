@@ -4,9 +4,13 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 #include <sys/stat.h>
+#include <memory>
 #include <vector>
 
 #include <lgfx/utility/lgfx_miniz.h>
@@ -17,6 +21,36 @@ static const char *TAG = "EPUB_ZIP";
 static const uint32_t ZIP_INDEX_MAGIC = 0x58495A45; // EZIX
 static const uint32_t ZIP_INDEX_VERSION = 1;
 static const uint32_t ZIP_INDEX_MAX_BYTES = 8 * 1024 * 1024;
+// The task watchdog is 5 seconds and FreeRTOS runs at 100 Hz, so an
+// unconditional vTaskDelay(1) costs about 10 ms. Work in reasonably large
+// pieces and only sleep after one second of uninterrupted work. This keeps a
+// wide watchdog margin without adding seconds of artificial delay to comics.
+static const size_t ZIP_COOPERATIVE_CHUNK = 256 * 1024;
+static const int64_t ZIP_COOPERATIVE_YIELD_US = 1000 * 1000;
+
+static void cooperative_yield_if_due(int64_t *last_yield_us)
+{
+    if (!last_yield_us) return;
+    const int64_t now = esp_timer_get_time();
+    if (now - *last_yield_us < ZIP_COOPERATIVE_YIELD_US) return;
+    vTaskDelay(1);
+    *last_yield_us = esp_timer_get_time();
+}
+
+using InflaterPtr = std::unique_ptr<lgfx_tinfl_decompressor, decltype(&heap_caps_free)>;
+
+static InflaterPtr allocate_inflater()
+{
+    auto *inflater = static_cast<lgfx_tinfl_decompressor *>(
+        heap_caps_malloc(sizeof(lgfx_tinfl_decompressor),
+                         MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!inflater) {
+        inflater = static_cast<lgfx_tinfl_decompressor *>(
+            heap_caps_malloc(sizeof(lgfx_tinfl_decompressor),
+                             MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    }
+    return InflaterPtr(inflater, &heap_caps_free);
+}
 
 static uint16_t rd16(const uint8_t *p)
 {
@@ -423,6 +457,157 @@ bool EpubZip::read_entry_to_string(const std::string &name, std::string *out, bo
     return true;
 }
 
+bool EpubZip::read_entry_prefix(const std::string &name,
+                                std::vector<uint8_t> *out,
+                                size_t max_bytes)
+{
+    if (!out || max_bytes == 0) return false;
+    out->clear();
+
+    Entry entry;
+    if (!entry_info(name, &entry) || entry.uncompressed_size == 0) return false;
+    const size_t wanted = std::min<size_t>(max_bytes, entry.uncompressed_size);
+
+    FILE *fp = std::fopen(_path.c_str(), "rb");
+    if (!fp) return false;
+    uint32_t data_offset = 0;
+    bool ok = read_entry_data_offset(fp, entry, &data_offset) &&
+              std::fseek(fp, (long)data_offset, SEEK_SET) == 0;
+
+    if (ok && entry.method == 0) {
+        out->resize(wanted);
+        ok = std::fread(out->data(), 1, wanted, fp) == wanted;
+        std::fclose(fp);
+        if (!ok) out->clear();
+        return ok;
+    }
+
+    std::vector<uint8_t> compressed;
+    if (ok && entry.method == 8) {
+        compressed.resize(entry.compressed_size);
+        ok = entry.compressed_size == 0 ||
+             std::fread(compressed.data(), 1, compressed.size(), fp) == compressed.size();
+    } else if (ok) {
+        ok = false;
+    }
+    std::fclose(fp);
+    if (!ok) return false;
+
+    out->resize(wanted);
+    InflaterPtr inflater = allocate_inflater();
+    if (!inflater) {
+        ESP_LOGE(TAG, "no memory for ZIP inflater (%u bytes)",
+                 (unsigned)sizeof(lgfx_tinfl_decompressor));
+        out->clear();
+        return false;
+    }
+    lgfx_tinfl_init(inflater.get());
+    size_t input_size = compressed.size();
+    size_t output_size = wanted;
+    const lgfx_tinfl_status status = lgfx_tinfl_decompress(
+        inflater.get(),
+        compressed.data(), &input_size,
+        out->data(), out->data(), &output_size,
+        TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
+    if (status != TINFL_STATUS_DONE && status != TINFL_STATUS_HAS_MORE_OUTPUT) {
+        out->clear();
+        return false;
+    }
+    out->resize(output_size);
+    return !out->empty();
+}
+
+bool EpubZip::read_entry_to_memory(const std::string &name,
+                                   std::vector<uint8_t> *out,
+                                   uint32_t max_size)
+{
+    if (!out) return false;
+    out->clear();
+
+    Entry entry;
+    if (!entry_info(name, &entry) || entry.uncompressed_size > max_size) return false;
+    FILE *fp = std::fopen(_path.c_str(), "rb");
+    if (!fp) return false;
+    uint32_t data_offset = 0;
+    bool ok = read_entry_data_offset(fp, entry, &data_offset) &&
+              std::fseek(fp, (long)data_offset, SEEK_SET) == 0;
+
+    if (ok && entry.method == 0) {
+        out->resize(entry.uncompressed_size);
+        size_t offset = 0;
+        int64_t last_yield_us = esp_timer_get_time();
+        while (ok && offset < out->size()) {
+            const size_t chunk = std::min<size_t>(ZIP_COOPERATIVE_CHUNK,
+                                                  out->size() - offset);
+            ok = std::fread(out->data() + offset, 1, chunk, fp) == chunk;
+            offset += ok ? chunk : 0;
+            if (ok) cooperative_yield_if_due(&last_yield_us);
+        }
+        std::fclose(fp);
+        if (!ok) out->clear();
+        return ok;
+    }
+
+    std::vector<uint8_t> compressed;
+    if (ok && entry.method == 8) {
+        compressed.resize(entry.compressed_size);
+        size_t offset = 0;
+        int64_t last_yield_us = esp_timer_get_time();
+        while (ok && offset < compressed.size()) {
+            const size_t chunk = std::min<size_t>(ZIP_COOPERATIVE_CHUNK,
+                                                  compressed.size() - offset);
+            ok = std::fread(compressed.data() + offset, 1, chunk, fp) == chunk;
+            offset += ok ? chunk : 0;
+            if (ok) cooperative_yield_if_due(&last_yield_us);
+        }
+    } else if (ok) {
+        ok = false;
+    }
+    std::fclose(fp);
+    if (!ok) return false;
+
+    out->resize(entry.uncompressed_size);
+    InflaterPtr inflater = allocate_inflater();
+    if (!inflater) {
+        ESP_LOGE(TAG, "no memory for ZIP inflater (%u bytes)",
+                 (unsigned)sizeof(lgfx_tinfl_decompressor));
+        out->clear();
+        return false;
+    }
+    lgfx_tinfl_init(inflater.get());
+    size_t input_offset = 0;
+    size_t output_offset = 0;
+    int64_t last_yield_us = esp_timer_get_time();
+    lgfx_tinfl_status status = TINFL_STATUS_NEEDS_MORE_INPUT;
+    while (output_offset < out->size()) {
+        size_t input_size = compressed.size() - input_offset;
+        size_t output_size = std::min<size_t>(ZIP_COOPERATIVE_CHUNK,
+                                              out->size() - output_offset);
+        status = lgfx_tinfl_decompress(
+            inflater.get(),
+            compressed.data() + input_offset, &input_size,
+            out->data(), out->data() + output_offset, &output_size,
+            TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
+        input_offset += input_size;
+        output_offset += output_size;
+        if (status == TINFL_STATUS_DONE) break;
+        if (status != TINFL_STATUS_HAS_MORE_OUTPUT && status != TINFL_STATUS_NEEDS_MORE_INPUT) {
+            out->clear();
+            return false;
+        }
+        if (input_size == 0 && output_size == 0) {
+            out->clear();
+            return false;
+        }
+        cooperative_yield_if_due(&last_yield_us);
+    }
+    if (status != TINFL_STATUS_DONE || output_offset != entry.uncompressed_size) {
+        out->clear();
+        return false;
+    }
+    return true;
+}
+
 bool EpubZip::extract_entry_to_file(const std::string &name, const std::string &out_path, uint32_t max_size)
 {
     Entry entry;
@@ -450,19 +635,21 @@ bool EpubZip::extract_entry_to_file(const std::string &name, const std::string &
             return false;
         }
 
-        uint8_t buf[4096];
+        std::vector<uint8_t> buf(64 * 1024);
         uint32_t remaining = entry.uncompressed_size;
+        int64_t last_yield_us = esp_timer_get_time();
         while (ok && remaining > 0) {
-            size_t chunk = std::min<size_t>(sizeof(buf), remaining);
-            if (std::fread(buf, 1, chunk, fp) != chunk) {
+            size_t chunk = std::min<size_t>(buf.size(), remaining);
+            if (std::fread(buf.data(), 1, chunk, fp) != chunk) {
                 ok = false;
                 break;
             }
-            if (std::fwrite(buf, 1, chunk, out) != chunk) {
+            if (std::fwrite(buf.data(), 1, chunk, out) != chunk) {
                 ok = false;
                 break;
             }
             remaining -= (uint32_t)chunk;
+            cooperative_yield_if_due(&last_yield_us);
         }
 
         std::fclose(out);
@@ -470,38 +657,26 @@ bool EpubZip::extract_entry_to_file(const std::string &name, const std::string &
         return ok;
     }
 
-    std::vector<uint8_t> compressed;
-    if (ok) {
-        compressed.resize(entry.compressed_size);
-        if (entry.compressed_size > 0 &&
-            std::fread(compressed.data(), 1, compressed.size(), fp) != compressed.size()) {
-            ok = false;
-        }
-    }
     std::fclose(fp);
     if (!ok) return false;
 
-    std::vector<uint8_t> inflated;
-    inflated.resize(entry.uncompressed_size);
-
-    if (entry.method == 0) {
-        if (compressed.size() < entry.uncompressed_size) return false;
-        std::memcpy(inflated.data(), compressed.data(), entry.uncompressed_size);
-    } else if (entry.method == 8) {
-        size_t written = lgfx_tinfl_decompress_mem_to_mem(inflated.data(),
-                                                          entry.uncompressed_size,
-                                                          compressed.data(),
-                                                          compressed.size(),
-                                                          0);
-        if (written != entry.uncompressed_size) {
-            ESP_LOGW(TAG, "inflate failed: %s out=%u/%u",
-                     name.c_str(),
-                     (unsigned)written,
-                     (unsigned)entry.uncompressed_size);
-            return false;
-        }
-    } else {
+    if (entry.method != 8) {
         ESP_LOGW(TAG, "unsupported method=%u entry=%s", (unsigned)entry.method, name.c_str());
+        return false;
+    }
+
+    // Keep the stable file-backed image path, but do not use the monolithic
+    // miniz helper here.  On large comic JPEG entries that helper can occupy
+    // the main task for longer than the 5 s watchdog period.  The normal
+    // memory reader inflates in bounded output chunks and yields only after
+    // roughly one second of continuous work.
+    std::vector<uint8_t> inflated;
+    if (!read_entry_to_memory(name, &inflated, max_size) ||
+        inflated.size() != entry.uncompressed_size) {
+        ESP_LOGW(TAG, "chunked inflate failed: %s out=%u/%u",
+                 name.c_str(),
+                 (unsigned)inflated.size(),
+                 (unsigned)entry.uncompressed_size);
         return false;
     }
 
@@ -510,8 +685,15 @@ bool EpubZip::extract_entry_to_file(const std::string &name, const std::string &
         ESP_LOGW(TAG, "output open failed: %s", out_path.c_str());
         return false;
     }
-    bool wrote = inflated.empty() ||
-                 std::fwrite(inflated.data(), 1, inflated.size(), out) == inflated.size();
+    bool wrote = true;
+    size_t offset = 0;
+    int64_t last_yield_us = esp_timer_get_time();
+    while (wrote && offset < inflated.size()) {
+        const size_t chunk = std::min<size_t>(64 * 1024, inflated.size() - offset);
+        wrote = std::fwrite(inflated.data() + offset, 1, chunk, out) == chunk;
+        offset += wrote ? chunk : 0;
+        if (wrote) cooperative_yield_if_due(&last_yield_us);
+    }
     std::fclose(out);
     return wrote;
 }

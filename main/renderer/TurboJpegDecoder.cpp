@@ -114,13 +114,15 @@ static void estimate_progressive_coefficients(j_decompress_ptr cinfo,
 
 } // namespace
 
-bool draw_file(lgfx::LGFXBase &gfx,
-               const char *path,
-               int x,
-               int y,
-               int box_width,
-               int box_height,
-               DrawStats *stats)
+static bool draw_source(lgfx::LGFXBase &gfx,
+                        const char *path,
+                        const uint8_t *data,
+                        size_t data_size,
+                        int x,
+                        int y,
+                        int box_width,
+                        int box_height,
+                        DrawStats *stats)
 {
     DrawStats local_stats;
     local_stats.attempted = true;
@@ -131,19 +133,21 @@ bool draw_file(lgfx::LGFXBase &gfx,
         return ok;
     };
 
-    if (!path || !path[0] || box_width <= 0 || box_height <= 0) return finish(false);
+    if ((!data && (!path || !path[0])) || (data && data_size == 0) ||
+        box_width <= 0 || box_height <= 0) return finish(false);
+    const char *source_label = path && path[0] ? path : "memory";
 
     size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
     if (free_psram <= MIN_FREE_PSRAM_RESERVE + MIN_JPEG_MEMORY) {
         ESP_LOGW(TAG, "insufficient PSRAM path=%s free=%u reserve=%u",
-                 path, (unsigned)free_psram, (unsigned)MIN_FREE_PSRAM_RESERVE);
+                 source_label, (unsigned)free_psram, (unsigned)MIN_FREE_PSRAM_RESERVE);
         return finish(false);
     }
     size_t jpeg_budget = std::min(MAX_JPEG_MEMORY, free_psram - MIN_FREE_PSRAM_RESERVE);
     local_stats.memory_budget = (uint32_t)jpeg_budget;
 
-    FILE *fp = fopen(path, "rb");
-    if (!fp) return finish(false);
+    FILE *fp = data ? nullptr : fopen(path, "rb");
+    if (!data && !fp) return finish(false);
 
     jpeg_decompress_struct cinfo = {};
     ErrorManager error = {};
@@ -156,7 +160,7 @@ bool draw_file(lgfx::LGFXBase &gfx,
     cinfo.err = jpeg_std_error(&error.base);
     error.base.error_exit = error_exit;
     if (setjmp(error.jump)) {
-        ESP_LOGW(TAG, "decode failed path=%s error=%s", path,
+        ESP_LOGW(TAG, "decode failed path=%s error=%s", source_label,
                  error.message[0] ? error.message : "unknown libjpeg error");
         goto cleanup;
     }
@@ -164,7 +168,8 @@ bool draw_file(lgfx::LGFXBase &gfx,
     jpeg_create_decompress(&cinfo);
     created = true;
     cinfo.mem->max_memory_to_use = (long)jpeg_budget;
-    jpeg_stdio_src(&cinfo, fp);
+    if (data) jpeg_mem_src(&cinfo, data, data_size);
+    else jpeg_stdio_src(&cinfo, fp);
 
     {
         const int64_t header_start = esp_timer_get_time();
@@ -181,7 +186,7 @@ bool draw_file(lgfx::LGFXBase &gfx,
     local_stats.scale_denom = choose_scale_denom(&cinfo, box_width, box_height);
     cinfo.scale_num = 1;
     cinfo.scale_denom = (unsigned)local_stats.scale_denom;
-    estimate_progressive_coefficients(&cinfo, path, local_stats.scale_denom,
+    estimate_progressive_coefficients(&cinfo, source_label, local_stats.scale_denom,
                                       &local_stats);
 
     {
@@ -192,7 +197,7 @@ bool draw_file(lgfx::LGFXBase &gfx,
 
         if (cinfo.output_components != 1 || cinfo.output_width == 0 || cinfo.output_height == 0) {
             ESP_LOGW(TAG, "unexpected output path=%s size=%ux%u components=%d",
-                     path, (unsigned)cinfo.output_width, (unsigned)cinfo.output_height,
+                     source_label, (unsigned)cinfo.output_width, (unsigned)cinfo.output_height,
                      cinfo.output_components);
             goto cleanup;
         }
@@ -203,7 +208,7 @@ bool draw_file(lgfx::LGFXBase &gfx,
             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
         if (!source_row || !display_row) {
             ESP_LOGW(TAG, "scanline allocation failed path=%s src_w=%u dst_w=%d",
-                     path, (unsigned)cinfo.output_width, box_width);
+                     source_label, (unsigned)cinfo.output_width, box_width);
             goto cleanup;
         }
 
@@ -237,8 +242,32 @@ cleanup:
     free(display_row);
     free(source_row);
     if (created) jpeg_destroy_decompress(&cinfo);
-    fclose(fp);
+    if (fp) fclose(fp);
     return finish(ok);
+}
+
+bool draw_file(lgfx::LGFXBase &gfx,
+               const char *path,
+               int x,
+               int y,
+               int box_width,
+               int box_height,
+               DrawStats *stats)
+{
+    return draw_source(gfx, path, nullptr, 0, x, y, box_width, box_height, stats);
+}
+
+bool draw_memory(lgfx::LGFXBase &gfx,
+                 const uint8_t *data,
+                 size_t size,
+                 const char *label,
+                 int x,
+                 int y,
+                 int box_width,
+                 int box_height,
+                 DrawStats *stats)
+{
+    return draw_source(gfx, label, data, size, x, y, box_width, box_height, stats);
 }
 
 } // namespace turbo_jpeg

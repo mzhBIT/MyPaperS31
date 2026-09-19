@@ -16,7 +16,9 @@ namespace {
 constexpr uint32_t SHELF_MAGIC = 0x31535257;   // WRS1
 constexpr uint32_t CATALOG_MAGIC = 0x31435257; // WRC1
 constexpr uint32_t MANIFEST_MAGIC = 0x31425257; // WRB1
-constexpr uint32_t PROGRESS_MAGIC = 0x31505257; // WRP1
+constexpr uint32_t PROGRESS_MAGIC_V1 = 0x31505257; // WRP1
+constexpr uint32_t PROGRESS_MAGIC_V2 = 0x32505257; // WRP2: active reading seconds
+constexpr uint32_t PROGRESS_MAGIC = 0x33505257; // WRP3: reader offset and summary
 constexpr uint32_t ANNOTATION_MAGIC_V1 = 0x31415257; // WRA1
 constexpr uint32_t ANNOTATION_MAGIC_V2 = 0x32415257; // WRA2
 constexpr uint32_t ANNOTATION_MAGIC_V3 = 0x33415257; // WRA3: comments omit quoted abstract
@@ -490,13 +492,24 @@ bool save_pending_progress(const PendingProgress &progress)
 {
     ensure_directories();
     const std::string path = std::string(app_paths::weread_dir()) + "/pending_progress.bin";
+    PendingProgress merged = progress;
+    PendingProgress previous;
+    // A progress write is normally delayed, while active time is sampled more
+    // often. Preserve unreported time when both records belong to this book.
+    if (load_pending_progress(&previous) && previous.book_id == merged.book_id) {
+        const uint64_t total = static_cast<uint64_t>(previous.active_seconds) +
+                               static_cast<uint64_t>(merged.active_seconds);
+        merged.active_seconds = static_cast<uint32_t>(std::min<uint64_t>(total, 24u * 60u * 60u));
+    }
     const std::string temporary = path + ".tmp";
     FILE *file = std::fopen(temporary.c_str(), "wb");
     if (!file) return false;
-    const bool ok = write_u32(file, PROGRESS_MAGIC) && write_string(file, progress.book_id) &&
-                    write_string(file, progress.chapter.uid) && write_string(file, progress.chapter.title) &&
-                    write_u32(file, static_cast<uint32_t>(progress.chapter.index)) &&
-                    write_u32(file, static_cast<uint32_t>(std::clamp(progress.percent, 0, 100)));
+    const bool ok = write_u32(file, PROGRESS_MAGIC) && write_string(file, merged.book_id) &&
+                    write_string(file, merged.chapter.uid) && write_string(file, merged.chapter.title) &&
+                    write_u32(file, static_cast<uint32_t>(merged.chapter.index)) &&
+                    write_u32(file, static_cast<uint32_t>(std::clamp(merged.percent, 0, 100))) &&
+                    write_u32(file, merged.active_seconds) &&
+                    write_u64(file, merged.chapter_offset) && write_string(file, merged.summary);
     return commit(file, temporary, path, ok);
 }
 
@@ -506,16 +519,24 @@ bool load_pending_progress(PendingProgress *progress)
     const std::string path = std::string(app_paths::weread_dir()) + "/pending_progress.bin";
     FILE *file = std::fopen(path.c_str(), "rb");
     if (!file) return false;
-    uint32_t magic = 0, index = 0, percent = 0;
+    uint32_t magic = 0, index = 0, percent = 0, active_seconds = 0;
+    uint64_t chapter_offset = 0;
     PendingProgress loaded;
-    const bool ok = read_u32(file, &magic) && magic == PROGRESS_MAGIC &&
+    bool ok = read_u32(file, &magic) && (magic == PROGRESS_MAGIC || magic == PROGRESS_MAGIC_V2 ||
+                                         magic == PROGRESS_MAGIC_V1) &&
                     read_string(file, &loaded.book_id) && read_string(file, &loaded.chapter.uid) &&
                     read_string(file, &loaded.chapter.title) && read_u32(file, &index) &&
                     read_u32(file, &percent) && percent <= 100;
+    if (ok && magic != PROGRESS_MAGIC_V1) ok = read_u32(file, &active_seconds);
+    if (ok && magic == PROGRESS_MAGIC) {
+        ok = read_u64(file, &chapter_offset) && read_string(file, &loaded.summary);
+    }
     std::fclose(file);
     if (!ok) return false;
     loaded.chapter.index = static_cast<int>(index);
     loaded.percent = static_cast<int>(percent);
+    loaded.active_seconds = active_seconds;
+    loaded.chapter_offset = chapter_offset;
     *progress = std::move(loaded);
     return true;
 }

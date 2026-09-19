@@ -36,6 +36,7 @@ namespace lgfx
   static constexpr uint8_t WAVEFORM_MODE_A2 = 4;
   static constexpr uint8_t WAVEFORM_MODE_GL16 = 5;
   static constexpr uint8_t WAVEFORM_MODE_DU4 = 7;
+  static constexpr uint8_t WAVEFORM_MODE_HD = 8;
 
   // Temporary diagnostic, reported on every call rather than past a threshold.
   // The USB isochronous OUT pipe hands the next DMA buffer to the hardware from
@@ -541,6 +542,8 @@ namespace lgfx
     SemaphoreHandle_t done = nullptr;
     uint64_t lut_build_us = 0;
     uint64_t frame_render_us = 0;
+    int64_t producer_started_us = 0;
+    int64_t producer_finished_us = 0;
   };
 
   static void render_gc16_pipeline_unique(gc16_phase_pipeline_t* ctx,
@@ -564,6 +567,7 @@ namespace lgfx
   static void gc16_phase_producer_task(void* argument)
   {
     auto* ctx = static_cast<gc16_phase_pipeline_t*>(argument);
+    ctx->producer_started_us = esp_timer_get_time();
     for (int unique = ctx->next_unique;
          unique < ctx->unique_count && !ctx->abort; ++unique) {
       int slot = -1;
@@ -595,6 +599,7 @@ namespace lgfx
       ctx->next_unique = unique + 1;
     }
     const bool external_stack = ctx->external_stack;
+    ctx->producer_finished_us = esp_timer_get_time();
     ctx->finished = true;
     xSemaphoreGive(ctx->done);
     if (external_stack) {
@@ -1147,6 +1152,8 @@ namespace lgfx
     uint8_t requested_type = WAVEFORM_MODE_DU;
     if (mode == epd_mode_t::epd_quality) {
       requested_type = WAVEFORM_MODE_GC16;
+    } else if (mode == epd_mode_t::epd_hd) {
+      requested_type = WAVEFORM_MODE_HD;
     } else if (mode == epd_mode_t::epd_text) {
       requested_type = WAVEFORM_MODE_DU4;
     } else if (mode == epd_mode_t::epd_fastest) {
@@ -1442,9 +1449,10 @@ namespace lgfx
         }
         update.mode = epd_mode_t::epd_quality;
       }
-      if (update.mode == epd_mode_t::epd_quality) {
-        // The supplied GC16 is an official full-refresh waveform.  Keep its
-        // old/new state coherent by always treating Quality as one full batch.
+      if (update.mode == epd_mode_t::epd_quality
+       || update.mode == epd_mode_t::epd_hd) {
+        // GC16 and HD are full-refresh waveforms. Keep their old/new state
+        // coherent by always treating them as one full batch.
         update.x = 0;
         update.y = 0;
         update.w = panel_w;
@@ -1535,7 +1543,8 @@ namespace lgfx
         if (selected.type == WAVEFORM_MODE_GC16
          || selected.type == WAVEFORM_MODE_DU
          || selected.type == WAVEFORM_MODE_A2
-         || selected.type == WAVEFORM_MODE_DU4) {
+         || selected.type == WAVEFORM_MODE_DU4
+         || selected.type == WAVEFORM_MODE_HD) {
           phase_frame_map = static_cast<uint16_t*>(heap_caps_malloc(
               size_t(phase_count) * sizeof(uint16_t), MALLOC_CAP_8BIT));
           representative_phases = static_cast<uint16_t*>(heap_caps_malloc(
@@ -1590,7 +1599,8 @@ namespace lgfx
 
         const bool gc16_pair_renderer =
 #if MYPAPER_EPD_2D_GC16_PAIR_LUT
-            selected.type == WAVEFORM_MODE_GC16
+            (selected.type == WAVEFORM_MODE_GC16
+          || selected.type == WAVEFORM_MODE_HD)
          && me->_gc16_pair_lut_2d != nullptr
          && update.x == 0 && update.y == 0
          && update.w == panel_w && update.h == panel_h
@@ -1598,16 +1608,24 @@ namespace lgfx
 #else
             false;
 #endif
+        const int gc16_pipeline_prime = selected.type == WAVEFORM_MODE_HD
+            ? MYPAPER_EPD_2D_HD_PIPELINE_PRIME
+            : MYPAPER_EPD_2D_GC16_PIPELINE_PRIME;
+        // At the 16 us line period both GC16 and HD may need every ring slot
+        // pre-rendered before power-on. The producer only reuses a slot after
+        // that frame has been consumed by scanout.
+        const bool gc16_pipeline_can_fill_ring = true;
         const bool gc16_pipeline_requested =
 #if MYPAPER_EPD_2D_GC16_PIPELINE
             gc16_pair_renderer && deduplicated
-         && cached_phase_count > MYPAPER_EPD_2D_GC16_PIPELINE_PRIME
+         && cached_phase_count > gc16_pipeline_prime
          && cached_phase_count <= GC16_PIPELINE_MAX_PHASES
          && MYPAPER_EPD_2D_GC16_PIPELINE_SLOTS
                 <= GC16_PIPELINE_MAX_SLOTS
-         && MYPAPER_EPD_2D_GC16_PIPELINE_PRIME > 0
-         && MYPAPER_EPD_2D_GC16_PIPELINE_PRIME
-                < MYPAPER_EPD_2D_GC16_PIPELINE_SLOTS
+         && gc16_pipeline_prime > 0
+         && (gc16_pipeline_can_fill_ring
+               ? gc16_pipeline_prime <= MYPAPER_EPD_2D_GC16_PIPELINE_SLOTS
+               : gc16_pipeline_prime < MYPAPER_EPD_2D_GC16_PIPELINE_SLOTS)
          && uxTaskPriorityGet(nullptr) > 1;
 #else
             false;
@@ -1695,7 +1713,7 @@ namespace lgfx
           gc16_pipeline.unique_count = cached_phase_count;
           gc16_pipeline.slot_count = phase_storage_count;
           gc16_pipeline.next_unique = std::min<int>(
-              MYPAPER_EPD_2D_GC16_PIPELINE_PRIME, cached_phase_count);
+              gc16_pipeline_prime, cached_phase_count);
           gc16_pipeline.done = xSemaphoreCreateBinary();
           for (int slot = 0; slot < GC16_PIPELINE_MAX_SLOTS; ++slot) {
             gc16_pipeline.ready_unique[slot] = -1;
@@ -1865,7 +1883,7 @@ namespace lgfx
             continue;
           }
           ESP_LOGI(TAG_2D,
-                   "waveform pipeline primed before power-on: phases=%d cached=%d transitions=%u slots=%d primed=%d bytes=%u time=%lu.%03lu ms lut_build=%llu us frame_render=%llu us renderer=gc16-pair-lut-ring stack=%s",
+                   "waveform pipeline primed before power-on: phases=%d cached=%d transitions=%u slots=%d primed=%d bytes=%u time=%lu.%03lu ms lut_build=%llu us frame_render=%llu us renderer=%s stack=%s",
                    phase_count, cached_phase_count,
                    (unsigned)used_transition_count, phase_storage_count,
                    initial_render_count, (unsigned)phase_cache_bytes,
@@ -1873,6 +1891,8 @@ namespace lgfx
                    (unsigned long)(precompute_us % 1000),
                    (unsigned long long)pair_lut_build_us,
                    (unsigned long long)phase_render_us,
+                   selected.type == WAVEFORM_MODE_HD
+                       ? "hd-gray8-pair-lut-ring" : "gc16-pair-lut-ring",
                    gc16_pipeline.external_stack ? "psram" : "internal");
         } else if (du4_pipeline_active) {
           du4_pipeline.frame_render_us = phase_render_us;
@@ -1917,7 +1937,9 @@ namespace lgfx
                    (unsigned long)(precompute_us % 1000),
                    (unsigned long long)pair_lut_build_us,
                    (unsigned long long)phase_render_us,
-                   gc16_pair_renderer ? "gc16-pair-lut"
+                   gc16_pair_renderer
+                       ? (selected.type == WAVEFORM_MODE_HD
+                           ? "hd-gray8-pair-lut" : "gc16-pair-lut")
                      : selected.type == WAVEFORM_MODE_DU4
                      && me->_du4_pair_lut_2d != nullptr
                        ? "du4-pair-lut" : "generic",
@@ -2196,11 +2218,14 @@ namespace lgfx
                    gc16_pipeline.slot_count,
                    (unsigned long long)gc16_pipeline.lut_build_us,
                    (unsigned long long)gc16_pipeline.frame_render_us);
-        } else if (scan_ok) {
+        } else {
           ESP_LOGE(TAG_2D,
-                   "GC16 pipeline incomplete: generated=%d/%d failed=%u",
+                   "GC16 pipeline incomplete: generated=%d/%d failed=%u worker=%lld ms render=%llu us",
                    gc16_pipeline.next_unique, gc16_pipeline.unique_count,
-                   gc16_pipeline.failed);
+                   gc16_pipeline.failed,
+                   (long long)((gc16_pipeline.producer_finished_us
+                                 - gc16_pipeline.producer_started_us) / 1000),
+                   (unsigned long long)gc16_pipeline.frame_render_us);
           scan_ok = false;
         }
       }

@@ -1,4 +1,5 @@
 #include "activities/DeepSeekActivity.h"
+#include "activities/DeepSeekImagePickerActivity.h"
 
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
@@ -19,6 +20,7 @@
 #include <freertos/task.h>
 
 #include <algorithm>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -35,6 +37,12 @@ constexpr int CHAT_TOOLBAR_H = 66;
 constexpr int CHAT_BODY_Y = 170;
 constexpr int CHAT_INPUT_H = 86;
 constexpr int CHAT_INPUT_Y_MARGIN = 20;
+
+std::string image_label(const std::string &path)
+{
+    const size_t slash = path.find_last_of('/');
+    return slash == std::string::npos ? path : path.substr(slash + 1);
+}
 
 void draw_header(const std::string &title)
 {
@@ -160,6 +168,11 @@ public:
             return;
         }
         if (_view == View::Chat) {
+            if (_open_input_after_image) {
+                _open_input_after_image = false;
+                open_input();
+                return;
+            }
             draw_chat(false);
         } else {
             load_sessions();
@@ -172,7 +185,9 @@ public:
         if (!_pending_question.empty() && !_busy && !M5.Display.displayBusy()) {
             std::string question = std::move(_pending_question);
             _pending_question.clear();
-            begin_request(question);
+            std::string image = std::move(_pending_image_path);
+            _pending_image_path.clear();
+            begin_request(question, image);
             return;
         }
         if (!_busy || !_event_queue || M5.Display.displayBusy()) return;
@@ -192,7 +207,7 @@ public:
         const int preserved_start = visible_line_start();
         if (event->result.success) {
             if (_store.append_message(&_session, "assistant", event->result.content)) {
-                _messages.push_back({"assistant", event->result.content});
+                _messages.push_back({"assistant", event->result.content, {}});
                 _streaming_reply.clear();
                 _streaming_active = false;
                 _status.clear();
@@ -276,6 +291,12 @@ private:
     DeepSeekSessionMeta _session;
     std::vector<DeepSeekMessage> _messages;
     std::string _pending_question;
+    std::string _pending_image_path;
+    bool _open_input_after_image = false;
+    // The microphone is intentionally UI-only for now. Keeping this state here
+    // makes the input bar ready for an audio-capable model without pretending
+    // that a recording has started.
+    bool _voice_input_mode = false;
     std::string _status;
     std::string _streaming_reply;
     bool _streaming_active = false;
@@ -566,6 +587,9 @@ private:
         for (const auto &message : _messages) {
             const bool user = message.role == "user";
             lines.push_back({user ? "You" : "DeepSeek", user});
+            if (!message.image_path.empty()) {
+                lines.push_back({"Image: " + image_label(message.image_path), user});
+            }
             append_wrapped_lines(&lines, message.content, max_width, user);
             lines.push_back({});
         }
@@ -653,9 +677,9 @@ private:
         constexpr int toolbar_gap = 8;
         int toolbar_width = (width - PAD * 2 - toolbar_gap * 2) / 3;
         const char *toolbar_labels[] = {
-            "New Chat",
+            "New",
             deepseek_model_label(_session.model),
-            _session.thinking ? "Think On" : "Think Off",
+            _session.thinking ? "Think" : "No Think",
         };
         for (int i = 0; i < 3; ++i) {
             int x = PAD + i * (toolbar_width + toolbar_gap);
@@ -680,17 +704,43 @@ private:
             y += system_font::line_height();
         }
 
-        M5.Display.fillRoundRect(PAD, input_y, width - PAD * 2,
-                                 CHAT_INPUT_H, 8, _busy ? TFT_WHITE : TFT_BLACK);
-        M5.Display.drawRoundRect(PAD, input_y, width - PAD * 2,
+        constexpr int input_icon_width = 62;
+        const int input_x = PAD;
+        const int input_width = width - PAD * 2;
+        const int image_x = input_x + input_width - input_icon_width * 2;
+        const int voice_x = input_x + input_width - input_icon_width;
+        const int icon_center_y = input_y + CHAT_INPUT_H / 2;
+        M5.Display.fillRoundRect(input_x, input_y, input_width,
+                                 CHAT_INPUT_H, 8, TFT_WHITE);
+        M5.Display.drawRoundRect(input_x, input_y, input_width,
                                  CHAT_INPUT_H, 8, TFT_BLACK);
-        const char *input_label = !_busy ? "Ask DeepSeek"
+        M5.Display.drawFastVLine(image_x, input_y + 6, CHAT_INPUT_H - 12, TFT_BLACK);
+        M5.Display.drawFastVLine(voice_x, input_y + 6, CHAT_INPUT_H - 12, TFT_BLACK);
+
+        const std::string ready_label = _voice_input_mode ? "Hold to talk"
+            : _pending_image_path.empty() ? "Ask DeepSeek"
+                                          : "Image attached - type a message";
+        const char *input_label = !_busy ? ready_label.c_str()
                                   : _session.thinking ? "Thinking deeply... (Back to cancel)"
                                                       : "Thinking... (Back to cancel)";
-        system_font::draw_center(M5.Display, input_label,
-                                 width / 2,
-                                 input_y + std::max(0, (CHAT_INPUT_H - system_font::line_height()) / 2),
-                                 _busy ? TFT_BLACK : TFT_WHITE);
+        const int label_width = std::max(1, image_x - input_x - 22);
+        system_font::draw_left(M5.Display,
+                               system_font::ellipsize(input_label, label_width),
+                               input_x + 12,
+                               input_y + std::max(0, (CHAT_INPUT_H - system_font::line_height()) / 2),
+                               _busy ? TFT_BLACK : TFT_DARKGRAY);
+
+        // Attachment icon. It owns the former toolbar Image action.
+        const int plus_x = image_x + input_icon_width / 2;
+        M5.Display.drawFastHLine(plus_x - 13, icon_center_y, 27, TFT_BLACK);
+        M5.Display.drawFastVLine(plus_x, icon_center_y - 13, 27, TFT_BLACK);
+
+        // A deliberately passive microphone affordance: selecting it changes
+        // the composer to "Hold to talk", while recording is added later.
+        const int mic_x = voice_x + input_icon_width / 2;
+        M5.Display.drawRoundRect(mic_x - 8, icon_center_y - 16, 16, 25, 8, TFT_BLACK);
+        M5.Display.drawFastVLine(mic_x, icon_center_y + 9, 12, TFT_BLACK);
+        M5.Display.drawFastHLine(mic_x - 11, icon_center_y + 21, 23, TFT_BLACK);
         M5.Display.display();
         M5.Display.endWrite();
     }
@@ -709,15 +759,26 @@ private:
         if (_busy) return true;
         if (event.y >= CHAT_TOOLBAR_Y && event.y < CHAT_TOOLBAR_Y + CHAT_TOOLBAR_H) {
             int screen_width = std::max(1, static_cast<int>(M5.Display.width()));
-            int third = std::min(2, event.x * 3 / screen_width);
-            if (third == 0) create_new_chat();
-            else if (third == 1) toggle_model();
+            int item = std::min(2, event.x * 3 / screen_width);
+            if (item == 0) create_new_chat();
+            else if (item == 1) toggle_model();
             else toggle_thinking();
             return true;
         }
         int input_y = M5.Display.height() - CHAT_INPUT_H - CHAT_INPUT_Y_MARGIN;
         if (event.y >= input_y) {
-            open_input();
+            constexpr int input_icon_width = 62;
+            const int input_x = PAD;
+            const int input_width = M5.Display.width() - PAD * 2;
+            const int image_x = input_x + input_width - input_icon_width * 2;
+            const int voice_x = input_x + input_width - input_icon_width;
+            if (event.x >= voice_x) {
+                toggle_voice_input();
+            } else if (event.x >= image_x) {
+                choose_image();
+            } else if (!_voice_input_mode) {
+                open_input();
+            }
             return true;
         }
         return false;
@@ -737,6 +798,9 @@ private:
         _session.title = "New Chat";
         _session.model = config.default_model;
         _messages.clear();
+        _pending_image_path.clear();
+        _open_input_after_image = false;
+        _voice_input_mode = false;
         _status.clear();
         _line_scroll = 0;
         draw_chat(false);
@@ -785,24 +849,46 @@ private:
         }, [this]() { draw_chat(false); });
     }
 
-    void begin_request(const std::string &question)
+    void toggle_voice_input()
     {
-        if (question.empty()) {
+        _voice_input_mode = !_voice_input_mode;
+        draw_chat(false);
+    }
+
+    void choose_image()
+    {
+        if (_session.model != DeepSeekModel::Flash) {
+            _status = "Image understanding requires V4 Flash";
             draw_chat(false);
             return;
         }
+        _voice_input_mode = false;
+        launch_deepseek_image_picker([this](const std::string &path) {
+            _pending_image_path = path;
+            _open_input_after_image = true;
+            _status = "Image attached: " + image_label(path);
+        });
+    }
+
+    void begin_request(const std::string &question, const std::string &image_path = {})
+    {
+        if (question.empty() && image_path.empty()) {
+            draw_chat(false);
+            return;
+        }
+        const std::string prompt = question.empty() ? "Describe this image." : question;
         if (_session.id.empty() &&
             !_store.create(_session.model, _session.thinking, &_session)) {
             _status = "Failed to create a session on the SD card";
             draw_chat(false);
             return;
         }
-        if (!_store.append_message(&_session, "user", question)) {
+        if (!_store.append_message(&_session, "user", prompt, image_path)) {
             _status = "Failed to save the question";
             draw_chat(false);
             return;
         }
-        _messages.push_back({"user", question});
+        _messages.push_back({"user", prompt, image_path});
         _streaming_reply.clear();
         _streaming_active = true;
         _status = _session.thinking ? "Thinking deeply..." : "Thinking...";

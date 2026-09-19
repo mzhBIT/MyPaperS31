@@ -75,7 +75,15 @@
 #define MYPAPER_EPD_2D_GC16_PIPELINE_SLOTS 20
 #endif
 #ifndef MYPAPER_EPD_2D_GC16_PIPELINE_PRIME
-#define MYPAPER_EPD_2D_GC16_PIPELINE_PRIME 10
+#define MYPAPER_EPD_2D_GC16_PIPELINE_PRIME 14
+#endif
+
+// HD is the vendor 30-phase, effective eight-gray GC table. At the 16 us
+// scan period one phase lasts only ~11 ms while a full pair-LUT frame takes
+// longer to render. The 20-frame prefill gives the producer enough lead time
+// to finish the remaining frames while scanout advances.
+#ifndef MYPAPER_EPD_2D_HD_PIPELINE_PRIME
+#define MYPAPER_EPD_2D_HD_PIPELINE_PRIME 10
 #endif
 
 // DU4 keeps its complete unique-frame workspace, but only renders this many
@@ -137,7 +145,7 @@
 #define MYPAPER_EPD_2D_PIXEL_CLOCK_HZ 20000000u
 #endif
 #ifndef MYPAPER_EPD_2D_LINE_PERIOD_US
-#define MYPAPER_EPD_2D_LINE_PERIOD_US 20u
+#define MYPAPER_EPD_2D_LINE_PERIOD_US 16u
 #endif
 #ifndef MYPAPER_EPD_2D_CKV_HIGH_DUS
 #define MYPAPER_EPD_2D_CKV_HIGH_DUS 60u
@@ -165,7 +173,7 @@
 #define MYPAPER_EPD_MEMORY_HEIGHT 684
 #define MYPAPER_EPD_PANEL_HEIGHT 684
 #define MYPAPER_EPD_OFFSET_ROTATION 3
-#define MYPAPER_EPD_VCOM_MV 1040
+#define MYPAPER_EPD_VCOM_MV 1050
 #define MYPAPER_EPD_OUTPUT_PERMUTE 1
 
 #elif MYPAPER_EPD_PANEL == MYPAPER_EPD_PANEL_ED052TC4

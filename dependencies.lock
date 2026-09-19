@@ -167,6 +167,46 @@ dependencies:
       registry_url: https://components.espressif.com/
       type: service
     version: 0.8.1
+  espressif/iot_eth:
+    component_hash: 3be03ff933e27e17887becbed16305a561b35b66a5a4978ac51ae7f9f2ec70ea
+    dependencies:
+    - name: espressif/cmake_utilities
+      registry_url: https://components.espressif.com
+      require: private
+      version: '*'
+    - name: idf
+      require: private
+      version: '>=4.4'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    version: 1.1.0
+  espressif/iot_usbh_cdc:
+    component_hash: e924a79e9b7926b38bee52234d9f90101d8926f5e560dd5edf51c395546eac87
+    dependencies:
+    - name: espressif/cmake_utilities
+      registry_url: https://components.espressif.com
+      require: private
+      version: '*'
+    - name: espressif/usb
+      registry_url: https://components.espressif.com
+      require: public
+      rules:
+      - if: idf_version >=6.0
+      - if: target not in ["linux"]
+      version: ^1.4.0
+    - name: idf
+      require: private
+      version: '>=5.1'
+    source:
+      registry_url: https://components.espressif.com/
+      type: service
+    targets:
+    - esp32s2
+    - esp32s3
+    - esp32s31
+    - esp32p4
+    version: 3.1.0
   espressif/libjpeg-turbo:
     component_hash: 41100fd5c4fe44e3f4754a60b2828ed018b42ecce799bf0e2993d5a1977c8913
     dependencies:
@@ -236,9 +276,11 @@ direct_dependencies:
 - espressif/esp_wifi_remote
 - espressif/gmf_audio
 - espressif/gmf_io
+- espressif/iot_eth
+- espressif/iot_usbh_cdc
 - espressif/libjpeg-turbo
 - espressif/usb_host_uac
 - idf
-manifest_hash: b424d46cc6f4870b153ad58214401fa1553944884a289bb898e70367ac9013d8
+manifest_hash: e36e88cee9e5ab17fa3efa82d167de41e5e83d07ea551ff491c1c20551e93b8c
 target: esp32p4
 version: 2.0.0

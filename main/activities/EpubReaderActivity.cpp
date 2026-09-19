@@ -28,6 +28,7 @@
 #include <cstdint>
 #include <cstring>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -50,6 +51,10 @@ static const uint32_t FB2_PROGRESS_MAGIC = 0x46423231; // FB21
 static const uint32_t FB2_PROGRESS_VERSION = 1;
 static const uint32_t EPUB_LAYOUT_VERSION = 5;
 static const int64_t PROGRESS_SAVE_DELAY_US = 5LL * 1000 * 1000;
+// WeRead's `rt` is active reader time, not elapsed wall-clock time. Stop
+// accumulating after an idle reader has sat untouched for ten minutes.
+static const int64_t WEREAD_ACTIVE_IDLE_US = 10LL * 60 * 1000 * 1000;
+static const int64_t WEREAD_REPORT_INTERVAL_US = 60LL * 1000 * 1000;
 #if MYPAPER_EPD_USE_2D_ENGINE
 static constexpr bool READER_PREFETCH_FRAMEBUFFER_ENABLED = false;
 #else
@@ -74,6 +79,38 @@ struct AnnotationFetchResult {
     std::string error;
     bool ok = false;
 };
+
+struct ImagePrefetchJob {
+    std::string href;
+    QueueHandle_t result_queue = nullptr;
+    SemaphoreHandle_t done = nullptr;
+};
+
+struct ImagePrefetchResult {
+    std::string href;
+    std::vector<uint8_t> bytes;
+    int64_t elapsed_ms = 0;
+    UBaseType_t stack_hwm = 0;
+    bool ok = false;
+};
+
+void image_prefetch_task(void *argument)
+{
+    std::unique_ptr<ImagePrefetchJob> job(static_cast<ImagePrefetchJob *>(argument));
+    auto *result = new ImagePrefetchResult;
+    result->href = job->href;
+    const int64_t started = esp_timer_get_time();
+    result->ok = g_epub.read_resource_to_memory(job->href, &result->bytes) &&
+                 !result->bytes.empty();
+    result->elapsed_ms = (esp_timer_get_time() - started) / 1000;
+    result->stack_hwm = uxTaskGetStackHighWaterMark(nullptr);
+    if (!job->result_queue ||
+        xQueueSend(job->result_queue, &result, 0) != pdTRUE) {
+        delete result;
+    }
+    if (job->done) xSemaphoreGive(job->done);
+    vTaskDelete(nullptr);
+}
 
 void annotation_fetch_task(void *argument)
 {
@@ -116,6 +153,8 @@ static epd_mode_t epub_reader_epd_mode()
         return epd_mode_t::epd_fast;
     case 4:
         return epd_mode_t::epd_fastest;
+    case 5:
+        return epd_mode_t::epd_hd;
     default:
         return epd_mode_t::epd_fast;
     }
@@ -278,6 +317,58 @@ static bool probe_image_size(const std::string &path, const std::string &ext, in
     return ok;
 }
 
+static bool probe_image_bytes(const uint8_t *data, size_t size, const std::string &ext,
+                              int *w, int *h, bool *jpg_progressive = nullptr)
+{
+    if (w) *w = 0;
+    if (h) *h = 0;
+    if (jpg_progressive) *jpg_progressive = false;
+    if (!data || !w || !h) return false;
+    if (ext == ".png") {
+        if (size < 24 || std::memcmp(data, "\x89PNG\r\n\x1a\n", 8) != 0) return false;
+        *w = (int)((uint32_t)data[16] << 24 | (uint32_t)data[17] << 16 |
+                   (uint32_t)data[18] << 8 | data[19]);
+        *h = (int)((uint32_t)data[20] << 24 | (uint32_t)data[21] << 16 |
+                   (uint32_t)data[22] << 8 | data[23]);
+        return *w > 0 && *h > 0;
+    }
+    if (ext == ".bmp") {
+        if (size < 26 || data[0] != 'B' || data[1] != 'M') return false;
+        *w = (int)((uint32_t)data[18] | (uint32_t)data[19] << 8 |
+                   (uint32_t)data[20] << 16 | (uint32_t)data[21] << 24);
+        *h = std::abs((int)((uint32_t)data[22] | (uint32_t)data[23] << 8 |
+                            (uint32_t)data[24] << 16 | (uint32_t)data[25] << 24));
+        return *w > 0 && *h > 0;
+    }
+    if (ext != ".jpg" || size < 4 || data[0] != 0xff || data[1] != 0xd8) return false;
+    size_t offset = 2;
+    while (offset + 4 <= size) {
+        while (offset < size && data[offset] != 0xff) ++offset;
+        while (offset < size && data[offset] == 0xff) ++offset;
+        if (offset >= size) break;
+        const uint8_t marker = data[offset++];
+        if (marker == 0xd8 || marker == 0x01 || (marker >= 0xd0 && marker <= 0xd7)) continue;
+        if (marker == 0xd9 || marker == 0xda || offset + 2 > size) break;
+        const size_t length = ((size_t)data[offset] << 8) | data[offset + 1];
+        if (length < 2 || offset + length > size) break;
+        const bool sof = (marker >= 0xc0 && marker <= 0xc3) ||
+                         (marker >= 0xc5 && marker <= 0xc7) ||
+                         (marker >= 0xc9 && marker <= 0xcb) ||
+                         (marker >= 0xcd && marker <= 0xcf);
+        if (sof && length >= 7) {
+            if (jpg_progressive) {
+                *jpg_progressive = marker == 0xc2 || marker == 0xc6 ||
+                                   marker == 0xca || marker == 0xce;
+            }
+            *h = ((int)data[offset + 3] << 8) | data[offset + 4];
+            *w = ((int)data[offset + 5] << 8) | data[offset + 6];
+            return *w > 0 && *h > 0;
+        }
+        offset += length;
+    }
+    return false;
+}
+
 class EpubReaderActivity : public Activity {
 public:
     explicit EpubReaderActivity(const char *path, int initial_spine = -1)
@@ -338,6 +429,7 @@ public:
 
     ~EpubReaderActivity()
     {
+        finish_image_prefetch_worker();
         finish_annotation_worker();
         flush_progress(true);
         release_runtime_cache();
@@ -347,6 +439,7 @@ public:
     void on_create() override
     {
         redraw_all(epd_mode_t::epd_quality);
+        begin_weread_active_tracking();
     }
 
     void on_show() override
@@ -365,14 +458,17 @@ public:
 
     void loop() override
     {
+        tick_weread_active_time();
         poll_annotation_worker();
         start_pending_annotation_fetch();
+        poll_image_prefetch_worker();
         run_page_prefetch();
         flush_progress(false);
     }
 
     bool on_key(int key) override
     {
+        note_weread_reader_activity();
         int w = M5.Display.width();
         int h = M5.Display.height();
 
@@ -428,6 +524,7 @@ public:
 
     bool on_touch(const TouchEvent &event) override
     {
+        note_weread_reader_activity();
         int w = M5.Display.width();
         int h = M5.Display.height();
 
@@ -636,6 +733,7 @@ private:
     };
 
     struct ImageDrawStats {
+        bool memory_source = false;
         bool hardware_attempted = false;
         bool hardware_ok = false;
         bool file_decode_ok = false;
@@ -660,6 +758,7 @@ private:
         int64_t fallback_read_ms = 0;
         int64_t fallback_decode_ms = 0;
         int64_t total_ms = 0;
+        int64_t resource_read_ms = 0;
     };
 
     struct PagePrefetch {
@@ -691,10 +790,15 @@ private:
     bool _is_markdown = false;
     bool _progress_dirty = false;
     int64_t _progress_dirty_at = 0;
+    int64_t _weread_last_tick_us = 0;
+    int64_t _weread_last_activity_us = 0;
+    int64_t _weread_unreported_us = 0;
+    int64_t _weread_last_report_us = 0;
     int _non_quality_refresh_count = 0;
     bool _post_image_quality_pending = false;
     document_layout::Pages _pages;
     std::unordered_map<std::string, CachedImage> _image_cache;
+    std::unordered_map<std::string, CachedImage> _image_info_cache;
     std::unordered_set<std::string> _missing_images;
     std::unordered_map<std::string, std::string> _footnote_cache;
     std::unordered_set<std::string> _missing_footnotes;
@@ -711,6 +815,11 @@ private:
     bool _annotation_loading = false;
     bool _annotation_redraw_pending = false;
     PagePrefetch _prefetch;
+    std::string _prefetched_image_href;
+    std::vector<uint8_t> _prefetched_image_bytes;
+    QueueHandle_t _image_prefetch_queue = nullptr;
+    SemaphoreHandle_t _image_prefetch_done = nullptr;
+    TaskHandle_t _image_prefetch_task = nullptr;
 
     void release_runtime_cache()
     {
@@ -722,7 +831,10 @@ private:
         document_layout::Pages().swap(_pages);
         invalidate_page_prefetch();
         std::unordered_map<std::string, CachedImage>().swap(_image_cache);
+        std::unordered_map<std::string, CachedImage>().swap(_image_info_cache);
         std::unordered_set<std::string>().swap(_missing_images);
+        _prefetched_image_href.clear();
+        std::vector<uint8_t>().swap(_prefetched_image_bytes);
         std::unordered_map<std::string, std::string>().swap(_footnote_cache);
         std::unordered_set<std::string>().swap(_missing_footnotes);
         _footnote_popup_text.clear();
@@ -782,6 +894,26 @@ private:
             if (item.type != PageItemType::Space) return item.content_position;
         }
         return page.empty() ? 0 : page.front().content_position;
+    }
+
+    std::string current_page_summary() const
+    {
+        if (_page_index < 0 || _page_index >= static_cast<int>(_pages.size())) return {};
+        std::string summary;
+        // The web reader sends a short excerpt around `co`. Keep a little
+        // more here; WereadApi applies its UTF-8 character limit on upload.
+        for (const auto &item : _pages[static_cast<size_t>(_page_index)]) {
+            if (item.type != PageItemType::Text || item.text.empty()) continue;
+            for (unsigned char c : item.text) {
+                if (c == '\r' || c == '\n' || c == '\t') {
+                    if (!summary.empty() && summary.back() != ' ') summary.push_back(' ');
+                } else {
+                    summary.push_back(static_cast<char>(c));
+                }
+                if (summary.size() >= 160) return summary;
+            }
+        }
+        return summary;
     }
 
     int page_for_position(uint64_t position) const
@@ -847,9 +979,85 @@ private:
         _progress_dirty_at = esp_timer_get_time();
     }
 
+    bool is_weread_active_reader() const
+    {
+        return _ok && g_epub.is_weread() && !_overlay.visible() && !_footnote_popup_visible;
+    }
+
+    void begin_weread_active_tracking()
+    {
+        if (!_ok || !g_epub.is_weread()) return;
+        const int64_t now = esp_timer_get_time();
+        _weread_last_tick_us = now;
+        _weread_last_activity_us = now;
+        _weread_last_report_us = now;
+    }
+
+    void note_weread_reader_activity()
+    {
+        if (!_ok || !g_epub.is_weread()) return;
+        tick_weread_active_time();
+        _weread_last_activity_us = esp_timer_get_time();
+    }
+
+    bool queue_weread_progress(bool force)
+    {
+        if (!_ok || !g_epub.is_weread()) return false;
+        const uint32_t seconds = static_cast<uint32_t>(
+            std::min<int64_t>(_weread_unreported_us / 1000000LL, 24LL * 60 * 60));
+        if (!force && seconds == 0) return false;
+
+        const int spine = std::max(0, _spine_index);
+        const weread::Chapter *chapter = g_epub.weread_chapter(spine);
+        if (!chapter) return false;
+        const float within = _page_count > 0
+            ? static_cast<float>(_page_index) / static_cast<float>(_page_count) : 0.0f;
+        const float overall = (static_cast<float>(spine) + within) /
+                              static_cast<float>(std::max(1, g_epub.spine_count()));
+        weread::store::PendingProgress pending;
+        pending.book_id = g_epub.weread_book_id();
+        pending.chapter = *chapter;
+        pending.percent = std::clamp(static_cast<int>(overall * 100.0f + 0.5f), 0, 100);
+        pending.active_seconds = seconds;
+        pending.chapter_offset = page_position(_page_index);
+        pending.summary = current_page_summary();
+        if (!weread::store::save_pending_progress(pending)) return false;
+        _weread_unreported_us -= static_cast<int64_t>(seconds) * 1000000LL;
+        _weread_last_report_us = esp_timer_get_time();
+        if (seconds) {
+            ESP_LOGI(TAG, "WeRead active time queued: %u s progress=%d%%",
+                     static_cast<unsigned>(seconds), pending.percent);
+        }
+        return true;
+    }
+
+    void tick_weread_active_time()
+    {
+        if (!_ok || !g_epub.is_weread()) return;
+        const int64_t now = esp_timer_get_time();
+        if (_weread_last_tick_us == 0) {
+            _weread_last_tick_us = now;
+            _weread_last_activity_us = now;
+            _weread_last_report_us = now;
+            return;
+        }
+        const int64_t elapsed = std::max<int64_t>(0, now - _weread_last_tick_us);
+        _weread_last_tick_us = now;
+        if (is_weread_active_reader() &&
+            now - _weread_last_activity_us <= WEREAD_ACTIVE_IDLE_US) {
+            _weread_unreported_us = std::min<int64_t>(
+                _weread_unreported_us + elapsed, 24LL * 60 * 60 * 1000000LL);
+        }
+        if (_weread_unreported_us >= 1000000LL &&
+            now - _weread_last_report_us >= WEREAD_REPORT_INTERVAL_US) {
+            queue_weread_progress(false);
+        }
+    }
+
     void flush_progress(bool force)
     {
         if (!_ok || _progress_path.empty()) return;
+        tick_weread_active_time();
         if (!_progress_dirty && !force) return;
         if (!force && esp_timer_get_time() - _progress_dirty_at < PROGRESS_SAVE_DELAY_US) return;
 
@@ -891,18 +1099,7 @@ private:
         fwrite(&summary_chapter_count, 1, sizeof(summary_chapter_count), fp);
         fclose(fp);
         if (g_epub.is_weread()) {
-            const weread::Chapter *chapter = g_epub.weread_chapter(static_cast<int>(spine));
-            if (chapter) {
-                const float within = _page_count > 0
-                    ? static_cast<float>(_page_index) / static_cast<float>(_page_count) : 0.0f;
-                const float overall = (static_cast<float>(spine) + within) /
-                                      static_cast<float>(std::max(1, g_epub.spine_count()));
-                weread::store::PendingProgress pending;
-                pending.book_id = g_epub.weread_book_id();
-                pending.chapter = *chapter;
-                pending.percent = std::clamp(static_cast<int>(overall * 100.0f + 0.5f), 0, 100);
-                weread::store::save_pending_progress(pending);
-            }
+            queue_weread_progress(true);
         }
         _progress_dirty = false;
         ESP_LOGI(TAG, "progress saved spine=%lu position=%llu page=%d/%d force=%d time=%lld ms",
@@ -975,6 +1172,8 @@ private:
     {
         ReaderStyle style = reader_style_get();
         epd_mode_t preferred = epub_reader_epd_mode();
+        // HD remains a normal user preference here: image pages must still
+        // take the verified Quality + post-image Quality cleanup path below.
         if (preferred == epd_mode_t::epd_quality) {
             _non_quality_refresh_count = 0;
             _post_image_quality_pending = false;
@@ -1024,9 +1223,10 @@ private:
 
     void note_page_refresh_mode(epd_mode_t mode)
     {
-        if (mode == epd_mode_t::epd_quality) {
+        if (mode == epd_mode_t::epd_quality || mode == epd_mode_t::epd_hd) {
             _non_quality_refresh_count = 0;
-            if (epub_reader_epd_mode() == epd_mode_t::epd_quality) {
+            if (epub_reader_epd_mode() == epd_mode_t::epd_quality
+             || epub_reader_epd_mode() == epd_mode_t::epd_hd) {
                 _post_image_quality_pending = false;
             } else if (current_page_has_visible_image()) {
                 _post_image_quality_pending = true;
@@ -1158,6 +1358,37 @@ private:
             return static_cast<char>(std::tolower(c));
         });
         return name == "note.png";
+    }
+
+    bool probe_resource_image(const std::string &href, CachedImage *image)
+    {
+        if (!image || href.empty()) return false;
+        const std::string resolved = g_epub.normalize_resource_href(href);
+        auto cached = _image_info_cache.find(resolved);
+        if (cached != _image_info_cache.end()) {
+            *image = cached->second;
+            return true;
+        }
+
+        const std::string ext = lower_ext(resolved);
+        std::vector<uint8_t> prefix;
+        CachedImage info;
+        info.ext = ext;
+        const int64_t started = esp_timer_get_time();
+        if (g_epub.read_resource_prefix(resolved, &prefix, 128 * 1024) &&
+            probe_image_bytes(prefix.data(), prefix.size(), ext,
+                              &info.width, &info.height, &info.jpg_progressive)) {
+            _image_info_cache[resolved] = info;
+            *image = info;
+            ESP_LOGI(TAG, "image header href=%s src=%dx%d bytes=%u time=%lld ms",
+                     href.c_str(), info.width, info.height, (unsigned)prefix.size(),
+                     (esp_timer_get_time() - started) / 1000);
+            return true;
+        }
+
+        // MOBI/FB2 and malformed container entries retain the proven file
+        // fallback. EPUB image-only pages normally never reach this path.
+        return ensure_cached_image(href, image);
     }
 
     bool ensure_cached_image(const std::string &href, CachedImage *image, ImageLoadStats *stats = nullptr)
@@ -1369,6 +1600,135 @@ private:
         return draw_cached_image(M5.Display, image, x, y, w, h, scale, true, stats);
     }
 
+    bool draw_resource_image_memory(lgfx::LGFXBase &gfx,
+                                    const std::string &href,
+                                    const CachedImage &image,
+                                    int x, int y, int w, int h, float scale,
+                                    ImageDrawStats *stats)
+    {
+        const int64_t started = esp_timer_get_time();
+        const std::string resolved = g_epub.normalize_resource_href(href);
+        std::vector<uint8_t> encoded;
+        const std::vector<uint8_t> *source = nullptr;
+        if (_prefetched_image_href == resolved && !_prefetched_image_bytes.empty()) {
+            source = &_prefetched_image_bytes;
+        } else {
+            if (!g_epub.read_resource_to_memory(resolved, &encoded) || encoded.empty()) return false;
+            source = &encoded;
+        }
+        const int64_t read_done = esp_timer_get_time();
+        bool ok = false;
+        if (image.ext == ".jpg" && image.jpg_progressive) {
+            turbo_jpeg::DrawStats sw;
+            ok = turbo_jpeg::draw_memory(gfx, source->data(), source->size(),
+                                         resolved.c_str(), x, y, w, h, &sw);
+            if (stats) {
+                stats->software_attempted = sw.attempted;
+                stats->software_ok = ok;
+                stats->software_scale_denom = sw.scale_denom;
+                stats->software_memory_budget = sw.memory_budget;
+                stats->software_legacy_coefficients = sw.legacy_coefficient_bytes;
+                stats->software_compact_coefficients = sw.compact_coefficient_bytes;
+                stats->software_header_ms = sw.header_ms;
+                stats->software_decode_ms = sw.decode_ms;
+                stats->software_push_ms = sw.push_ms;
+                stats->software_total_ms = sw.total_ms;
+            }
+        } else if (image.ext == ".jpg") {
+            ok = gfx.drawJpg(source->data(), source->size(), x, y, w, h,
+                             0, 0, scale, scale);
+        } else if (image.ext == ".png") {
+            ok = gfx.drawPng(source->data(), source->size(), x, y, w, h,
+                             0, 0, scale, scale);
+        } else if (image.ext == ".bmp") {
+            ok = gfx.drawBmp(source->data(), source->size(), x, y, w, h,
+                             0, 0, scale, scale);
+        }
+        if (stats) {
+            stats->memory_source = true;
+            stats->resource_read_ms = (read_done - started) / 1000;
+            stats->total_ms = (esp_timer_get_time() - started) / 1000;
+        }
+        return ok;
+    }
+
+    void queue_image_prefetch(const document_layout::Page &page)
+    {
+        if (_image_prefetch_task || !_image_prefetch_queue || !_image_prefetch_done) return;
+        const PageItem *image_item = nullptr;
+        for (const auto &item : page) {
+            if (item.type == PageItemType::Space) continue;
+            if (item.type != PageItemType::Image || image_item) return;
+            image_item = &item;
+        }
+        if (!image_item || !is_supported_image_href(image_item->resource)) return;
+
+        CachedImage info;
+        if (!probe_resource_image(image_item->resource, &info)) {
+            return;
+        }
+
+        const std::string resolved = g_epub.normalize_resource_href(image_item->resource);
+        if (_prefetched_image_href == resolved && !_prefetched_image_bytes.empty()) return;
+        auto *job = new ImagePrefetchJob;
+        job->href = resolved;
+        job->result_queue = _image_prefetch_queue;
+        job->done = _image_prefetch_done;
+        const BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
+            image_prefetch_task, "book_img_prefetch", 8192, job, 1,
+            &_image_prefetch_task, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+        if (created != pdPASS) {
+            delete job;
+            _image_prefetch_task = nullptr;
+            ESP_LOGW(TAG, "image prefetch task creation failed href=%s", resolved.c_str());
+        } else {
+            ESP_LOGI(TAG, "image prefetch started href=%s core=0 stack=psram/8192",
+                     image_item->resource.c_str());
+        }
+    }
+
+    void poll_image_prefetch_worker()
+    {
+        ImagePrefetchResult *result = nullptr;
+        if (!_image_prefetch_queue ||
+            xQueueReceive(_image_prefetch_queue, &result, 0) != pdTRUE) return;
+        xSemaphoreTake(_image_prefetch_done, portMAX_DELAY);
+        _image_prefetch_task = nullptr;
+        if (result) {
+            if (result->ok) {
+                _prefetched_image_href = result->href;
+                _prefetched_image_bytes.swap(result->bytes);
+                ESP_LOGI(TAG,
+                         "prefetch image memory ready href=%s bytes=%u time=%lld ms stack_hwm=%u",
+                         result->href.c_str(), (unsigned)_prefetched_image_bytes.size(),
+                         result->elapsed_ms, (unsigned)result->stack_hwm);
+            } else {
+                ESP_LOGW(TAG, "prefetch image memory failed href=%s time=%lld ms stack_hwm=%u",
+                         result->href.c_str(), result->elapsed_ms,
+                         (unsigned)result->stack_hwm);
+            }
+            delete result;
+        }
+    }
+
+    void finish_image_prefetch_worker()
+    {
+        if (_image_prefetch_task && _image_prefetch_done) {
+            xSemaphoreTake(_image_prefetch_done, portMAX_DELAY);
+            _image_prefetch_task = nullptr;
+        }
+        ImagePrefetchResult *result = nullptr;
+        if (_image_prefetch_queue) {
+            while (xQueueReceive(_image_prefetch_queue, &result, 0) == pdTRUE) delete result;
+            vQueueDelete(_image_prefetch_queue);
+            _image_prefetch_queue = nullptr;
+        }
+        if (_image_prefetch_done) {
+            vSemaphoreDelete(_image_prefetch_done);
+            _image_prefetch_done = nullptr;
+        }
+    }
+
     void draw_image_placeholder(lgfx::LGFXBase &gfx, int x, int y, int w, int h, const char *message)
     {
         int box_h = std::min(h, 120);
@@ -1469,7 +1829,7 @@ private:
                 return false;
             }
             CachedImage image;
-            if (!reader->ensure_cached_image(resource, &image)) {
+            if (!reader->probe_resource_image(resource, &image)) {
                 return false;
             }
             info->width = image.width;
@@ -2340,10 +2700,11 @@ private:
                 int draw_x = x + std::max(0, (content_width() - draw_w) / 2);
                 int draw_y = y + std::max(0, (item.height - draw_h) / 2);
                 ImageDrawStats draw_stats;
-                bool ok = draw_cached_image(gfx, image, draw_x, draw_y, draw_w, draw_h, scale, allow_hw_jpeg, &draw_stats);
+                bool ok = draw_cached_image(gfx, image, draw_x, draw_y, draw_w,
+                                            draw_h, scale, allow_hw_jpeg, &draw_stats);
                 if (log_image_stats) {
                     ESP_LOGI(TAG,
-                             "image timing href=%s ext=%s src=%dx%d draw=%dx%d scale=%.3f mem_cache=%d file_cache=%d extract=%lld probe=%lld load=%lld hw_try=%d hw_ok=%d hw_read=%lld hw_header=%lld hw_decode=%lld hw_scale=%lld hw_push=%lld hw_total=%lld sw_try=%d sw_ok=%d sw_denom=%d sw_budget=%u sw_coeff=%u/%u sw_header=%lld sw_decode=%lld sw_push=%lld sw_total=%lld file_draw=%lld fallback=%d fallback_read=%lld fallback_draw=%lld draw=%lld ok=%d progressive=%d",
+                             "image timing href=%s ext=%s src=%dx%d draw=%dx%d scale=%.3f source=%s resource_read=%lld mem_cache=%d file_cache=%d extract=%lld probe=%lld load=%lld hw_try=%d hw_ok=%d hw_read=%lld hw_header=%lld hw_decode=%lld hw_scale=%lld hw_push=%lld hw_total=%lld sw_try=%d sw_ok=%d sw_denom=%d sw_budget=%u sw_coeff=%u/%u sw_header=%lld sw_decode=%lld sw_push=%lld sw_total=%lld file_draw=%lld fallback=%d fallback_read=%lld fallback_draw=%lld draw=%lld ok=%d progressive=%d",
                              item.resource.c_str(),
                              image.ext.c_str(),
                              image.width,
@@ -2351,6 +2712,8 @@ private:
                              draw_w,
                              draw_h,
                              (double)scale,
+                             draw_stats.memory_source ? "memory" : "file",
+                             draw_stats.resource_read_ms,
                              load_stats.memory_cache_hit ? 1 : 0,
                              load_stats.file_cache_hit ? 1 : 0,
                              load_stats.extract_ms,

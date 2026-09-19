@@ -260,6 +260,7 @@ bool DeepSeekSessionStore::load_messages(const std::string &id,
         DeepSeekMessage message;
         if (parse_json_string(line, "role", &message.role) &&
             parse_json_string(line, "content", &message.content)) {
+            (void)parse_json_string(line, "image_path", &message.image_path);
             messages->push_back(std::move(message));
         }
     }
@@ -280,7 +281,8 @@ bool DeepSeekSessionStore::remove(const std::string &id) const
 
 bool DeepSeekSessionStore::append_message(DeepSeekSessionMeta *session,
                                           const std::string &role,
-                                          const std::string &content) const
+                                          const std::string &content,
+                                          const std::string &image_path) const
 {
     if (!session || session->id.empty() || role.empty()) return false;
     const std::string message_path = join_path(session_dir(session->id), "messages.jsonl");
@@ -291,7 +293,9 @@ bool DeepSeekSessionStore::append_message(DeepSeekSessionMeta *session,
         return false;
     }
     std::string line = "{\"role\":\"" + json_escape(role) +
-                       "\",\"content\":\"" + json_escape(content) + "\"}\n";
+                       "\",\"content\":\"" + json_escape(content) + "\"";
+    if (!image_path.empty()) line += ",\"image_path\":\"" + json_escape(image_path) + "\"";
+    line += "}\n";
     bool ok = fwrite(line.data(), 1, line.size(), file) == line.size();
     ok = fclose(file) == 0 && ok;
     if (!ok) {
