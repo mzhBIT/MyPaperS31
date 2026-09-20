@@ -138,9 +138,11 @@
 #define MYPAPER_EPD_2D_GC16_00_BLACK_COMP_FRAMES 2
 #endif
 
-// Official E0470A01/ED047TC2-1216 timing: a 20 MHz source clock, 320 PCLKs per
-// row (16 us), with CKV high for 6 us.  Keep these as compile-time controls so
-// timing experiments do not touch the legacy driver.
+// E0470A01/ED047TC2-1216 timing: a 20 MHz source clock and 320 PCLKs per row
+// (16 us).  The horizontal start/back-porch values follow the 0.3/0.8 us
+// minima, and CKV stays high for 13.4 us so the complete active-data interval
+// is covered.  Keep these as compile-time controls so timing experiments do
+// not touch the legacy driver.
 #ifndef MYPAPER_EPD_2D_PIXEL_CLOCK_HZ
 #define MYPAPER_EPD_2D_PIXEL_CLOCK_HZ 20000000u
 #endif
@@ -148,13 +150,13 @@
 #define MYPAPER_EPD_2D_LINE_PERIOD_US 16u
 #endif
 #ifndef MYPAPER_EPD_2D_CKV_HIGH_DUS
-#define MYPAPER_EPD_2D_CKV_HIGH_DUS 60u
+#define MYPAPER_EPD_2D_CKV_HIGH_DUS 134u
 #endif
 #ifndef MYPAPER_EPD_2D_LE_HIGH_PCLKS
-#define MYPAPER_EPD_2D_LE_HIGH_PCLKS 4u
+#define MYPAPER_EPD_2D_LE_HIGH_PCLKS 6u
 #endif
 #ifndef MYPAPER_EPD_2D_LINE_FRONT_PCLKS
-#define MYPAPER_EPD_2D_LINE_FRONT_PCLKS 4u
+#define MYPAPER_EPD_2D_LINE_FRONT_PCLKS 16u
 #endif
 
 #define MYPAPER_EPD_PANEL_ED052TC4 0

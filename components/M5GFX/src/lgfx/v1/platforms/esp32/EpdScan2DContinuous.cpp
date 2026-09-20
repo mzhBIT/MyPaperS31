@@ -509,12 +509,23 @@ namespace lgfx
       return false;
     }
     state->initialized = true;
+    const uint32_t total_line_clocks =
+        (MYPAPER_EPD_2D_PIXEL_CLOCK_HZ / 1000000u)
+        * state->line_period_us;
+    const uint32_t line_end_clocks = total_line_clocks
+        - MYPAPER_EPD_2D_LE_HIGH_PCLKS
+        - MYPAPER_EPD_2D_LINE_FRONT_PCLKS
+        - state->active_words;
     ESP_LOGI(TAG,
-             "continuous scan ready: active=%u words rows=%u frame=%u bytes pclk=%lu Hz line=%lu us CKV=%lu.%lu us",
+             "continuous scan ready: active=%u words rows=%u frame=%u bytes pclk=%lu Hz line=%lu us h=%u/%u/%u/%lu CKV=%lu.%lu us",
              (unsigned)state->active_words, (unsigned)state->rows,
              (unsigned)state->frame_bytes,
              (unsigned long)MYPAPER_EPD_2D_PIXEL_CLOCK_HZ,
              (unsigned long)state->line_period_us,
+             (unsigned)MYPAPER_EPD_2D_LE_HIGH_PCLKS,
+             (unsigned)MYPAPER_EPD_2D_LINE_FRONT_PCLKS,
+             (unsigned)state->active_words,
+             (unsigned long)line_end_clocks,
              (unsigned long)(MYPAPER_EPD_2D_CKV_HIGH_DUS / 10),
              (unsigned long)(MYPAPER_EPD_2D_CKV_HIGH_DUS % 10));
     return true;

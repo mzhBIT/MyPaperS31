@@ -470,6 +470,11 @@ TxtPage TxtBook::read_page(uint32_t offset)
         }
     }
 
+    // The page loop can also finish naturally when the last complete line
+    // exactly fills the available height.  In that path no wrapping overflow
+    // branch runs, so do not leave the conservative initial eof=true value in
+    // place.  The byte offset is the authoritative end-of-book indicator.
+    page.eof = page.next_offset >= _file_size;
     fclose(fp);
     int64_t t1 = esp_timer_get_time();
     ESP_LOGI(TAG, "read_page offset=%lu next=%lu lines=%d eof=%d time=%lld ms",
