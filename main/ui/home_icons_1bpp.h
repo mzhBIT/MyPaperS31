@@ -21,6 +21,8 @@ enum class HomeIconId {
     WeChatReading,
     ZhiHu,
     Map,
+    Messages,
+    Phone,
     Count,
 };
 

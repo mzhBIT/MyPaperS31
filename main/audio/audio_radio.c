@@ -91,6 +91,9 @@ static int s_output_volume = CONFIG_AUDIO_RADIO_OUTPUT_VOLUME;
 static int s_speaker_volume = CONFIG_AUDIO_RADIO_OUTPUT_VOLUME;
 static int s_usb_volume = CONFIG_AUDIO_RADIO_OUTPUT_VOLUME;
 static uint32_t s_output_sample_rate = CONFIG_AUDIO_RADIO_SAMPLE_RATE;
+// s_output_sample_rate is the pipeline's planned PCM rate and may be set in
+// prepare_player_cb before the ES8311/I2S sink has actually been reconfigured.
+static uint32_t s_codec_sample_rate;
 static uint8_t s_output_channels = AUDIO_RADIO_CHANNELS;
 static uint8_t s_output_bits = AUDIO_RADIO_BITS;
 static uint32_t s_source_sample_rate;
@@ -108,6 +111,7 @@ static volatile bool s_current_source_is_file;
 static bool s_extractor_registered;
 static audio_output_mode_t s_output_mode = AUDIO_OUTPUT_SPEAKER;
 static bool s_output_mode_loaded;
+static bool s_force_speaker;
 static volatile bool s_active_output_usb;
 static bool s_last_usb_connected;
 static int64_t s_last_output_service_us;
@@ -153,6 +157,11 @@ static void audio_radio_save_output_mode(audio_output_mode_t mode)
         (void)nvs_commit(handle);
     }
     nvs_close(handle);
+}
+
+void audio_radio_force_speaker(bool force)
+{
+    s_force_speaker = force;
 }
 
 static void audio_radio_save_volume(bool usb, int volume)
@@ -701,6 +710,7 @@ static esp_err_t audio_radio_init_codec(void)
                         TAG,
                         "Failed to open codec device");
     s_codec_opened = true;
+    s_codec_sample_rate = CONFIG_AUDIO_RADIO_SAMPLE_RATE;
     s_output_sample_rate = CONFIG_AUDIO_RADIO_SAMPLE_RATE;
 
     ESP_RETURN_ON_ERROR(audio_radio_codec_ret_to_esp(esp_codec_dev_set_out_vol(s_codec_dev, s_output_volume)),
@@ -729,7 +739,7 @@ static esp_err_t audio_radio_configure_speaker(uint32_t sample_rate)
                         ESP_ERR_INVALID_ARG, TAG, "Unsupported output sample rate: %" PRIu32, sample_rate);
     ESP_RETURN_ON_FALSE(s_codec_dev != NULL, ESP_ERR_INVALID_STATE, TAG, "Codec is not initialized");
     s_output_volume = s_speaker_volume;
-    if (s_codec_opened && sample_rate == s_output_sample_rate) {
+    if (s_codec_opened && sample_rate == s_codec_sample_rate) {
         ESP_RETURN_ON_ERROR(audio_radio_codec_ret_to_esp(
                                 esp_codec_dev_set_out_vol(s_codec_dev, s_output_volume)),
                             TAG, "Failed to restore speaker volume");
@@ -742,13 +752,14 @@ static esp_err_t audio_radio_configure_speaker(uint32_t sample_rate)
     }
 
     ESP_LOGI(TAG, "Reconfiguring I2S/ES8311 output: %" PRIu32 " -> %" PRIu32 " Hz",
-             s_output_sample_rate, sample_rate);
+             s_codec_sample_rate, sample_rate);
     if (s_codec_opened) {
         esp_codec_dev_set_out_mute(s_codec_dev, true);
         audio_radio_set_pa(false);
         ESP_RETURN_ON_ERROR(audio_radio_codec_ret_to_esp(esp_codec_dev_close(s_codec_dev)),
                             TAG, "Failed to close codec for sample-rate change");
         s_codec_opened = false;
+        s_codec_sample_rate = 0;
     }
 
     esp_codec_dev_sample_info_t fs = {
@@ -760,6 +771,7 @@ static esp_err_t audio_radio_configure_speaker(uint32_t sample_rate)
     ESP_RETURN_ON_ERROR(audio_radio_codec_ret_to_esp(esp_codec_dev_open(s_codec_dev, &fs)),
                         TAG, "Failed to reopen codec at requested sample rate");
     s_codec_opened = true;
+    s_codec_sample_rate = sample_rate;
     s_output_sample_rate = sample_rate;
     ESP_RETURN_ON_ERROR(audio_radio_codec_ret_to_esp(esp_codec_dev_set_out_vol(s_codec_dev, s_output_volume)),
                         TAG, "Failed to restore output volume");
@@ -808,7 +820,7 @@ static esp_err_t audio_radio_set_output_format(uint32_t sample_rate,
                         ESP_ERR_INVALID_ARG, TAG, "Invalid output PCM format");
     audio_radio_load_output_mode();
 
-    if (s_output_mode != AUDIO_OUTPUT_SPEAKER) {
+    if (!s_force_speaker && s_output_mode != AUDIO_OUTPUT_SPEAKER) {
         esp_err_t usb_ret = audio_radio_configure_usb(
             sample_rate, channels, bits, s_output_mode == AUDIO_OUTPUT_USB);
         if (usb_ret == ESP_OK) return ESP_OK;
@@ -866,7 +878,7 @@ static int audio_radio_prepare_player_cb(esp_asp_handle_t *handle, void *ctx)
     uint32_t usb_rate = 0;
     uint8_t usb_channels = 0;
     uint8_t usb_bits = 0;
-    if (s_output_mode != AUDIO_OUTPUT_SPEAKER) {
+    if (!s_force_speaker && s_output_mode != AUDIO_OUTPUT_SPEAKER) {
         if (s_output_mode != AUDIO_OUTPUT_USB ||
             usb_audio_output_wait_connected(AUDIO_USB_CONNECT_WAIT_MS)) {
             use_usb_format = usb_audio_output_select_format(
@@ -982,7 +994,7 @@ esp_err_t audio_radio_init(void)
     audio_radio_load_output_mode();
     ESP_RETURN_ON_ERROR(audio_radio_init_i2s(), TAG, "I2S init failed");
     ESP_RETURN_ON_ERROR(audio_radio_init_codec(), TAG, "Codec init failed");
-    if (s_output_mode != AUDIO_OUTPUT_SPEAKER) {
+    if (!s_force_speaker && s_output_mode != AUDIO_OUTPUT_SPEAKER) {
         esp_err_t usb_ret = usb_audio_output_init();
         if (usb_ret != ESP_OK && s_output_mode == AUDIO_OUTPUT_USB) return usb_ret;
     }
@@ -1613,6 +1625,7 @@ void audio_radio_deinit(void)
     s_playback_state = AUDIO_PLAYBACK_IDLE;
     s_hls_last_format = 0;
     s_output_sample_rate = CONFIG_AUDIO_RADIO_SAMPLE_RATE;
+    s_codec_sample_rate = 0;
     s_output_format_ok = true;
     s_output_write_gated = true;
     s_active_output_usb = false;

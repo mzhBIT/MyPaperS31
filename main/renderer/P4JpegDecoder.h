@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 
 namespace m5gfx {
@@ -39,5 +40,18 @@ bool draw_file(m5gfx::M5GFX &gfx,
                int box_width,
                int box_height,
                DrawStats *stats = nullptr);
+
+// Same hardware path for an encoded JPEG already held in memory. The source
+// is copied into the decoder's DMA-capable input allocation; no temporary file
+// is created.
+bool draw_memory(m5gfx::M5GFX &gfx,
+                 const uint8_t *data,
+                 size_t size,
+                 const char *label,
+                 int x,
+                 int y,
+                 int box_width,
+                 int box_height,
+                 DrawStats *stats = nullptr);
 
 } // namespace p4_jpeg

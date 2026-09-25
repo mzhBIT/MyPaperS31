@@ -28,7 +28,6 @@
 #include <cstdint>
 #include <cstring>
 #include <esp_log.h>
-#include <esp_heap_caps.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
@@ -79,38 +78,6 @@ struct AnnotationFetchResult {
     std::string error;
     bool ok = false;
 };
-
-struct ImagePrefetchJob {
-    std::string href;
-    QueueHandle_t result_queue = nullptr;
-    SemaphoreHandle_t done = nullptr;
-};
-
-struct ImagePrefetchResult {
-    std::string href;
-    std::vector<uint8_t> bytes;
-    int64_t elapsed_ms = 0;
-    UBaseType_t stack_hwm = 0;
-    bool ok = false;
-};
-
-void image_prefetch_task(void *argument)
-{
-    std::unique_ptr<ImagePrefetchJob> job(static_cast<ImagePrefetchJob *>(argument));
-    auto *result = new ImagePrefetchResult;
-    result->href = job->href;
-    const int64_t started = esp_timer_get_time();
-    result->ok = g_epub.read_resource_to_memory(job->href, &result->bytes) &&
-                 !result->bytes.empty();
-    result->elapsed_ms = (esp_timer_get_time() - started) / 1000;
-    result->stack_hwm = uxTaskGetStackHighWaterMark(nullptr);
-    if (!job->result_queue ||
-        xQueueSend(job->result_queue, &result, 0) != pdTRUE) {
-        delete result;
-    }
-    if (job->done) xSemaphoreGive(job->done);
-    vTaskDelete(nullptr);
-}
 
 void annotation_fetch_task(void *argument)
 {
@@ -429,7 +396,6 @@ public:
 
     ~EpubReaderActivity()
     {
-        finish_image_prefetch_worker();
         finish_annotation_worker();
         flush_progress(true);
         release_runtime_cache();
@@ -461,7 +427,6 @@ public:
         tick_weread_active_time();
         poll_annotation_worker();
         start_pending_annotation_fetch();
-        poll_image_prefetch_worker();
         run_page_prefetch();
         flush_progress(false);
     }
@@ -734,6 +699,7 @@ private:
 
     struct ImageDrawStats {
         bool memory_source = false;
+        bool decoded_cache_hit = false;
         bool hardware_attempted = false;
         bool hardware_ok = false;
         bool file_decode_ok = false;
@@ -762,6 +728,13 @@ private:
     };
 
     struct PagePrefetch {
+        enum class Stage : uint8_t {
+            Empty,
+            Glyph,
+            Image,
+            Ready,
+        };
+
         bool pending = false;
         bool valid = false;
         bool has_pages = false;
@@ -771,6 +744,7 @@ private:
         int spine = -1;
         int page = -1;
         uint32_t layout_sig = 0;
+        Stage stage = Stage::Empty;
         document_layout::Pages pages;
         lgfx::LGFX_Sprite *framebuffer = nullptr;
     };
@@ -817,9 +791,10 @@ private:
     PagePrefetch _prefetch;
     std::string _prefetched_image_href;
     std::vector<uint8_t> _prefetched_image_bytes;
-    QueueHandle_t _image_prefetch_queue = nullptr;
-    SemaphoreHandle_t _image_prefetch_done = nullptr;
-    TaskHandle_t _image_prefetch_task = nullptr;
+    std::string _prefetched_decoded_href;
+    std::vector<uint8_t> _prefetched_decoded_gray4;
+    int _prefetched_decoded_width = 0;
+    int _prefetched_decoded_height = 0;
 
     void release_runtime_cache()
     {
@@ -835,6 +810,10 @@ private:
         std::unordered_set<std::string>().swap(_missing_images);
         _prefetched_image_href.clear();
         std::vector<uint8_t>().swap(_prefetched_image_bytes);
+        _prefetched_decoded_href.clear();
+        std::vector<uint8_t>().swap(_prefetched_decoded_gray4);
+        _prefetched_decoded_width = 0;
+        _prefetched_decoded_height = 0;
         std::unordered_map<std::string, std::string>().swap(_footnote_cache);
         std::unordered_set<std::string>().swap(_missing_footnotes);
         _footnote_popup_text.clear();
@@ -1386,9 +1365,21 @@ private:
             return true;
         }
 
-        // MOBI/FB2 and malformed container entries retain the proven file
-        // fallback. EPUB image-only pages normally never reach this path.
-        return ensure_cached_image(href, image);
+        // Some containers cannot expose a cheap prefix, and a malformed JPEG
+        // may place its SOF marker beyond the prefix budget.  Probe one full
+        // in-memory resource rather than creating a temporary SD-card file.
+        std::vector<uint8_t> bytes;
+        if (g_epub.read_resource_to_memory(resolved, &bytes) &&
+            probe_image_bytes(bytes.data(), bytes.size(), ext,
+                              &info.width, &info.height, &info.jpg_progressive)) {
+            _image_info_cache[resolved] = info;
+            *image = info;
+            ESP_LOGI(TAG, "image header memory href=%s src=%dx%d bytes=%u time=%lld ms",
+                     href.c_str(), info.width, info.height, (unsigned)bytes.size(),
+                     (esp_timer_get_time() - started) / 1000);
+            return true;
+        }
+        return false;
     }
 
     bool ensure_cached_image(const std::string &href, CachedImage *image, ImageLoadStats *stats = nullptr)
@@ -1604,21 +1595,64 @@ private:
                                     const std::string &href,
                                     const CachedImage &image,
                                     int x, int y, int w, int h, float scale,
+                                    bool allow_hw_jpeg,
                                     ImageDrawStats *stats)
     {
         const int64_t started = esp_timer_get_time();
         const std::string resolved = g_epub.normalize_resource_href(href);
-        std::vector<uint8_t> encoded;
+
+        if (allow_hw_jpeg && !_prefetched_decoded_gray4.empty() &&
+            _prefetched_decoded_href == resolved &&
+            _prefetched_decoded_width == w &&
+            _prefetched_decoded_height == h) {
+            auto *panel = M5.Display.getPanel();
+            if (panel &&
+                panel->writeNativeGrayscale4Rect(
+                    _prefetched_decoded_gray4.data(),
+                    static_cast<uint16_t>(w), static_cast<uint16_t>(h),
+                    static_cast<int16_t>(x), static_cast<int16_t>(y))) {
+                if (stats) {
+                    stats->memory_source = true;
+                    stats->decoded_cache_hit = true;
+                    stats->total_ms = (esp_timer_get_time() - started) / 1000;
+                }
+                return true;
+            }
+        }
+
         const std::vector<uint8_t> *source = nullptr;
         if (_prefetched_image_href == resolved && !_prefetched_image_bytes.empty()) {
             source = &_prefetched_image_bytes;
         } else {
-            if (!g_epub.read_resource_to_memory(resolved, &encoded) || encoded.empty()) return false;
-            source = &encoded;
+            _prefetched_image_href.clear();
+            std::vector<uint8_t>().swap(_prefetched_image_bytes);
+            if (!g_epub.read_resource_to_memory(resolved, &_prefetched_image_bytes) ||
+                _prefetched_image_bytes.empty()) return false;
+            _prefetched_image_href = resolved;
+            source = &_prefetched_image_bytes;
         }
         const int64_t read_done = esp_timer_get_time();
         bool ok = false;
-        if (image.ext == ".jpg" && image.jpg_progressive) {
+        if (image.ext == ".jpg" && !image.jpg_progressive && allow_hw_jpeg) {
+            p4_jpeg::DrawStats hw;
+            ok = p4_jpeg::draw_memory(M5.Display,
+                                      source->data(),
+                                      source->size(),
+                                      resolved.c_str(),
+                                      x, y, w, h,
+                                      &hw);
+            if (stats) {
+                stats->hardware_attempted = hw.attempted;
+                stats->hardware_ok = ok;
+                stats->hardware_read_ms = hw.read_ms;
+                stats->hardware_header_ms = hw.header_ms;
+                stats->hardware_decode_ms = hw.decode_ms;
+                stats->hardware_scale_ms = hw.scale_ms;
+                stats->hardware_push_ms = hw.push_ms;
+                stats->hardware_total_ms = hw.total_ms;
+            }
+        }
+        if (image.ext == ".jpg" && !ok) {
             turbo_jpeg::DrawStats sw;
             ok = turbo_jpeg::draw_memory(gfx, source->data(), source->size(),
                                          resolved.c_str(), x, y, w, h, &sw);
@@ -1634,7 +1668,8 @@ private:
                 stats->software_push_ms = sw.push_ms;
                 stats->software_total_ms = sw.total_ms;
             }
-        } else if (image.ext == ".jpg") {
+        }
+        if (image.ext == ".jpg" && !ok) {
             ok = gfx.drawJpg(source->data(), source->size(), x, y, w, h,
                              0, 0, scale, scale);
         } else if (image.ext == ".png") {
@@ -1650,83 +1685,6 @@ private:
             stats->total_ms = (esp_timer_get_time() - started) / 1000;
         }
         return ok;
-    }
-
-    void queue_image_prefetch(const document_layout::Page &page)
-    {
-        if (_image_prefetch_task || !_image_prefetch_queue || !_image_prefetch_done) return;
-        const PageItem *image_item = nullptr;
-        for (const auto &item : page) {
-            if (item.type == PageItemType::Space) continue;
-            if (item.type != PageItemType::Image || image_item) return;
-            image_item = &item;
-        }
-        if (!image_item || !is_supported_image_href(image_item->resource)) return;
-
-        CachedImage info;
-        if (!probe_resource_image(image_item->resource, &info)) {
-            return;
-        }
-
-        const std::string resolved = g_epub.normalize_resource_href(image_item->resource);
-        if (_prefetched_image_href == resolved && !_prefetched_image_bytes.empty()) return;
-        auto *job = new ImagePrefetchJob;
-        job->href = resolved;
-        job->result_queue = _image_prefetch_queue;
-        job->done = _image_prefetch_done;
-        const BaseType_t created = xTaskCreatePinnedToCoreWithCaps(
-            image_prefetch_task, "book_img_prefetch", 8192, job, 1,
-            &_image_prefetch_task, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
-        if (created != pdPASS) {
-            delete job;
-            _image_prefetch_task = nullptr;
-            ESP_LOGW(TAG, "image prefetch task creation failed href=%s", resolved.c_str());
-        } else {
-            ESP_LOGI(TAG, "image prefetch started href=%s core=0 stack=psram/8192",
-                     image_item->resource.c_str());
-        }
-    }
-
-    void poll_image_prefetch_worker()
-    {
-        ImagePrefetchResult *result = nullptr;
-        if (!_image_prefetch_queue ||
-            xQueueReceive(_image_prefetch_queue, &result, 0) != pdTRUE) return;
-        xSemaphoreTake(_image_prefetch_done, portMAX_DELAY);
-        _image_prefetch_task = nullptr;
-        if (result) {
-            if (result->ok) {
-                _prefetched_image_href = result->href;
-                _prefetched_image_bytes.swap(result->bytes);
-                ESP_LOGI(TAG,
-                         "prefetch image memory ready href=%s bytes=%u time=%lld ms stack_hwm=%u",
-                         result->href.c_str(), (unsigned)_prefetched_image_bytes.size(),
-                         result->elapsed_ms, (unsigned)result->stack_hwm);
-            } else {
-                ESP_LOGW(TAG, "prefetch image memory failed href=%s time=%lld ms stack_hwm=%u",
-                         result->href.c_str(), result->elapsed_ms,
-                         (unsigned)result->stack_hwm);
-            }
-            delete result;
-        }
-    }
-
-    void finish_image_prefetch_worker()
-    {
-        if (_image_prefetch_task && _image_prefetch_done) {
-            xSemaphoreTake(_image_prefetch_done, portMAX_DELAY);
-            _image_prefetch_task = nullptr;
-        }
-        ImagePrefetchResult *result = nullptr;
-        if (_image_prefetch_queue) {
-            while (xQueueReceive(_image_prefetch_queue, &result, 0) == pdTRUE) delete result;
-            vQueueDelete(_image_prefetch_queue);
-            _image_prefetch_queue = nullptr;
-        }
-        if (_image_prefetch_done) {
-            vSemaphoreDelete(_image_prefetch_done);
-            _image_prefetch_done = nullptr;
-        }
     }
 
     void draw_image_placeholder(lgfx::LGFXBase &gfx, int x, int y, int w, int h, const char *message)
@@ -1934,6 +1892,7 @@ private:
         _prefetch.spine = -1;
         _prefetch.page = -1;
         _prefetch.layout_sig = 0;
+        _prefetch.stage = PagePrefetch::Stage::Empty;
         document_layout::Pages().swap(_prefetch.pages);
     }
 
@@ -1962,15 +1921,150 @@ private:
         return false;
     }
 
-    void warm_page_images(const document_layout::Page &page)
+    bool decode_lgfx_memory_gray4(const std::vector<uint8_t> &encoded,
+                                  const std::string &ext,
+                                  int draw_w, int draw_h, float scale,
+                                  std::vector<uint8_t> *gray4)
+    {
+        if (encoded.empty() || !gray4 || draw_w <= 0 || draw_h <= 0) return false;
+
+        // PNG/BMP are decoded into a PSRAM-backed RGB565 sprite first. M5GFX's
+        // RGB conversion path is fully defined, unlike grayscale_t -> 4bpp
+        // Sprite writes, which can leave pixelcopy callbacks unset. The final
+        // persistent cache is still the panel-native packed 4bpp buffer.
+        lgfx::LGFX_Sprite decoded(&M5.Display);
+        decoded.setPsram(true);
+        decoded.setColorDepth(16);
+        if (!decoded.createSprite(draw_w, draw_h)) {
+            ESP_LOGW(TAG, "prefetch raster sprite allocation failed size=%dx%d",
+                     draw_w, draw_h);
+            return false;
+        }
+        decoded.fillScreen(TFT_WHITE);
+
+        bool ok = false;
+        if (ext == ".png") {
+            ok = decoded.drawPng(encoded.data(), encoded.size(),
+                                 0, 0, draw_w, draw_h, 0, 0, scale, scale);
+        } else if (ext == ".bmp") {
+            ok = decoded.drawBmp(encoded.data(), encoded.size(),
+                                 0, 0, draw_w, draw_h, 0, 0, scale, scale);
+        }
+        if (!ok) return false;
+
+        const size_t stride = ((size_t)draw_w + 1) >> 1;
+        gray4->assign(stride * (size_t)draw_h, 0xFF);
+        std::vector<uint8_t> rgb((size_t)draw_w * 3);
+        if (gray4->empty() || rgb.empty()) {
+            std::vector<uint8_t>().swap(*gray4);
+            return false;
+        }
+
+        for (int y = 0; y < draw_h; ++y) {
+            decoded.readRectRGB(0, y, draw_w, 1, rgb.data());
+            uint8_t *dst = gray4->data() + (size_t)y * stride;
+            for (int x = 0; x < draw_w; x += 2) {
+                const uint8_t *p0 = rgb.data() + (size_t)x * 3;
+                const uint8_t gray0 = (uint8_t)(((unsigned)p0[0] * 77 +
+                                                  (unsigned)p0[1] * 151 +
+                                                  (unsigned)p0[2] * 29) >> 12);
+                uint8_t gray1 = 0x0F;
+                if (x + 1 < draw_w) {
+                    const uint8_t *p1 = p0 + 3;
+                    gray1 = (uint8_t)(((unsigned)p1[0] * 77 +
+                                       (unsigned)p1[1] * 151 +
+                                       (unsigned)p1[2] * 29) >> 12);
+                }
+                dst[x >> 1] = (uint8_t)((gray0 << 4) | gray1);
+            }
+        }
+        return true;
+    }
+
+    bool prefetch_page_image_memory(const document_layout::Page &page)
     {
         for (const auto &item : page) {
             if (item.type != PageItemType::Image || !is_supported_image_href(item.resource)) continue;
+            const std::string resolved = g_epub.normalize_resource_href(item.resource);
+
             CachedImage image;
-            ImageLoadStats stats;
-            ensure_cached_image(item.resource, &image, &stats);
-            vTaskDelay(1);
+            if (!probe_resource_image(item.resource, &image)) return false;
+            int draw_w = item.width;
+            int draw_h = item.height;
+            float scale = item.scale;
+            fit_image_box(image.width, image.height,
+                          item.width > 0 ? item.width : content_width(),
+                          item.height, &draw_w, &draw_h, &scale);
+            if (draw_w <= 0 || draw_h <= 0) return false;
+
+            if (!_prefetched_decoded_gray4.empty() &&
+                _prefetched_decoded_href == resolved &&
+                _prefetched_decoded_width == draw_w &&
+                _prefetched_decoded_height == draw_h) {
+                return true;
+            }
+
+            const int64_t started = esp_timer_get_time();
+            _prefetched_decoded_href.clear();
+            std::vector<uint8_t>().swap(_prefetched_decoded_gray4);
+            _prefetched_decoded_width = 0;
+            _prefetched_decoded_height = 0;
+            if (_prefetched_image_href != resolved || _prefetched_image_bytes.empty()) {
+                // The previous page is already physically refreshed here, so
+                // its encoded and decoded resources can be replaced safely.
+                _prefetched_image_href.clear();
+                std::vector<uint8_t>().swap(_prefetched_image_bytes);
+                if (!g_epub.read_resource_to_memory(resolved, &_prefetched_image_bytes) ||
+                    _prefetched_image_bytes.empty()) {
+                    std::vector<uint8_t>().swap(_prefetched_image_bytes);
+                    ESP_LOGW(TAG, "prefetch image memory failed href=%s time=%lld ms",
+                             item.resource.c_str(), (esp_timer_get_time() - started) / 1000);
+                    return false;
+                }
+                _prefetched_image_href = resolved;
+            }
+
+            const int64_t read_done = esp_timer_get_time();
+            bool decoded_ok = false;
+            if (image.ext == ".jpg") {
+                turbo_jpeg::DrawStats sw;
+                decoded_ok = turbo_jpeg::decode_memory_gray4(
+                    _prefetched_image_bytes.data(),
+                    _prefetched_image_bytes.size(), resolved.c_str(),
+                    draw_w, draw_h, &_prefetched_decoded_gray4, &sw);
+            } else if (image.ext == ".png" || image.ext == ".bmp") {
+                decoded_ok = decode_lgfx_memory_gray4(
+                    _prefetched_image_bytes, image.ext, draw_w, draw_h, scale,
+                    &_prefetched_decoded_gray4);
+            }
+            const int64_t decode_done = esp_timer_get_time();
+            if (!decoded_ok) {
+                std::vector<uint8_t>().swap(_prefetched_decoded_gray4);
+                ESP_LOGW(TAG,
+                         "prefetch image decode failed href=%s bytes=%u read=%lld decode=%lld ms",
+                         item.resource.c_str(), (unsigned)_prefetched_image_bytes.size(),
+                         (read_done - started) / 1000,
+                         (decode_done - read_done) / 1000);
+                return true; // Keep the encoded fallback for foreground draw.
+            }
+
+            _prefetched_decoded_href = resolved;
+            _prefetched_decoded_width = draw_w;
+            _prefetched_decoded_height = draw_h;
+            const unsigned encoded_bytes = (unsigned)_prefetched_image_bytes.size();
+            _prefetched_image_href.clear();
+            std::vector<uint8_t>().swap(_prefetched_image_bytes);
+            ESP_LOGI(TAG,
+                     "prefetch image decoded href=%s encoded=%u gray4=%u size=%dx%d read=%lld decode=%lld total=%lld ms",
+                     item.resource.c_str(), encoded_bytes,
+                     (unsigned)(((size_t)draw_w + 1) / 2 * (size_t)draw_h),
+                     draw_w, draw_h,
+                     (read_done - started) / 1000,
+                     (decode_done - read_done) / 1000,
+                     (decode_done - started) / 1000);
+            return true;
         }
+        return true;
     }
 
     bool render_prefetch_framebuffer(PagePrefetch *prefetch, const document_layout::Page &page)
@@ -2034,7 +2128,6 @@ private:
     {
         if (!_prefetch.pending || !_ok || _overlay.visible()) return;
         if (M5.Display.displayBusy()) return;
-        _prefetch.pending = false;
 
         int target_spine = -1;
         int target_page = -1;
@@ -2043,144 +2136,106 @@ private:
             invalidate_page_prefetch();
             return;
         }
-        if (prefetch_matches(target_spine, target_page)) return;
-
-        PagePrefetch next;
-        next.spine = target_spine;
-        next.page = target_page;
-        next.layout_sig = _layout_sig;
-        next.has_pages = false;
-
-        int64_t t0 = esp_timer_get_time();
-        const document_layout::Pages *pages = &_pages;
-        if (needs_spine_pages) {
-            bool found = false;
-            for (int i = target_spine; i < g_epub.spine_count(); ++i) {
-                next.pages.clear();
-                if (!load_spine_pages(i, &next.pages) || next.pages.empty()) {
-                    if (g_epub.is_weread()) break;
-                    continue;
-                }
-                target_spine = i;
-                target_page = 0;
-                next.spine = i;
-                next.page = 0;
-                found = true;
-                break;
-            }
-            if (!found) {
-                invalidate_page_prefetch();
-                return;
-            }
-            next.has_pages = true;
-            pages = &next.pages;
-        }
-        if (target_page < 0 || target_page >= (int)pages->size()) {
-            invalidate_page_prefetch();
+        if (prefetch_matches(target_spine, target_page)) {
+            _prefetch.pending = false;
             return;
         }
 
-        const auto &page = (*pages)[(size_t)target_page];
-        std::string page_text = page_text_for_prepare(page);
-        if (!page_text.empty()) {
-            next.glyph_ready = reader_text_renderer().preparePage(page_text);
-        } else {
-            next.glyph_ready = true;
+        const bool pipeline_target_matches =
+            _prefetch.stage != PagePrefetch::Stage::Empty &&
+            _prefetch.layout_sig == _layout_sig &&
+            ((_prefetch.spine == target_spine && _prefetch.page == target_page) ||
+             (needs_spine_pages && _prefetch.has_pages && _prefetch.page == 0 &&
+              _prefetch.spine >= target_spine));
+        const bool target_changed = !pipeline_target_matches;
+        if (target_changed) {
+            PagePrefetch next;
+            next.pending = true;
+            next.spine = target_spine;
+            next.page = target_page;
+            next.layout_sig = _layout_sig;
+            next.has_pages = false;
+
+            const int64_t started = esp_timer_get_time();
+            if (needs_spine_pages) {
+                bool found = false;
+                for (int i = target_spine; i < g_epub.spine_count(); ++i) {
+                    next.pages.clear();
+                    if (!load_spine_pages(i, &next.pages) || next.pages.empty()) {
+                        if (g_epub.is_weread()) break;
+                        continue;
+                    }
+                    target_spine = i;
+                    target_page = 0;
+                    next.spine = i;
+                    next.page = 0;
+                    found = true;
+                    break;
+                }
+                if (!found) {
+                    invalidate_page_prefetch();
+                    return;
+                }
+                next.has_pages = true;
+            }
+
+            const document_layout::Pages &pages = next.has_pages ? next.pages : _pages;
+            if (next.page < 0 || next.page >= (int)pages.size()) {
+                invalidate_page_prefetch();
+                return;
+            }
+
+            next.stage = PagePrefetch::Stage::Glyph;
+            invalidate_page_prefetch();
+            _prefetch = std::move(next);
+            ESP_LOGI(TAG,
+                     "prefetch pipeline layout ready spine=%d page=%d pages=%d time=%lld ms",
+                     _prefetch.spine + 1, _prefetch.page + 1,
+                     _prefetch.has_pages ? 1 : 0,
+                     (esp_timer_get_time() - started) / 1000);
+            return;
         }
-        warm_page_images(page);
-        next.images_ready = true;
-        if (READER_PREFETCH_FRAMEBUFFER_ENABLED) render_prefetch_framebuffer(&next, page);
-        next.valid = true;
-        invalidate_page_prefetch();
-        _prefetch = std::move(next);
+
+        const document_layout::Pages &pages = _prefetch.has_pages ? _prefetch.pages : _pages;
+        if (_prefetch.page < 0 || _prefetch.page >= (int)pages.size()) {
+            invalidate_page_prefetch();
+            return;
+        }
+        const auto &page = pages[(size_t)_prefetch.page];
+
+        if (_prefetch.stage == PagePrefetch::Stage::Glyph) {
+            const int64_t started = esp_timer_get_time();
+            std::string page_text = page_text_for_prepare(page);
+            _prefetch.glyph_ready = page_text.empty() ||
+                                    reader_text_renderer().preparePage(page_text);
+            _prefetch.stage = PagePrefetch::Stage::Image;
+            ESP_LOGI(TAG,
+                     "prefetch pipeline glyph ready spine=%d page=%d ok=%d time=%lld ms",
+                     _prefetch.spine + 1, _prefetch.page + 1,
+                     _prefetch.glyph_ready ? 1 : 0,
+                     (esp_timer_get_time() - started) / 1000);
+            return;
+        }
+
+        if (_prefetch.stage == PagePrefetch::Stage::Image) {
+            _prefetch.images_ready = prefetch_page_image_memory(page);
+            if (READER_PREFETCH_FRAMEBUFFER_ENABLED) {
+                render_prefetch_framebuffer(&_prefetch, page);
+            }
+            _prefetch.valid = true;
+            _prefetch.pending = false;
+            _prefetch.stage = PagePrefetch::Stage::Ready;
+        }
 
         ESP_LOGI(TAG,
-                 "prefetch page ready spine=%d page=%d/%u pages=%d glyph=%d images=%d framebuffer=%d total=%lld ms",
+                 "prefetch page ready spine=%d page=%d/%u pages=%d glyph=%d images=%d framebuffer=%d",
                  _prefetch.spine + 1,
                  _prefetch.page + 1,
                  (unsigned)(_prefetch.has_pages ? _prefetch.pages.size() : _pages.size()),
                  _prefetch.has_pages ? 1 : 0,
                  _prefetch.glyph_ready ? 1 : 0,
                  _prefetch.images_ready ? 1 : 0,
-                 _prefetch.framebuffer_ready ? 1 : 0,
-                 (esp_timer_get_time() - t0) / 1000);
-    }
-
-    bool first_image_on_page(int page_index, std::string *href) const
-    {
-        if (!href || page_index < 0 || page_index >= (int)_pages.size()) return false;
-        for (const auto &item : _pages[(size_t)page_index]) {
-            if (item.type == PageItemType::Image && is_supported_image_href(item.resource)) {
-                *href = item.resource;
-                return true;
-            }
-        }
-        return false;
-    }
-
-    bool first_image_in_spine(int spine_index, std::string *href)
-    {
-        if (!href || spine_index < 0 || spine_index >= g_epub.spine_count()) return false;
-
-        std::string xhtml;
-        const auto &spine = g_epub.spine_item(spine_index);
-        if (!g_epub.read_item_to_string(spine.href, &xhtml)) return false;
-
-        std::vector<EpubContentBlock> blocks;
-        if (!parse_source_blocks(xhtml, spine.href, &blocks)) return false;
-        for (const auto &block : blocks) {
-            if (block.type == EpubContentBlockType::Image &&
-                !is_ignored_layout_image(block.href) &&
-                is_supported_image_href(block.href)) {
-                *href = block.href;
-                return true;
-            }
-        }
-        return false;
-    }
-
-    bool next_image_href(std::string *href)
-    {
-        if (!href) return false;
-        href->clear();
-
-        for (int i = _page_index + 1; i < (int)_pages.size(); ++i) {
-            if (first_image_on_page(i, href)) return true;
-        }
-
-        const int max_spines_to_scan = 3;
-        for (int i = 1; i <= max_spines_to_scan; ++i) {
-            int spine = _spine_index + i;
-            if (spine >= g_epub.spine_count()) break;
-            if (first_image_in_spine(spine, href)) return true;
-        }
-        return false;
-    }
-
-    void prefetch_next_image()
-    {
-        if (!_ok) return;
-
-        std::string href;
-        if (!next_image_href(&href) || href.empty()) return;
-
-        app_paths::ensure_dir(_cache_root.c_str());
-        mkdir(_image_cache_dir.c_str(), 0);
-
-        std::string out_path = image_cache_path(href);
-        if (file_exists(out_path)) {
-            ESP_LOGI(TAG, "image prefetch href=%s file_cache=1", href.c_str());
-            return;
-        }
-
-        int64_t t0 = esp_timer_get_time();
-        bool ok = g_epub.extract_item_to_file(href, out_path);
-        ESP_LOGI(TAG,
-                 "image prefetch href=%s ok=%d extract=%lld path=%s",
-                 href.c_str(),
-                 ok ? 1 : 0,
-                 (esp_timer_get_time() - t0) / 1000,
-                 out_path.c_str());
+                 _prefetch.framebuffer_ready ? 1 : 0);
     }
 
     bool resolve_footnote_content(const document_layout::PageItem::FootnoteRef &ref,
@@ -2684,7 +2739,7 @@ private:
                 ++image_items;
                 CachedImage image;
                 ImageLoadStats load_stats;
-                if (!ensure_cached_image(item.resource, &image, &load_stats)) {
+                if (!probe_resource_image(item.resource, &image)) {
                     system_font::draw_left(gfx, "[image]", x, y);
                     y += item.height;
                     image_us += esp_timer_get_time() - item_begin;
@@ -2700,11 +2755,16 @@ private:
                 int draw_x = x + std::max(0, (content_width() - draw_w) / 2);
                 int draw_y = y + std::max(0, (item.height - draw_h) / 2);
                 ImageDrawStats draw_stats;
-                bool ok = draw_cached_image(gfx, image, draw_x, draw_y, draw_w,
-                                            draw_h, scale, allow_hw_jpeg, &draw_stats);
+                const std::string resolved = g_epub.normalize_resource_href(item.resource);
+                load_stats.memory_cache_hit = _prefetched_image_href == resolved &&
+                                              !_prefetched_image_bytes.empty();
+                bool ok = draw_resource_image_memory(gfx, item.resource, image,
+                                                     draw_x, draw_y, draw_w,
+                                                     draw_h, scale, allow_hw_jpeg,
+                                                     &draw_stats);
                 if (log_image_stats) {
                     ESP_LOGI(TAG,
-                             "image timing href=%s ext=%s src=%dx%d draw=%dx%d scale=%.3f source=%s resource_read=%lld mem_cache=%d file_cache=%d extract=%lld probe=%lld load=%lld hw_try=%d hw_ok=%d hw_read=%lld hw_header=%lld hw_decode=%lld hw_scale=%lld hw_push=%lld hw_total=%lld sw_try=%d sw_ok=%d sw_denom=%d sw_budget=%u sw_coeff=%u/%u sw_header=%lld sw_decode=%lld sw_push=%lld sw_total=%lld file_draw=%lld fallback=%d fallback_read=%lld fallback_draw=%lld draw=%lld ok=%d progressive=%d",
+                             "image timing href=%s ext=%s src=%dx%d draw=%dx%d scale=%.3f source=%s decoded_cache=%d resource_read=%lld mem_cache=%d file_cache=%d extract=%lld probe=%lld load=%lld hw_try=%d hw_ok=%d hw_read=%lld hw_header=%lld hw_decode=%lld hw_scale=%lld hw_push=%lld hw_total=%lld sw_try=%d sw_ok=%d sw_denom=%d sw_budget=%u sw_coeff=%u/%u sw_header=%lld sw_decode=%lld sw_push=%lld sw_total=%lld file_draw=%lld fallback=%d fallback_read=%lld fallback_draw=%lld draw=%lld ok=%d progressive=%d",
                              item.resource.c_str(),
                              image.ext.c_str(),
                              image.width,
@@ -2712,7 +2772,9 @@ private:
                              draw_w,
                              draw_h,
                              (double)scale,
-                             draw_stats.memory_source ? "memory" : "file",
+                             draw_stats.decoded_cache_hit ? "decoded" :
+                                 (draw_stats.memory_source ? "memory" : "file"),
+                             draw_stats.decoded_cache_hit ? 1 : 0,
                              draw_stats.resource_read_ms,
                              load_stats.memory_cache_hit ? 1 : 0,
                              load_stats.file_cache_hit ? 1 : 0,
@@ -2749,8 +2811,8 @@ private:
                     draw_image_placeholder(gfx, draw_x, draw_y, draw_w, draw_h,
                                            image.jpg_progressive ? "Progressive JPEG too large" : "Image decode failed");
                     ESP_LOGW(TAG,
-                             "image draw failed path=%s ext=%s src=%dx%d draw=%dx%d scale=%.3f progressive=%d",
-                             image.path.c_str(),
+                             "image draw failed href=%s ext=%s src=%dx%d draw=%dx%d scale=%.3f progressive=%d",
+                             item.resource.c_str(),
                              image.ext.c_str(),
                              image.width,
                              image.height,

@@ -1,6 +1,6 @@
 # MyPaperP4
 
-MyPaperP4 是一套面向自定义 **ESP32-P4 单色墨水屏设备**的阅读与音频固件。项目以本地阅读为核心，同时集成 SD 卡文件管理、网页传输、本地音乐、网络收音机和 RSS 阅读，并针对 1216 × 684 墨水屏、PSRAM、ESP32-C6 Hosted Wi-Fi 和 ES8311 音频链路做了适配与性能优化。
+MyPaperP4 是一套面向自定义 **ESP32-P4 单色墨水屏设备**的阅读、通信与音频固件。项目以本地阅读为核心，同时集成 SD 卡文件管理、Wi-Fi/USB 传输、本地音乐、网络收音机、在线内容，以及通过 ML307A 实现的 4G、短信和电话功能，并针对 1216 × 684 墨水屏、PSRAM、ESP32-C6 Hosted Wi-Fi 和 ES8311 音频链路做了适配与性能优化。
 
 > 本项目与具体硬件连接紧密耦合，并不是通用 ESP32-P4 开发板示例。直接移植到其他硬件前，需要重新配置屏幕总线、电源、触摸、SDMMC、Wi-Fi 协处理器和音频引脚。
 
@@ -23,7 +23,7 @@ MyPaperP4 是一套面向自定义 **ESP32-P4 单色墨水屏设备**的阅读�
   - CJK 标点避头尾与两端排版
   - 图片显示开关
 - TTF、OTF 和 EDCBook `.bin` 字体切换。
-- `quality`、`text`、`fast`、`fastest` 四种墨水屏刷新模式。
+- `fastest`、`fast`、`text`、`hd`、`quality` 五种墨水屏刷新模式；阅读器支持下一页排版和图片预取。
 
 ### 音频
 
@@ -44,10 +44,19 @@ MyPaperP4 是一套面向自定义 **ESP32-P4 单色墨水屏设备**的阅读�
 ### 网络与内容
 
 - ESP32-C6 作为 ESP-Hosted Wi-Fi 协处理器，通过 SDIO 与 ESP32-P4 通信。
+- 可在设置中选择 Wi-Fi 或 ML307A 4G 数据网络；模组通过 USB RNDIS 接入，AT 通道负责控制。
 - 离开网络功能后可停止 Wi-Fi、关闭 C6 电源，降低待机功耗。
 - RSS 源列表、新闻列表、正文分页和文章图片缓存。
 - Bing 每日壁纸浏览与保存。
-- 浏览器批量上传文件，按扩展名自动保存到 SD 卡对应目录。
+- 微信读书书架与正文阅读、知乎热榜、DeepSeek 对话及图片提问、高德在线地图。
+- 浏览器上传与管理 SD 卡文件；USB MSC 模式可由电脑直接访问 SD 卡，进入该模式前需确保设备与电脑不会同时挂载文件系统。
+
+### 短信与电话
+
+- ML307A 短信收发，按号码归并为对话；中文短信使用 UCS-2 PDU，发件记录保存在 SD 卡。
+- 电话拨打、来电接听、挂断、通话中 DTMF 按键，以及通话计时和本地通话记录。
+- 可从 SD 卡选择来电铃声，短铃声循环播放；通话音频使用已连接的模组模拟音频引脚。
+- 设置中的时间基准默认为北京时间（UTC+8）；可调整显示时区和模组时钟解释方式。此 ML307A 的 `AT+CCLK?` 数字实测为 UTC，虽附带 `+32` 标记，默认按 UTC 数字处理；短信接收时间仍按短信自身的时区字段解析。
 
 ### 文件与交互
 
@@ -66,8 +75,10 @@ MyPaperP4 是一套面向自定义 **ESP32-P4 单色墨水屏设备**的阅读�
 | Music | 本地音乐、歌词与播放控制 |
 | Radio | 网络收音机 |
 | News | RSS 与 Bing 壁纸 |
-| Transfer | Wi-Fi 网页传输 |
-| Setting | Wi-Fi 扫描、密码输入、连接验证与默认网络管理 |
+| WeRead / ZhiHu / DeepSeek / Map | 在线阅读、热榜、对话和地图 |
+| Messages / Phone | ML307A 短信对话与电话 |
+| Transfer | Wi-Fi 网页传输与手动进入 USB U 盘模式 |
+| Setting | 网络、前光、API 密钥、EPD 诊断和时间基准等设置 |
 | Clock | 当前仍为占位界面 |
 
 ## 硬件与构建配置
@@ -82,7 +93,9 @@ MyPaperP4 是一套面向自定义 **ESP32-P4 单色墨水屏设备**的阅读�
 | 触摸 | GT911 兼容触摸链路 |
 | 存储 | 4-bit SDMMC |
 | Wi-Fi | ESP32-C6 + ESP-Hosted SDIO |
+| 4G / 通话 | ML307A，经 USB RNDIS 与 AT 通道连接；通话音频使用模组模拟音频 |
 | 音频 | ES8311 + I²S + PA |
+| USB | HS 端口按功能在 Host 与 Device 模式间切换 |
 | SDK | ESP-IDF 5.3.5 |
 
 主要外设引脚如下：
@@ -140,6 +153,7 @@ idf.py -p /dev/ttyUSB0 flash monitor
 /images/                JPG、JPEG、PNG、BMP
 /fonts/                 TTF、OTF、EDCBook BIN 字体
 /music/                 MP3、FLAC、WAV、M4A、AAC、OGG、OPUS
+/ringtone/              可选的来电铃声音频
 /rss.txt                自定义 RSS 源
 /.reader/               自动生成的应用数据与缓存
 ```
@@ -153,7 +167,7 @@ idf.py -p /dev/ttyUSB0 flash monitor
 
 ### Wi-Fi 配置
 
-在主页进入 `Setting > WiFi`，设备会扫描附近网络。选择网络后可通过屏幕虚拟键盘输入密码；只有连接验证成功，SSID 和密码才会写入 NVS，并成为 Radio、RSS 与 Transfer 的默认网络。
+在主页进入 `Setting > WiFi`，设备会扫描附近网络。选择网络后可通过屏幕虚拟键盘输入密码；只有连接验证成功，SSID 和密码才会写入 NVS。`Setting > Network` 可选择在线功能使用 Wi-Fi 或 ML307A 4G 流量。
 
 扫描、验证以及网络功能退出后会停止 Wi-Fi 并关闭 ESP32-C6，避免设置页面或阅读场景持续耗电。Wi-Fi 密码存放在 NVS；如产品需要更高安全等级，应同时启用 Flash Encryption 与 NVS Encryption。
 
@@ -168,7 +182,11 @@ Bing Wallpaper|https://rsshub.app/bing
 
 空行和以 `#` 开头的行会被忽略。没有配置文件或没有有效条目时，应用使用内置 RSS 源。
 
-## Wi-Fi 文件传输
+## 文件传输
+
+Transfer 提供 Wi-Fi 网页传输和独立的 USB MSC 传输模式。USB 模式会重启并将 SD 卡交给电脑独占；退出前请先在电脑上安全弹出磁盘，再返回正常模式。使用 USB Device 时还需确保电脑的 VBUS 与板载 5 V 电源不会对灌。
+
+### Wi-Fi 网页传输
 
 打开主页的 **Transfer**：
 
@@ -206,6 +224,8 @@ fb2progress/             FB2 阅读进度
 fb2_tmp/                 FB2 内嵌图片按需解码缓存
 rss_img/                 RSS 图片缓存
 music_cover/             音频封面与方形缩略图缓存
+sms/sent.tsv             本机发送的短信记录
+calls.tsv                本机通话记录
 ```
 
 缓存文件可以删除，应用会在下次使用时重新生成；删除进度文件会丢失对应阅读位置。
@@ -218,6 +238,9 @@ MyPaperP4/
 │  ├─ activities/        页面与交互逻辑
 │  ├─ audio/             本地音乐、收音机、Codec 与歌词
 │  ├─ input/             触摸与 ADC 按键
+│  ├─ modem/             ML307A AT 短信与通话控制
+│  ├─ time/              NVS 时间基准与时区换算
+│  ├─ usb/               USB Host、模组识别及 MSC 模式
 │  ├─ parser/            TXT、EPUB、MOBI、FB2、HTML 与编码解析
 │  ├─ renderer/          分页、文字、图片与封面缩略图
 │  ├─ storage/           SD 卡和应用路径

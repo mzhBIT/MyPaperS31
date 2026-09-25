@@ -1,4 +1,5 @@
 #include "weread/WereadHttpClient.h"
+#include "wifi/wifi_setting.h"
 
 #include <esp_crt_bundle.h>
 #include <esp_heap_caps.h>
@@ -6,8 +7,12 @@
 #include <esp_log.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
 #include <string_view>
+
+#include <lwip/inet.h>
+#include <lwip/netdb.h>
 
 namespace weread {
 namespace {
@@ -44,6 +49,42 @@ std::string trim_copy(std::string value)
     while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.erase(value.begin());
     while (!value.empty() && (value.back() == ' ' || value.back() == '\t' || value.back() == '\r')) value.pop_back();
     return value;
+}
+
+std::string url_host(const std::string &url)
+{
+    const size_t scheme = url.find("://");
+    const size_t begin = scheme == std::string::npos ? 0 : scheme + 3;
+    const size_t end = url.find_first_of("/:?#", begin);
+    return url.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+}
+
+void log_cellular_endpoint(const std::string &url, int socket_errno)
+{
+    const std::string host = url_host(url);
+    if (host.empty()) return;
+    addrinfo hints = {};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo *addresses = nullptr;
+    const int dns_result = getaddrinfo(host.c_str(), "443", &hints, &addresses);
+    if (dns_result != 0 || addresses == nullptr) {
+        ESP_LOGW(TAG, "4G endpoint host=%s errno=%d dns=%d", host.c_str(), socket_errno,
+                 dns_result);
+        if (addresses) freeaddrinfo(addresses);
+        return;
+    }
+    unsigned index = 0;
+    for (addrinfo *item = addresses; item != nullptr && index < 4; item = item->ai_next) {
+        if (item->ai_family != AF_INET || item->ai_addr == nullptr) continue;
+        char address[INET_ADDRSTRLEN] = {};
+        const auto *ipv4 = reinterpret_cast<const sockaddr_in *>(item->ai_addr);
+        if (inet_ntop(AF_INET, &ipv4->sin_addr, address, sizeof(address))) {
+            ESP_LOGW(TAG, "4G endpoint host=%s ipv4[%u]=%s errno=%d",
+                     host.c_str(), index++, address, socket_errno);
+        }
+    }
+    freeaddrinfo(addresses);
 }
 
 }  // namespace
@@ -160,13 +201,25 @@ HttpClient::~HttpClient()
 bool HttpClient::ensure_client()
 {
     if (_client) return true;
+    const bool cellular = wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_CELLULAR;
     esp_http_client_config_t config = {};
     config.url = "https://weread.qq.com/";
     config.event_handler = http_event;
     config.user_data = _collector;
     config.timeout_ms = 15000;
     config.crt_bundle_attach = esp_crt_bundle_attach;
-    config.keep_alive_enable = true;
+    // ML307A exposes a carrier NAT through RNDIS. Long-lived TLS sockets and
+    // especially sockets reused while switching WeRead/CDN hosts are less
+    // reliable there. Wi-Fi keeps the faster persistent-client behaviour;
+    // cellular requests deliberately use short-lived connections.
+    config.keep_alive_enable = !cellular;
+    if (cellular) {
+        // The ML307A RNDIS link currently has IPv4 connectivity plus only an
+        // IPv6 link-local address. Keep Tencent TLS negotiation on the usable
+        // address family and explicitly stay on the project's TLS 1.2 path.
+        config.addr_type = HTTP_ADDR_TYPE_INET;
+        config.tls_version = ESP_HTTP_CLIENT_TLS_VER_TLS_1_2;
+    }
     config.buffer_size = 4096;
     config.buffer_size_tx = 4096;
     _client = esp_http_client_init(&config);
@@ -286,6 +339,8 @@ HttpResponse HttpClient::perform_once(const char *method, const std::string &url
         response.error = "cancelled";
         return response;
     }
+    const bool cellular = wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_CELLULAR;
+    if (cellular) close();
     if (!ensure_client()) {
         response.error = "HTTP client allocation failed";
         return response;
@@ -300,6 +355,8 @@ HttpResponse HttpClient::perform_once(const char *method, const std::string &url
     if (body) esp_http_client_set_header(_client, "Origin", "https://weread.qq.com");
     else esp_http_client_delete_header(_client, "Origin");
     esp_http_client_set_header(_client, "Referer", referer.empty() ? DEFAULT_REFERER : referer.c_str());
+    if (cellular) esp_http_client_set_header(_client, "Connection", "close");
+    else esp_http_client_delete_header(_client, "Connection");
     const std::string cookie = send_cookies ? cookie_header() : std::string();
     if (!cookie.empty()) esp_http_client_set_header(_client, "Cookie", cookie.c_str());
     else esp_http_client_delete_header(_client, "Cookie");
@@ -326,7 +383,13 @@ HttpResponse HttpClient::perform_once(const char *method, const std::string &url
 
     const esp_err_t result = esp_http_client_perform(_client);
     if (result != ESP_OK) {
+        const int socket_errno = esp_http_client_get_errno(_client);
         response.error = esp_err_to_name(result);
+        ESP_LOGW(TAG, "%s request failed transport=%s url=%s error=%s errno=%d",
+                 method, cellular ? "4G/fresh" : "Wi-Fi/reuse", url.c_str(),
+                 response.error.c_str(), socket_errno);
+        if (cellular) log_cellular_endpoint(url, socket_errno);
+        if (cellular) close();
         return response;
     }
     response.status = esp_http_client_get_status_code(_client);
@@ -340,6 +403,7 @@ HttpResponse HttpClient::perform_once(const char *method, const std::string &url
     _collector->data = nullptr;
     _collector->size = 0;
     _collector->capacity = 0;
+    if (cellular) close();
     return response;
 }
 

@@ -10,6 +10,7 @@
 #include "frontlight/frontlight.h"
 #include "map/AmapConfig.h"
 #include "storage/app_paths.h"
+#include "time/time_basis.h"
 #include "ui/SystemFont.h"
 #include "ui/VirtualKeyboard.h"
 #include "wifi/wifi_setting.h"
@@ -24,6 +25,7 @@
 
 #include <algorithm>
 #include <cstdio>
+#include <cstdlib>
 #include <string>
 #include <vector>
 
@@ -32,9 +34,9 @@ namespace {
 constexpr int HEADER_H = 76;
 constexpr int PAD = 20;
 constexpr int SETTINGS_ROW_Y = 106;
-constexpr int SETTINGS_ROW_H = 126;
-constexpr int SETTINGS_ROW_GAP = 14;
-constexpr int SETTINGS_ITEM_COUNT = 8;
+constexpr int SETTINGS_ROW_H = 112;
+constexpr int SETTINGS_ROW_GAP = 10;
+constexpr int SETTINGS_ITEM_COUNT = 9;
 
 constexpr int SCAN_TOP = 94;
 constexpr int SCAN_ROW_H = 92;
@@ -1202,6 +1204,113 @@ private:
     }
 };
 
+std::string time_basis_label()
+{
+    const int offset = time_basis_get_offset_minutes();
+    char label[32];
+    std::snprintf(label, sizeof(label), "UTC%c%02d:%02d%s", offset < 0 ? '-' : '+',
+                  std::abs(offset) / 60, std::abs(offset) % 60,
+                  offset == 480 ? "  Beijing" : "");
+    return label;
+}
+
+class TimeBasisSettingsActivity final : public Activity {
+public:
+    void on_create() override { draw(true); }
+    void on_show() override
+    {
+        if (_shown) draw(false);
+        _shown = true;
+    }
+    bool on_touch(const TouchEvent &event) override
+    {
+        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+            ActivityManager::instance().pop();
+            return true;
+        }
+        if (event.type == TouchEventType::Tap && event.y >= 320 && event.y < 450) {
+            change(event.x < M5.Display.width() / 2 ? -30 : 30);
+            return true;
+        }
+        if (event.type == TouchEventType::Tap && event.y >= 680 && event.y < 830) {
+            change_clock_basis();
+            return true;
+        }
+        return false;
+    }
+    bool on_key(int key) override
+    {
+        if (key == APP_KEY_BACK) {
+            ActivityManager::instance().pop();
+            return true;
+        }
+        if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
+            change(key == APP_KEY_UP ? 30 : -30);
+            return true;
+        }
+        if (key == APP_KEY_OK) {
+            change_clock_basis();
+            return true;
+        }
+        return false;
+    }
+private:
+    bool _shown = false;
+    std::string _error;
+    void change(int delta)
+    {
+        const int proposed = std::clamp(time_basis_get_offset_minutes() + delta,
+                                        -12 * 60, 14 * 60);
+        const esp_err_t ret = time_basis_set_offset_minutes(proposed);
+        _error = ret == ESP_OK ? "" : esp_err_to_name(ret);
+        draw(false);
+    }
+    void change_clock_basis()
+    {
+        const esp_err_t ret = time_basis_set_modem_clock_is_utc(
+            !time_basis_modem_clock_is_utc());
+        _error = ret == ESP_OK ? "" : esp_err_to_name(ret);
+        draw(false);
+    }
+    void draw(bool quality)
+    {
+        const int width = M5.Display.width();
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
+        M5.Display.fillScreen(TFT_WHITE);
+        draw_header("Time Basis");
+        system_font::draw_center(M5.Display, "Time zone for phone and SMS",
+                                 width / 2, 165, TFT_BLACK);
+        system_font::draw_center(M5.Display, time_basis_label(), width / 2, 255,
+                                 TFT_BLACK);
+        const int button_width = (width - 120) / 2;
+        M5.Display.drawRect(40, 320, button_width, 130, TFT_BLACK);
+        M5.Display.drawRect(80 + button_width, 320, button_width, 130, TFT_BLACK);
+        system_font::draw_center(M5.Display, "- 30 min", 40 + button_width / 2,
+                                 355, TFT_BLACK);
+        system_font::draw_center(M5.Display, "+ 30 min", 80 + button_width + button_width / 2,
+                                 355, TFT_BLACK);
+        system_font::draw_center(M5.Display, "Default: Beijing (UTC+08:00)",
+                                 width / 2, 510, TFT_DARKGRAY);
+        system_font::draw_center(M5.Display, "Uses modem time; no RTC required",
+                                 width / 2, 575, TFT_DARKGRAY);
+        M5.Display.drawRect(40, 680, width - 80, 150, TFT_BLACK);
+        system_font::draw_center(M5.Display, "Modem clock digits",
+                                 width / 2, 700, TFT_BLACK);
+        system_font::draw_center(M5.Display,
+                                 time_basis_modem_clock_is_utc()
+                                     ? "UTC (ignore reported zone)"
+                                     : "Use reported time zone",
+                                 width / 2, 755, TFT_BLACK);
+        system_font::draw_center(M5.Display, "SMS receive time uses its own zone",
+                                 width / 2, 880, TFT_DARKGRAY);
+        if (!_error.empty()) system_font::draw_center(M5.Display, _error, width / 2,
+                                                       950, TFT_BLACK);
+        M5.Display.display();
+        M5.Display.endWrite();
+    }
+};
+
 class SettingActivity final : public Activity {
 public:
     void on_create() override
@@ -1273,7 +1382,8 @@ private:
         else if (_focus == 4) ActivityManager::instance().push(new ZhihuSettingsActivity());
         else if (_focus == 5) ActivityManager::instance().push(new MapSettingsActivity());
         else if (_focus == 6) launch_epd_diagnostics();
-        else ActivityManager::instance().push(new RssCacheSettingsActivity());
+        else if (_focus == 7) ActivityManager::instance().push(new RssCacheSettingsActivity());
+        else ActivityManager::instance().push(new TimeBasisSettingsActivity());
     }
 
     void draw_item(int index, const char *title, const std::string &detail)
@@ -1335,6 +1445,7 @@ private:
                       static_cast<unsigned>(rss_cache.files),
                       format_cache_bytes(rss_cache.bytes).c_str());
         draw_item(7, "Clear RSS Cache", rss_detail);
+        draw_item(8, "Time Basis", time_basis_label());
         M5.Display.display();
         M5.Display.endWrite();
     }

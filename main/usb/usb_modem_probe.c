@@ -19,6 +19,7 @@
 #include "iot_eth_netif_glue.h"
 #include "iot_usbh_cdc.h"
 #include "iot_usbh_rndis.h"
+#include "modem/ml307_sms.h"
 #include "wifi/wifi_setting.h"
 
 static const char *TAG = "USB_MODEM_PROBE";
@@ -26,6 +27,7 @@ static const char *TAG = "USB_MODEM_PROBE";
 #define PROBE_HOST_READY_BIT       BIT0
 #define PROBE_CLIENT_READY_BIT     BIT1
 #define PROBE_DIAL_READY_BIT       BIT2
+#define PROBE_RNDIS_LINK_BIT       BIT3
 #define PROBE_TASK_STACK           4096
 #define ML307A_VID                 0x2ecc
 #define ML307A_PID                 0x3012
@@ -36,6 +38,8 @@ static const char *TAG = "USB_MODEM_PROBE";
 #define AT_RESPONSE_TIMEOUT_US     (3000 * 1000LL)
 #define MDIALUP_SETTLE_US          (2000 * 1000LL)
 #define AT_HANDOFF_SETTLE_MS        250
+#define AT_VOICE_FALLBACK_DELAY_US  (8000 * 1000LL)
+static esp_netif_t *s_rndis_netif;
 
 // The ML307A manual requires the RNDIS dial state to be established over its
 // AT interface before the host starts DHCP.  Keep that transaction strictly
@@ -87,10 +91,11 @@ static volatile uint8_t s_pending_address;
 static ml307a_at_port_t s_at;
 static iot_eth_driver_t *s_rndis_driver;
 static iot_eth_handle_t s_rndis_handle;
-static esp_netif_t *s_rndis_netif;
 static iot_eth_netif_glue_handle_t s_rndis_glue;
 static volatile bool s_rndis_online;
 static bool s_at_handoff_complete;
+static volatile int64_t s_sms_enable_not_before_us;
+static volatile uint8_t s_modem_address;
 
 static const usb_device_match_id_t s_ml307a_rndis_match[] = {
     {
@@ -142,9 +147,16 @@ static void rndis_event_handler(void *arg, esp_event_base_t event_base,
         switch (event_id) {
             case IOT_ETH_EVENT_CONNECTED:
                 ESP_LOGI(TAG, "ML307A RNDIS link connected; requesting DHCP address");
+                // RNDIS has finished its initial control negotiation.  Only
+                // now register the independent native Bulk client and claim
+                // modem interface 2; it never submits an EP0 request.
+                s_sms_enable_not_before_us = esp_timer_get_time() + 250000;
+                xEventGroupSetBits(s_events, PROBE_RNDIS_LINK_BIT);
                 break;
             case IOT_ETH_EVENT_DISCONNECTED:
                 s_rndis_online = false;
+                s_sms_enable_not_before_us = 0;
+                xEventGroupClearBits(s_events, PROBE_RNDIS_LINK_BIT);
                 ESP_LOGW(TAG, "ML307A RNDIS link disconnected");
                 break;
             case IOT_ETH_EVENT_START:
@@ -152,6 +164,8 @@ static void rndis_event_handler(void *arg, esp_event_base_t event_base,
                 break;
             case IOT_ETH_EVENT_STOP:
                 s_rndis_online = false;
+                s_sms_enable_not_before_us = 0;
+                xEventGroupClearBits(s_events, PROBE_RNDIS_LINK_BIT);
                 ESP_LOGI(TAG, "ML307A RNDIS network interface stopped");
                 break;
             default:
@@ -163,7 +177,6 @@ static void rndis_event_handler(void *arg, esp_event_base_t event_base,
     if (event_base == IP_EVENT && event_id == IP_EVENT_ETH_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)event_data;
         if (event == NULL || event->esp_netif != s_rndis_netif) return;
-        s_rndis_online = true;
         esp_err_t route_ret = esp_netif_set_default_netif(s_rndis_netif);
         if (route_ret != ESP_OK) {
             ESP_LOGW(TAG, "ML307A default route selection failed: %s",
@@ -177,6 +190,7 @@ static void rndis_event_handler(void *arg, esp_event_base_t event_base,
             dns.ip.type == ESP_IPADDR_TYPE_V4) {
             ESP_LOGI(TAG, "ML307A DNS: " IPSTR, IP2STR(&dns.ip.u_addr.ip4));
         }
+        s_rndis_online = true;
     }
 }
 
@@ -193,6 +207,8 @@ static esp_err_t prepare_ml307a_rndis(void)
     };
     ESP_RETURN_ON_ERROR(usbh_cdc_driver_install(&cdc_config), TAG,
                         "USB CDC host install failed");
+    ESP_RETURN_ON_ERROR(ml307_sms_transport_init(), TAG,
+                        "ML307A SMS AT transport init failed");
 
     const iot_usbh_rndis_config_t rndis_config = {
         .match_id_list = s_ml307a_rndis_match,
@@ -663,6 +679,7 @@ static void inspect_device(uint8_t address)
         ESP_LOGW(TAG, "device is not supported ML307A 2ECC:3012");
         goto done;
     }
+    s_modem_address = address;
     if (!at_found || at_interface.bulk_in != ML307A_AT_BULK_IN ||
         at_interface.bulk_out != ML307A_AT_BULK_OUT) {
         ESP_LOGE(TAG, "ML307A AT descriptor mismatch: in=0x%02x out=0x%02x",
@@ -898,15 +915,37 @@ static void host_task(void *arg)
         }
     }
     ret = activate_ml307a_rndis();
+    const int64_t rndis_start_us = esp_timer_get_time();
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "ML307A RNDIS startup failed: %s", esp_err_to_name(ret));
     }
+    int64_t sms_retry_not_before_us = 0;
     while (true) {
         uint32_t flags = 0;
-        ret = usb_host_lib_handle_events(portMAX_DELAY, &flags);
-        if (ret != ESP_OK) {
+        ret = usb_host_lib_handle_events(pdMS_TO_TICKS(20), &flags);
+        if (ret != ESP_OK && ret != ESP_ERR_TIMEOUT) {
             ESP_LOGW(TAG, "host event handling failed: %s", esp_err_to_name(ret));
             vTaskDelay(pdMS_TO_TICKS(50));
+        }
+        const int64_t now = esp_timer_get_time();
+        const EventBits_t bits = xEventGroupGetBits(s_events);
+        const bool rndis_ready = (bits & PROBE_RNDIS_LINK_BIT) != 0 &&
+            s_sms_enable_not_before_us != 0 && now >= s_sms_enable_not_before_us;
+        const bool voice_fallback = !rndis_ready && s_modem_address != 0 &&
+            now - rndis_start_us >= AT_VOICE_FALLBACK_DELAY_US;
+        if ((rndis_ready || voice_fallback) && !ml307_sms_is_ready() &&
+            now >= sms_retry_not_before_us) {
+            if (voice_fallback && sms_retry_not_before_us == 0) {
+                ESP_LOGW(TAG, "RNDIS not connected after 8 s; enabling independent voice/SMS AT port");
+            }
+            ret = ml307_sms_transport_enable(s_modem_address);
+            if (ret == ESP_OK) {
+                ESP_LOGI(TAG, "ML307A SMS transport enabled after RNDIS negotiation");
+            } else {
+                ESP_LOGW(TAG, "ML307A SMS transport enable failed: %s; retrying",
+                         esp_err_to_name(ret));
+                sms_retry_not_before_us = esp_timer_get_time() + 2000000;
+            }
         }
     }
 }

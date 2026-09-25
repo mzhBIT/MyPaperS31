@@ -32,6 +32,9 @@ esp_err_t wifi_setting_c6_power_off(void);
 // Ethernet and Wi-Fi both use this entry point so either transport may start
 // first without double-initializing the network stack.
 esp_err_t wifi_setting_network_stack_init(void);
+// Loads the persisted Wi-Fi/4G preference into internal RAM. Call once from
+// the boot task before any worker with a PSRAM-backed stack can query it.
+esp_err_t wifi_setting_load_network_mode(void);
 esp_err_t wifi_setting_init(void);
 esp_err_t wifi_setting_scan(wifi_setting_ap_t *records,
                             size_t capacity,

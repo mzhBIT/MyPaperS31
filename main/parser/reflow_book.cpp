@@ -62,6 +62,26 @@ bool read_regular_file(const std::string &path, std::string *out)
     return ok;
 }
 
+bool read_regular_file_bytes(const std::string &path,
+                             std::vector<uint8_t> *out,
+                             size_t max_bytes,
+                             bool prefix)
+{
+    if (!out || max_bytes == 0) return false;
+    out->clear();
+    struct stat info = {};
+    if (stat(path.c_str(), &info) != 0 || !S_ISREG(info.st_mode) || info.st_size <= 0) return false;
+    if (!prefix && static_cast<uint64_t>(info.st_size) > max_bytes) return false;
+    const size_t count = std::min<size_t>(static_cast<size_t>(info.st_size), max_bytes);
+    FILE *fp = std::fopen(path.c_str(), "rb");
+    if (!fp) return false;
+    out->resize(count);
+    const bool ok = std::fread(out->data(), 1, count, fp) == count;
+    std::fclose(fp);
+    if (!ok) out->clear();
+    return ok;
+}
+
 bool copy_regular_file(const std::string &source_path, const std::string &target_path)
 {
     FILE *source = std::fopen(source_path.c_str(), "rb");
@@ -311,6 +331,12 @@ bool ReflowBook::read_resource_prefix(const std::string &href,
                                       size_t max_bytes)
 {
     if (_format == Format::Epub) return _epub.read_item_prefix(href, out, max_bytes);
+    if (_format == Format::Mobi) return _mobi.read_resource_prefix(href, out, max_bytes);
+    if (_format == Format::Fb2) return _fb2.read_resource_prefix(href, out, max_bytes);
+    if (_format == Format::Markdown) return read_regular_file_bytes(href, out, max_bytes, true);
+    if (_format == Format::Weread && href == _cover_href) {
+        return read_regular_file_bytes(href, out, max_bytes, true);
+    }
     if (_format == Format::Weread && _weread_epub.spine_count() > 0) {
         return _weread_epub.read_item_prefix(href, out, max_bytes);
     }
@@ -322,6 +348,12 @@ bool ReflowBook::read_resource_to_memory(const std::string &href,
                                          uint32_t max_size)
 {
     if (_format == Format::Epub) return _epub.read_item_to_memory(href, out, max_size);
+    if (_format == Format::Mobi) return _mobi.read_resource_to_memory(href, out, max_size);
+    if (_format == Format::Fb2) return _fb2.read_resource_to_memory(href, out, max_size);
+    if (_format == Format::Markdown) return read_regular_file_bytes(href, out, max_size, false);
+    if (_format == Format::Weread && href == _cover_href) {
+        return read_regular_file_bytes(href, out, max_size, false);
+    }
     if (_format == Format::Weread && _weread_epub.spine_count() > 0) {
         return _weread_epub.read_item_to_memory(href, out, max_size);
     }

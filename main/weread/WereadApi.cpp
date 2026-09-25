@@ -1,6 +1,7 @@
 #include "weread/WereadApi.h"
 
 #include "weread/WereadJson.h"
+#include "wifi/wifi_setting.h"
 
 #include <esp_log.h>
 #include <esp_netif_sntp.h>
@@ -434,9 +435,23 @@ bool Api::get_shelf(std::vector<Book> *books, std::string *error)
 {
     if (!_client || !books) return false;
     books->clear();
-    HttpResponse response = _client->get(std::string(WEB_HOST) + "/web/shelf/sync");
+    const bool cellular = wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_CELLULAR;
+    const bool use_gateway = cellular && !_client->session().api_key.empty();
+    HttpResponse response = use_gateway
+                                ? gateway("/shelf/sync", {}, error)
+                                : _client->get(std::string(WEB_HOST) + "/web/shelf/sync");
     if (!response.ok()) { if (error) *error = request_error("shelf", response); return false; }
-    const std::string_view root = response_view(response);
+    std::string_view root = response_view(response);
+    // The official agent gateway may wrap the API result in a data object,
+    // whereas the legacy Web endpoint returns the shelf object directly.
+    std::string_view gateway_data;
+    if (use_gateway && field_view(root, "data", &gateway_data) &&
+        !gateway_data.empty() && gateway_data.front() == '{') {
+        root = gateway_data;
+    }
+    ESP_LOGI(TAG, "shelf transport=%s status=%d bytes=%u",
+             use_gateway ? "official-gateway/4G" : (cellular ? "web/4G" : "web/Wi-Fi"),
+             response.status, static_cast<unsigned>(response.size()));
     if (field_int(root, "errcode", field_int(root, "errCode")) == -2012) {
         if (error) *error = "login expired";
         return false;

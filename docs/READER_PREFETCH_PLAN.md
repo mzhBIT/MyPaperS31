@@ -24,23 +24,35 @@ page:
 Only the actual EPD scan must happen after the user action. Glyph preparation,
 image extraction/probing, and the next spine layout can be prepared earlier.
 
-## Stage 1: Implemented First
+## Stage 1: Single-resource pipeline
 
 - Schedule prefetch after every reader redraw.
+- Never prefetch while `displayBusy()` is true. The EPD scan owns the PSRAM
+  bandwidth until the physical refresh is complete.
 - Prefer the next page in the current spine.
 - If the current page is the last page in the spine, parse and paginate the next
   non-empty spine into a side cache without changing the visible page.
-- Build the candidate page text and call `TextRenderer::preparePage()` before
-  the user turns the page.
-- Extract and probe images referenced by the candidate page.
+- Advance only one resource stage per activity-loop pass: layout, glyphs, then
+  one image read/decode. There is no concurrent document/image worker.
+- Build the candidate page text and call `TextRenderer::preparePage()` in the
+  glyph stage before the user turns the page.
+- Keep at most one decoded JPEG/PNG/BMP resource in PSRAM as a target-sized native
+  packed 4bpp grayscale buffer. EPUB/MOBI/FB2/Markdown and cached WeRead resources are
+  read directly into memory; body images are not extracted into the temporary
+  cache directory. The encoded vector is released after a successful decode.
+- On a page turn, copy the decoded rectangle directly into the 2D EPD draw
+  packed buffer with `writeNativeGrayscale4Rect()`. This bypasses `pushSprite()` color
+  conversion and never writes the EPD target or physical-state buffers.
 - When `next_page()` reaches a prefetched spine, swap the prefetched pages into
   the active reader state instead of calling `load_spine()`.
 - Invalidate prefetch on font/style changes, chapter jumps, and manual spine
   reloads.
 
 This stage avoids background threads and runs from the reader activity loop, so
-it does not introduce concurrent access to the global text renderer or document
-parser.
+it does not introduce concurrent access to the global text renderer, document
+parser, PSRAM framebuffer, or EPD DMA source. A very fast page turn can still
+reach a resource before its stage is ready; that resource then falls back to a
+synchronous in-memory read/decode, never a temporary-file extraction.
 
 ## Stage 2: Native 4bpp Framebuffer Import
 
@@ -55,7 +67,7 @@ framebuffer, and a paletted 4bpp sprite can visibly degrade grayscale quality by
 adding an extra quantization/conversion step.
 
 The current implementation avoids `pushSprite()` and uses
-`Panel_EPD_2D::writeNativeGrayscale4()` to copy a raw grayscale 4bpp sprite into
+`Panel_EPD_2D::writeNativeGrayscale4()` to copy a raw grayscale 4bpp buffer into
 the panel's native 4bpp framebuffer with the correct rotation and packing. This
 preserves the same 16-level grayscale representation used by normal EPD drawing.
 

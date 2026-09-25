@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <cstddef>
+#include <vector>
 
 namespace lgfx {
 inline namespace v1 {
@@ -48,5 +49,16 @@ bool draw_memory(lgfx::LGFXBase &gfx,
                  int box_width,
                  int box_height,
                  DrawStats *stats = nullptr);
+
+// Decode an in-memory JPEG directly into the panel's native packed 4bpp
+// grayscale layout (even x in the high nibble, odd x in the low nibble).
+// This deliberately bypasses LGFX_Sprite's pixel conversion path.
+bool decode_memory_gray4(const uint8_t *data,
+                         size_t size,
+                         const char *label,
+                         int output_width,
+                         int output_height,
+                         std::vector<uint8_t> *out,
+                         DrawStats *stats = nullptr);
 
 } // namespace turbo_jpeg

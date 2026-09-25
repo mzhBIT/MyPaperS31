@@ -270,4 +270,134 @@ bool draw_memory(lgfx::LGFXBase &gfx,
     return draw_source(gfx, label, data, size, x, y, box_width, box_height, stats);
 }
 
+bool decode_memory_gray4(const uint8_t *data,
+                         size_t size,
+                         const char *label,
+                         int output_width,
+                         int output_height,
+                         std::vector<uint8_t> *out,
+                         DrawStats *stats)
+{
+    DrawStats local_stats;
+    local_stats.attempted = true;
+    const int64_t total_start = esp_timer_get_time();
+    auto finish = [&](bool ok) {
+        local_stats.total_ms = (esp_timer_get_time() - total_start) / 1000;
+        if (stats) *stats = local_stats;
+        if (!ok && out) std::vector<uint8_t>().swap(*out);
+        return ok;
+    };
+
+    if (!data || size == 0 || !out || output_width <= 0 || output_height <= 0) {
+        return finish(false);
+    }
+    const char *source_label = label && label[0] ? label : "memory";
+    const size_t free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    if (free_psram <= MIN_FREE_PSRAM_RESERVE + MIN_JPEG_MEMORY) {
+        ESP_LOGW(TAG, "insufficient PSRAM path=%s free=%u reserve=%u",
+                 source_label, (unsigned)free_psram, (unsigned)MIN_FREE_PSRAM_RESERVE);
+        return finish(false);
+    }
+    const size_t jpeg_budget = std::min(MAX_JPEG_MEMORY,
+                                        free_psram - MIN_FREE_PSRAM_RESERVE);
+    local_stats.memory_budget = (uint32_t)jpeg_budget;
+
+    jpeg_decompress_struct cinfo = {};
+    ErrorManager error = {};
+    uint8_t *source_row = nullptr;
+    bool created = false;
+    bool ok = false;
+
+    cinfo.err = jpeg_std_error(&error.base);
+    error.base.error_exit = error_exit;
+    if (setjmp(error.jump)) {
+        ESP_LOGW(TAG, "decode failed path=%s error=%s", source_label,
+                 error.message[0] ? error.message : "unknown libjpeg error");
+        goto cleanup;
+    }
+
+    jpeg_create_decompress(&cinfo);
+    created = true;
+    cinfo.mem->max_memory_to_use = (long)jpeg_budget;
+    jpeg_mem_src(&cinfo, data, size);
+
+    {
+        const int64_t header_start = esp_timer_get_time();
+        jpeg_read_header(&cinfo, TRUE);
+        local_stats.header_ms = (esp_timer_get_time() - header_start) / 1000;
+    }
+    local_stats.source_width = (int)cinfo.image_width;
+    local_stats.source_height = (int)cinfo.image_height;
+    local_stats.progressive = cinfo.progressive_mode != 0;
+    cinfo.out_color_space = JCS_GRAYSCALE;
+    cinfo.dct_method = JDCT_IFAST;
+    cinfo.do_fancy_upsampling = FALSE;
+    local_stats.scale_denom = choose_scale_denom(&cinfo, output_width, output_height);
+    cinfo.scale_num = 1;
+    cinfo.scale_denom = (unsigned)local_stats.scale_denom;
+    estimate_progressive_coefficients(&cinfo, source_label, local_stats.scale_denom,
+                                      &local_stats);
+
+    {
+        const int64_t decode_start = esp_timer_get_time();
+        jpeg_start_decompress(&cinfo);
+        local_stats.decoded_width = (int)cinfo.output_width;
+        local_stats.decoded_height = (int)cinfo.output_height;
+        if (cinfo.output_components != 1 || cinfo.output_width == 0 ||
+            cinfo.output_height == 0) {
+            ESP_LOGW(TAG, "unexpected output path=%s size=%ux%u components=%d",
+                     source_label, (unsigned)cinfo.output_width,
+                     (unsigned)cinfo.output_height, cinfo.output_components);
+            goto cleanup;
+        }
+
+        source_row = static_cast<uint8_t *>(heap_caps_malloc(
+            cinfo.output_width, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        if (!source_row) {
+            ESP_LOGW(TAG, "scanline allocation failed path=%s src_w=%u",
+                     source_label, (unsigned)cinfo.output_width);
+            goto cleanup;
+        }
+
+        const size_t stride = ((size_t)output_width + 1) >> 1;
+        out->assign(stride * (size_t)output_height, 0xFF);
+        if (out->empty()) goto cleanup;
+
+        int next_output_y = 0;
+        while (cinfo.output_scanline < cinfo.output_height) {
+            JSAMPROW rows[1] = {source_row};
+            if (jpeg_read_scanlines(&cinfo, rows, 1) != 1) goto cleanup;
+            const int source_y = (int)cinfo.output_scanline - 1;
+            while (next_output_y < output_height &&
+                   (int)((int64_t)next_output_y * cinfo.output_height /
+                         output_height) == source_y) {
+                uint8_t *dst = out->data() + (size_t)next_output_y * stride;
+                for (int output_x = 0; output_x < output_width; output_x += 2) {
+                    size_t source_x0 = (size_t)((int64_t)output_x *
+                                                cinfo.output_width / output_width);
+                    if (source_x0 >= cinfo.output_width) source_x0 = cinfo.output_width - 1;
+                    const uint8_t gray0 = source_row[source_x0] >> 4;
+                    uint8_t gray1 = 0x0F;
+                    if (output_x + 1 < output_width) {
+                        size_t source_x1 = (size_t)((int64_t)(output_x + 1) *
+                                                    cinfo.output_width / output_width);
+                        if (source_x1 >= cinfo.output_width) source_x1 = cinfo.output_width - 1;
+                        gray1 = source_row[source_x1] >> 4;
+                    }
+                    dst[output_x >> 1] = (uint8_t)((gray0 << 4) | gray1);
+                }
+                ++next_output_y;
+            }
+        }
+        jpeg_finish_decompress(&cinfo);
+        local_stats.decode_ms = (esp_timer_get_time() - decode_start) / 1000;
+        ok = next_output_y == output_height;
+    }
+
+cleanup:
+    free(source_row);
+    if (created) jpeg_destroy_decompress(&cinfo);
+    return finish(ok);
+}
+
 } // namespace turbo_jpeg

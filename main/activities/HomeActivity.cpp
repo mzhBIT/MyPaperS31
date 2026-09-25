@@ -3,6 +3,8 @@
 #include "activities/DeepSeekActivity.h"
 #include "activities/MusicActivity.h"
 #include "activities/MapActivity.h"
+#include "activities/SmsActivity.h"
+#include "activities/PhoneActivity.h"
 #include "activities/PlaceholderActivity.h"
 #include "activities/RadioActivity.h"
 #include "activities/SettingActivity.h"
@@ -60,6 +62,8 @@ static void go_deepseek(){ launch_deepseek(); }
 static void go_weread()  { launch_weread(); }
 static void go_zhihu()   { launch_zhihu(); }
 static void go_map()     { launch_map(); }
+static void go_sms()     { launch_sms(); }
+static void go_phone()   { launch_phone(); }
 
 static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
     {
@@ -76,7 +80,7 @@ static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
     {
         {"DeepSeek", go_deepseek},
         {"WeRead", go_weread}, {"ZhiHu", go_zhihu},
-        {"Map", go_map}, {nullptr, nullptr}, {nullptr, nullptr},
+        {"Map", go_map}, {"Messages", go_sms}, {"Phone", go_phone},
         {nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
     },
 };
@@ -106,7 +110,7 @@ static const HomeIconId g_icons[HOME_PAGE_CNT][MENU_CNT] = {
     {
         HomeIconId::DeepSeek,
         HomeIconId::WeChatReading, HomeIconId::ZhiHu,
-        HomeIconId::Map, HomeIconId::Count, HomeIconId::Count,
+        HomeIconId::Map, HomeIconId::Messages, HomeIconId::Phone,
         HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
     },
 };

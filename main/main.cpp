@@ -10,6 +10,8 @@
 
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
+#include "activities/PhoneActivity.h"
+#include "modem/ml307_voice.h"
 #include "input/touch_input.h"
 #include "storage/app_paths.h"
 #include "storage/storage_sdcard.h"
@@ -19,6 +21,7 @@
 #include "reader_font.h"
 #include "reader_style.h"
 #include "frontlight/frontlight.h"
+#include "wifi/wifi_setting.h"
 
 extern void launch_home();
 
@@ -42,6 +45,15 @@ static void init_nvs()
 extern "C" void app_main(void)
 {
     init_nvs();
+
+    // Cache the persisted network choice while the boot task still uses an
+    // internal-RAM stack. Runtime network workers can live in PSRAM, but they
+    // must not access NVS because flash operations disable the PSRAM cache.
+    esp_err_t network_mode_ret = wifi_setting_load_network_mode();
+    if (network_mode_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Network preference preload failed; using Wi-Fi: %s",
+                 esp_err_to_name(network_mode_ret));
+    }
 
     const bool usb_transfer_mode = usb_transfer_boot_requested();
 
@@ -175,6 +187,11 @@ extern "C" void app_main(void)
 
     while (true) {
         touch_input_update();
+
+        if (ml307_voice_take_ring_hint()) {
+            if (phone_activity_is_current()) phone_activity_notify_ring();
+            else launch_phone(true);
+        }
 
         if (!ActivityManager::instance().is_blocked()) {
             Activity *act = ActivityManager::instance().current();

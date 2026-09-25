@@ -50,11 +50,12 @@ typedef struct {
     uint32_t request_id;
     uint32_t max_transfer_pkts; /* max packets in one transfer */
     uint32_t max_transfer_size; /* max size in one transfer */
-    uint32_t link_speed;
     bool connect_status;
     bool connection_enabled;
     uint8_t *ctrl_buffer;
-    size_t rx_pending_data_len;
+    rndis_data_packet_t rx_pending_header;
+    bool rx_header_pending;
+    bool rx_extended_layout_logged;
     uint8_t mac_addr[6];
     uint8_t eth_mac_addr[6];
     void *user_data;
@@ -341,21 +342,6 @@ static esp_err_t usbh_rndis_connect(usbh_rndis_t *handle)
     for (int i = 0; i < oid_num; i++) {
         oid = oid_support_list[i];
         switch (oid) {
-        case OID_GEN_PHYSICAL_MEDIUM:
-            // These OIDs do not need query input data; the output size is validated after completion.
-            ret = usbh_rndis_query_msg_request(rndis, OID_GEN_PHYSICAL_MEDIUM, 0, data, sizeof(data), &data_len);
-            ESP_GOTO_ON_ERROR(ret, query_errorout, TAG,);
-            break;
-        case OID_GEN_MAXIMUM_FRAME_SIZE:
-            ret = usbh_rndis_query_msg_request(rndis, OID_GEN_MAXIMUM_FRAME_SIZE, 0, data, sizeof(data), &data_len);
-            ESP_GOTO_ON_ERROR(ret, query_errorout, TAG, "OID_GEN_MAXIMUM_FRAME_SIZE query error, ret: %s", esp_err_to_name(ret));
-            break;
-        case OID_GEN_LINK_SPEED:
-            ret = usbh_rndis_query_msg_request(rndis, OID_GEN_LINK_SPEED, 0, data, sizeof(data), &data_len);
-            ESP_GOTO_ON_ERROR(ret, query_errorout, TAG, "OID_GEN_LINK_SPEED query error, ret: %s", esp_err_to_name(ret));
-            ESP_GOTO_ON_FALSE(data_len >= sizeof(uint32_t), ESP_ERR_INVALID_RESPONSE, query_errorout, TAG, "Invalid OID_GEN_LINK_SPEED length: %"PRIu32"", data_len);
-            memcpy(&rndis->link_speed, data, 4);
-            break;
         case OID_GEN_MEDIA_CONNECT_STATUS:
             ret = usbh_rndis_query_msg_request(rndis, OID_GEN_MEDIA_CONNECT_STATUS, 0, data, sizeof(data), &data_len);
             ESP_GOTO_ON_ERROR(ret, query_errorout, TAG, "OID_GEN_MEDIA_CONNECT_STATUS query error, ret: %s", esp_err_to_name(ret));
@@ -366,10 +352,6 @@ static esp_err_t usbh_rndis_connect(usbh_rndis_t *handle)
                 xEventGroupSetBits(rndis->event_group, RNDIS_LINE_CHANGE);
             }
             break;
-        case OID_802_3_MAXIMUM_LIST_SIZE:
-            ret = usbh_rndis_query_msg_request(rndis, OID_802_3_MAXIMUM_LIST_SIZE, 0, data, sizeof(data), &data_len);
-            ESP_GOTO_ON_ERROR(ret, query_errorout, TAG, "OID_802_3_MAXIMUM_LIST_SIZE query error, ret: %s", esp_err_to_name(ret));
-            break;
         case OID_802_3_CURRENT_ADDRESS:
             ret = usbh_rndis_query_msg_request(rndis, OID_802_3_CURRENT_ADDRESS, 0, data, sizeof(data), &data_len);
             ESP_GOTO_ON_ERROR(ret, query_errorout, TAG, "OID_802_3_CURRENT_ADDRESS query error, ret: %s", esp_err_to_name(ret));
@@ -377,14 +359,6 @@ static esp_err_t usbh_rndis_connect(usbh_rndis_t *handle)
             for (uint8_t j = 0; j < 6; j++) {
                 rndis->eth_mac_addr[j] = data[j];
             }
-            break;
-        case OID_802_3_PERMANENT_ADDRESS:
-            ret = usbh_rndis_query_msg_request(rndis, OID_802_3_PERMANENT_ADDRESS, 0, data, sizeof(data), &data_len);
-            ESP_GOTO_ON_ERROR(ret, query_errorout, TAG,);
-            break;
-        case OID_GEN_MAXIMUM_TOTAL_SIZE:
-            ret = usbh_rndis_query_msg_request(rndis, OID_GEN_MAXIMUM_TOTAL_SIZE, 0, data, sizeof(data), &data_len);
-            ESP_GOTO_ON_ERROR(ret, query_errorout, TAG,);
             break;
         default:
             ESP_LOGD(TAG, "Ignore rndis query iod:%08x", oid);
@@ -504,10 +478,10 @@ static void _usbh_rndis_recv_data_cb(usbh_cdc_port_handle_t cdc_port_handle, voi
     size_t rx_length = 0;
     const size_t head_len = sizeof(rndis_data_packet_t);
     while (1) {
-        if (rndis->rx_pending_data_len == 0) {
+        if (!rndis->rx_header_pending) {
             // read the header first
             usbh_cdc_get_rx_buffer_size(cdc_port_handle, &rx_length);
-            if (rx_length <= head_len) {
+            if (rx_length < head_len) {
                 return; // wait for the full packet to be received
             }
             rx_length = head_len;
@@ -520,32 +494,70 @@ static void _usbh_rndis_recv_data_cb(usbh_cdc_port_handle_t cdc_port_handle, voi
                 return; // Not a RNDIS data packet, ignore
             }
         } else {
-            pmsg.DataLength = rndis->rx_pending_data_len;
-            rndis->rx_pending_data_len = 0;
+            pmsg = rndis->rx_pending_header;
+            rndis->rx_header_pending = false;
         }
-        // check if the full packet is received
+
+        // DataOffset is relative to the RequestId field at byte 8, not to the
+        // beginning of the RNDIS message. Consume the complete MessageLength,
+        // including optional per-packet information and alignment padding, so
+        // the next callback always starts at a real RNDIS header.
+        const size_t payload_offset = sizeof(rndis_generic_msg_t) + pmsg.DataOffset;
+        if (pmsg.MessageLength < head_len || payload_offset < head_len ||
+            payload_offset > pmsg.MessageLength ||
+            pmsg.DataLength > pmsg.MessageLength - payload_offset ||
+            (rndis->max_transfer_size != 0 &&
+             pmsg.MessageLength > rndis->max_transfer_size)) {
+            ESP_LOGE(TAG,
+                     "Invalid RNDIS packet layout message=%"PRIu32" offset=%"PRIu32
+                     " data=%"PRIu32" max=%"PRIu32,
+                     pmsg.MessageLength, pmsg.DataOffset, pmsg.DataLength,
+                     rndis->max_transfer_size);
+            usbh_cdc_flush_rx_buffer(cdc_port_handle);
+            return;
+        }
+        const size_t remaining_len = pmsg.MessageLength - head_len;
         usbh_cdc_get_rx_buffer_size(cdc_port_handle, &rx_length);
-        if (rx_length >= pmsg.DataLength) { // if the ring buffer has enough data for the full packet
-            uint8_t *data = malloc(pmsg.DataLength);
-            ESP_RETURN_VOID_ON_FALSE(data != NULL, TAG, "Failed to allocate memory for data buffer");
-            size_t data_len = pmsg.DataLength;
-            ESP_GOTO_ON_ERROR(usbh_cdc_read_bytes(cdc_port_handle, data, &data_len, pdMS_TO_TICKS(10)), err, TAG, "Failed to read data from RNDIS (%s)", esp_err_to_name(ret));
-            assert(data_len == pmsg.DataLength);
+        if (rx_length >= remaining_len) {
+            uint8_t *message = malloc(remaining_len);
+            ESP_RETURN_VOID_ON_FALSE(message != NULL, TAG, "Failed to allocate memory for RNDIS message");
+            size_t read_len = remaining_len;
+            ESP_GOTO_ON_ERROR(usbh_cdc_read_bytes(cdc_port_handle, message, &read_len,
+                                                   pdMS_TO_TICKS(10)),
+                              err, TAG, "Failed to read data from RNDIS (%s)",
+                              esp_err_to_name(ret));
+            assert(read_len == remaining_len);
+            const size_t prefix_len = payload_offset - head_len;
+            if (prefix_len != 0 || remaining_len != pmsg.DataLength) {
+                if (!rndis->rx_extended_layout_logged) {
+                    ESP_LOGI(TAG,
+                             "RNDIS extended RX layout: message=%"PRIu32
+                             " offset=%"PRIu32" data=%"PRIu32" ppi=%"PRIu32,
+                             pmsg.MessageLength, pmsg.DataOffset, pmsg.DataLength,
+                             pmsg.PerPacketInfoLength);
+                    rndis->rx_extended_layout_logged = true;
+                }
+                memmove(message, message + prefix_len, pmsg.DataLength);
+            }
             if (rndis->mediator->stack_input_info) {
                 // USB RNDIS currently has no extra RX frame metadata to forward.
-                rndis->mediator->stack_input_info(rndis->mediator, data, data_len, NULL);
+                rndis->mediator->stack_input_info(rndis->mediator, message,
+                                                   pmsg.DataLength, NULL);
             } else if (rndis->mediator->stack_input) {
-                rndis->mediator->stack_input(rndis->mediator, data, data_len);
+                rndis->mediator->stack_input(rndis->mediator, message,
+                                              pmsg.DataLength);
             } else {
                 ESP_LOGE(TAG, "No stack input callback registered, drop RX packet");
-                free(data);
+                free(message);
             }
             continue;
 err:
-            free(data);
+            free(message);
         } else {
-            rndis->rx_pending_data_len = pmsg.DataLength; // indicate that the full packet is not received yet. next loop will read the rest of the data
-            ESP_LOGD(TAG, "Not enough data rx_length: %d, pmsg.DataLength: %lu\n", rx_length, pmsg.DataLength);
+            rndis->rx_pending_header = pmsg;
+            rndis->rx_header_pending = true;
+            ESP_LOGD(TAG, "Incomplete RNDIS message buffered=%u need=%u",
+                     (unsigned)rx_length, (unsigned)remaining_len);
             break; // Not enough data in the ring buffer, wait for more data
         }
     }
@@ -620,7 +632,8 @@ static void _usbh_rndis_dev_event_cb(usbh_cdc_device_event_t event, usbh_cdc_dev
         if (rndis->cdc_dev_addr == event_data->dev_gone.dev_addr) {
             rndis->cdc_dev_addr = 0;
             rndis->connect_status = false;
-            rndis->rx_pending_data_len = 0;
+            rndis->rx_header_pending = false;
+            rndis->rx_extended_layout_logged = false;
             rndis->cdc_port = NULL;
             xEventGroupSetBits(rndis->event_group, RNDIS_DISCONNECTED);
             ESP_LOGI(TAG, "RNDIS disconnected");

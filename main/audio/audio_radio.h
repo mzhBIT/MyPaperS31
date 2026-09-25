@@ -26,6 +26,9 @@ typedef enum {
 esp_err_t audio_radio_init(void);
 esp_err_t audio_radio_play(const char *url);
 esp_err_t audio_radio_play_file(const char *path);
+// Use the board speaker for transient sounds without changing the saved output mode.
+// Call only while the audio player is idle/stopped; restore after audio_radio_deinit().
+void audio_radio_force_speaker(bool force);
 esp_err_t audio_radio_play_default(void);
 esp_err_t audio_radio_stop(void);
 esp_err_t audio_radio_pause(void);

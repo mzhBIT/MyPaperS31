@@ -42,6 +42,10 @@ public:
     bool read_section_to_string(const std::string &href, std::string *out) const;
     bool resolve_filepos_footnote(uint64_t position, std::string *out) const;
     std::string normalize_resource_href(const std::string &href) const;
+    bool read_resource_prefix(const std::string &href, std::vector<uint8_t> *out,
+                              size_t max_bytes) const;
+    bool read_resource_to_memory(const std::string &href, std::vector<uint8_t> *out,
+                                 uint32_t max_size) const;
     bool extract_resource_to_file(const std::string &href, const std::string &out_path) const;
 
 private:

@@ -44,6 +44,10 @@ static bool s_c6_powered_on;
 static bool s_connect_handlers_registered;
 static bool s_stopping;
 static bool s_connected;
+// Network workers may use PSRAM-backed stacks. They must never enter NVS,
+// because an NVS flash read temporarily disables the external-memory cache.
+// Keep the frequently queried preference in internal .data instead.
+static volatile wifi_setting_network_mode_t s_network_mode = WIFI_SETTING_NETWORK_WIFI;
 static int s_retry_num;
 static char s_connected_ssid[33];
 static esp_netif_t *s_sta_netif;
@@ -115,18 +119,38 @@ static esp_err_t wifi_setting_init_nvs(void)
     return ret;
 }
 
-wifi_setting_network_mode_t wifi_setting_get_network_mode(void)
+esp_err_t wifi_setting_load_network_mode(void)
 {
     uint8_t stored = WIFI_SETTING_NETWORK_WIFI;
-    if (wifi_setting_init_nvs() != ESP_OK) return WIFI_SETTING_NETWORK_WIFI;
+    ESP_RETURN_ON_ERROR(wifi_setting_init_nvs(), TAG,
+                        "Failed to initialize NVS for network preference");
+
     nvs_handle_t handle = 0;
-    if (nvs_open(WIFI_SETTING_NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
-        (void)nvs_get_u8(handle, WIFI_SETTING_NVS_NETWORK_KEY, &stored);
+    esp_err_t ret = nvs_open(WIFI_SETTING_NVS_NAMESPACE, NVS_READONLY, &handle);
+    if (ret == ESP_OK) {
+        ret = nvs_get_u8(handle, WIFI_SETTING_NVS_NETWORK_KEY, &stored);
         nvs_close(handle);
+        if (ret == ESP_ERR_NVS_NOT_FOUND) {
+            ret = ESP_OK;
+            stored = WIFI_SETTING_NETWORK_WIFI;
+        }
+    } else if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        ret = ESP_OK;
+        stored = WIFI_SETTING_NETWORK_WIFI;
     }
-    return stored == WIFI_SETTING_NETWORK_CELLULAR
-               ? WIFI_SETTING_NETWORK_CELLULAR
-               : WIFI_SETTING_NETWORK_WIFI;
+
+    ESP_RETURN_ON_ERROR(ret, TAG, "Failed to load network preference");
+    s_network_mode = stored == WIFI_SETTING_NETWORK_CELLULAR
+                         ? WIFI_SETTING_NETWORK_CELLULAR
+                         : WIFI_SETTING_NETWORK_WIFI;
+    ESP_LOGI(TAG, "Network preference loaded: %s",
+             s_network_mode == WIFI_SETTING_NETWORK_CELLULAR ? "4G" : "Wi-Fi");
+    return ESP_OK;
+}
+
+wifi_setting_network_mode_t wifi_setting_get_network_mode(void)
+{
+    return s_network_mode;
 }
 
 esp_err_t wifi_setting_set_network_mode(wifi_setting_network_mode_t mode)
@@ -142,6 +166,10 @@ esp_err_t wifi_setting_set_network_mode(wifi_setting_network_mode_t mode)
     if (ret == ESP_OK) ret = nvs_commit(handle);
     nvs_close(handle);
     if (ret != ESP_OK) return ret;
+
+    // Publish the new value only after it has been persisted successfully.
+    // This is an aligned word-sized store and readers never enter NVS.
+    s_network_mode = mode;
 
     ESP_LOGI(TAG, "Network preference saved: %s",
              mode == WIFI_SETTING_NETWORK_CELLULAR ? "4G" : "Wi-Fi");

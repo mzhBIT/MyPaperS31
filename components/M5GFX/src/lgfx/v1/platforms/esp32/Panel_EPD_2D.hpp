@@ -30,6 +30,11 @@ namespace lgfx
     bool writeNativeGrayscale4(const uint8_t* logical_frame,
                                uint16_t logical_width,
                                uint16_t logical_height) override;
+    bool writeNativeGrayscale4Rect(const uint8_t* logical_frame,
+                                   uint16_t logical_width,
+                                   uint16_t logical_height,
+                                   int16_t logical_x,
+                                   int16_t logical_y) override;
 
     void waveform(const EpdWaveform* value) { _waveform = value; }
     const EpdWaveform* waveform(void) const { return _waveform; }

@@ -559,3 +559,73 @@ bool Fb2Book::extract_resource_to_file(const std::string &href, const std::strin
     if (!ok) std::remove(out_path.c_str());
     return ok;
 }
+
+bool Fb2Book::decode_resource(const std::string &href,
+                              std::vector<uint8_t> *out,
+                              size_t max_bytes,
+                              bool allow_prefix) const
+{
+    if (!out || max_bytes == 0) return false;
+    out->clear();
+    const BinaryItem *item = nullptr;
+    for (const auto &candidate : _binaries) {
+        if (candidate.href == href) { item = &candidate; break; }
+    }
+    if (!item) return false;
+
+    FILE *input = std::fopen(_path.c_str(), "rb");
+    if (!input || std::fseek(input, static_cast<long>(item->start), SEEK_SET) != 0) {
+        if (input) std::fclose(input);
+        return false;
+    }
+
+    out->reserve(std::min<size_t>(max_bytes, 128 * 1024));
+    uint32_t accumulator = 0;
+    int bits = 0;
+    bool ok = true;
+    bool complete = false;
+    uint64_t remaining = item->end - item->start;
+    uint8_t buffer[2048];
+    while (remaining && ok && !complete) {
+        const size_t take = static_cast<size_t>(std::min<uint64_t>(remaining, sizeof(buffer)));
+        const size_t count = std::fread(buffer, 1, take, input);
+        if (count != take) { ok = false; break; }
+        remaining -= count;
+        for (size_t i = 0; i < count; ++i) {
+            const unsigned char c = buffer[i];
+            if (std::isspace(c)) continue;
+            if (c == '=') { complete = true; break; }
+            const int value = base64_value(c);
+            if (value < 0) { ok = false; break; }
+            accumulator = (accumulator << 6) | static_cast<uint32_t>(value);
+            bits += 6;
+            if (bits >= 8) {
+                bits -= 8;
+                if (out->size() >= max_bytes) {
+                    complete = allow_prefix;
+                    ok = allow_prefix;
+                    break;
+                }
+                out->push_back(static_cast<uint8_t>((accumulator >> bits) & 0xff));
+            }
+        }
+    }
+    std::fclose(input);
+    if (!allow_prefix && remaining != 0 && !complete) ok = false;
+    if (!ok || out->empty()) out->clear();
+    return ok && !out->empty();
+}
+
+bool Fb2Book::read_resource_prefix(const std::string &href,
+                                   std::vector<uint8_t> *out,
+                                   size_t max_bytes) const
+{
+    return decode_resource(href, out, max_bytes, true);
+}
+
+bool Fb2Book::read_resource_to_memory(const std::string &href,
+                                      std::vector<uint8_t> *out,
+                                      uint32_t max_size) const
+{
+    return decode_resource(href, out, max_size, false);
+}

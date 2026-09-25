@@ -1338,6 +1338,71 @@ namespace lgfx
     return true;
   }
 
+  bool Panel_EPD_2D::writeNativeGrayscale4Rect(const uint8_t* logical_frame,
+                                               uint16_t logical_width,
+                                               uint16_t logical_height,
+                                               int16_t logical_x,
+                                               int16_t logical_y)
+  {
+    if (logical_frame == nullptr || _buf == nullptr ||
+        logical_width == 0 || logical_height == 0 ||
+        logical_x < 0 || logical_y < 0 ||
+        logical_x + logical_width > width() ||
+        logical_y + logical_height > height()) {
+      return false;
+    }
+
+    const int64_t t0 = esp_timer_get_time();
+    const size_t src_stride = (size_t(logical_width) + 1) >> 1;
+    const size_t dst_stride = size_t(_cfg.panel_width) >> 1;
+    const uint_fast8_t r = _internal_rotation;
+
+    auto read_src = [&](uint16_t x, uint16_t y) -> uint8_t {
+      const uint8_t packed = logical_frame[size_t(y) * src_stride + (x >> 1)];
+      return (x & 1) ? (packed & 0x0F) : (packed >> 4);
+    };
+
+    // Reader images normally use rotation 3 and even dimensions. Copy two
+    // logical scanlines into one physical packed-nibble column at a time.
+    if (r == 3 && (logical_y & 1) == 0 && (logical_height & 1) == 0) {
+      for (uint16_t sy = 0; sy < logical_height; sy += 2) {
+        uint8_t* dst_col = _buf + ((logical_y + sy) >> 1);
+        for (uint16_t sx = 0; sx < logical_width; ++sx) {
+          const uint8_t high = read_src(sx, sy);
+          const uint8_t low = read_src(sx, sy + 1);
+          const size_t physical_y = _cfg.panel_height - 1 - (logical_x + sx);
+          dst_col[physical_y * dst_stride] = uint8_t((high << 4) | low);
+        }
+      }
+    } else {
+      for (uint16_t sy = 0; sy < logical_height; ++sy) {
+        for (uint16_t sx = 0; sx < logical_width; ++sx) {
+          uint_fast16_t px = logical_x + sx;
+          uint_fast16_t py = logical_y + sy;
+          _rotate_pos(px, py);
+          uint8_t* dst = _buf + size_t(py) * dst_stride + (px >> 1);
+          const uint8_t value = read_src(sx, sy);
+          if (px & 1) *dst = (*dst & 0xF0) | value;
+          else        *dst = (*dst & 0x0F) | (value << 4);
+        }
+      }
+    }
+
+    // The reader currently submits a full logical page after the import. Mark
+    // the full panel dirty so this native copy participates in that batch even
+    // though it bypasses the ordinary M5GFX pixel writers.
+    _range_mod.left = 0;
+    _range_mod.top = 0;
+    _range_mod.right = _cfg.panel_width - 1;
+    _range_mod.bottom = _cfg.panel_height - 1;
+    ESP_LOGI(TAG_2D,
+             "native 4bpp rect import: src=%ux%u dst=%d,%d rotation=%u time=%lld ms",
+             (unsigned)logical_width, (unsigned)logical_height,
+             (int)logical_x, (int)logical_y, (unsigned)r,
+             (esp_timer_get_time() - t0) / 1000);
+    return true;
+  }
+
   void Panel_EPD_2D::display(uint_fast16_t x, uint_fast16_t y,
                              uint_fast16_t w, uint_fast16_t h)
   {

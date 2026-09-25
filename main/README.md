@@ -31,7 +31,9 @@
 - `ReaderSettingsActivity`
   - 字体、刷新模式、字号、行距、首行缩进、段间距、边距和图片开关。
 - `SettingActivity`
-  - Wi-Fi 扫描、虚拟键盘、连接验证与 NVS 默认凭据管理。
+  - Wi-Fi/4G 网络选择、前光、API 密钥、EPD 诊断，以及电话和短信共用的时间基准。
+- `SmsActivity` / `PhoneActivity`
+  - ML307A 短信对话、电话控制、通话记录与铃声选择。
 - `MusicActivity`
   - 本地音乐扫描、列表、播放控制、进度、音量和同步歌词。
 - `RadioActivity`
@@ -57,6 +59,8 @@
   - Espressif GMF/simple player 管线。
   - 本地文件与 HLS 播放。
   - I²S/ES8311 输出格式切换、音量、播放状态和时间统计。
+- `phone_ringtone.*`
+  - 来电铃声的选择、播放和短音频循环。
 - `audio_file_formats.*`
   - 应用统一支持的音频扩展名。
 - `embedded_cover.*`
@@ -103,6 +107,8 @@
 
 - `storage/app_paths.*`
   - `/sdcard/.reader` 下的统一数据路径。
+- `modem/ml307_sms.*` / `time/time_basis.*`
+  - ML307A AT 短信与电话控制、模组时钟解析及 NVS 时间基准。
 - `activities/recent_books.*`
   - 最近阅读列表、标题、类型和封面路径。
 - `ui/reader_style.*`

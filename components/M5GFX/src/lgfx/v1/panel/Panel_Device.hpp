@@ -148,6 +148,8 @@ namespace lgfx
     bool dmaBusy(void) override;
     void display(uint_fast16_t x, uint_fast16_t y, uint_fast16_t w, uint_fast16_t h) override;
     virtual bool writeNativeGrayscale4(const uint8_t*, uint16_t, uint16_t) { return false; }
+    virtual bool writeNativeGrayscale4Rect(const uint8_t*, uint16_t, uint16_t,
+                                           int16_t, int16_t) { return false; }
 
     void writeCommand(uint32_t data, uint_fast8_t length) override;
     void writeData(uint32_t data, uint_fast8_t length) override;

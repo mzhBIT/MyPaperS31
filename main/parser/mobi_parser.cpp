@@ -1417,3 +1417,44 @@ bool MobiBook::extract_resource_to_file(const std::string &href, const std::stri
     if (!ok) std::remove(out_path.c_str());
     return ok;
 }
+
+bool MobiBook::read_resource_prefix(const std::string &href,
+                                    std::vector<uint8_t> *out,
+                                    size_t max_bytes) const
+{
+    if (!out || !_file || max_bytes == 0) return false;
+    out->clear();
+    size_t slash = href.find_last_of('/');
+    size_t start = slash == std::string::npos ? 0 : slash + 1;
+    char *end = nullptr;
+    unsigned long resource_index = std::strtoul(href.c_str() + start, &end, 10);
+    if (resource_index == 0 || end == href.c_str() + start ||
+        _first_image_record == 0xffffffffu) return false;
+    size_t record_index = static_cast<size_t>(_first_image_record) + resource_index - 1;
+    if (record_index >= _records.size()) return false;
+    const Record &record = _records[record_index];
+    const size_t count = std::min<size_t>(record.size, max_bytes);
+    if (count == 0 || std::fseek(_file, static_cast<long>(record.offset), SEEK_SET) != 0) return false;
+    out->resize(count);
+    if (std::fread(out->data(), 1, count, _file) != count) {
+        out->clear();
+        return false;
+    }
+    return true;
+}
+
+bool MobiBook::read_resource_to_memory(const std::string &href,
+                                       std::vector<uint8_t> *out,
+                                       uint32_t max_size) const
+{
+    if (!out) return false;
+    size_t slash = href.find_last_of('/');
+    size_t start = slash == std::string::npos ? 0 : slash + 1;
+    char *end = nullptr;
+    unsigned long resource_index = std::strtoul(href.c_str() + start, &end, 10);
+    if (resource_index == 0 || end == href.c_str() + start ||
+        _first_image_record == 0xffffffffu) return false;
+    size_t record_index = static_cast<size_t>(_first_image_record) + resource_index - 1;
+    if (record_index >= _records.size() || _records[record_index].size > max_size) return false;
+    return read_record(record_index, out);
+}

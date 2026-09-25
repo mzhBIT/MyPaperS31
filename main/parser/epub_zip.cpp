@@ -482,39 +482,75 @@ bool EpubZip::read_entry_prefix(const std::string &name,
         return ok;
     }
 
-    std::vector<uint8_t> compressed;
-    if (ok && entry.method == 8) {
-        compressed.resize(entry.compressed_size);
-        ok = entry.compressed_size == 0 ||
-             std::fread(compressed.data(), 1, compressed.size(), fp) == compressed.size();
-    } else if (ok) {
-        ok = false;
+    if (!ok || entry.method != 8) {
+        std::fclose(fp);
+        return false;
     }
-    std::fclose(fp);
-    if (!ok) return false;
 
+    // A JPEG/PNG header probe only needs the beginning of the uncompressed
+    // entry. Do not read the complete compressed image first: for the comic
+    // workload that made a 128 KiB header probe cost almost as much as loading
+    // the full image, then the image stage read the same ZIP entry again.
+    constexpr size_t INPUT_CHUNK = 32 * 1024;
+    std::vector<uint8_t> input(std::min<size_t>(INPUT_CHUNK,
+                                                entry.compressed_size));
     out->resize(wanted);
     InflaterPtr inflater = allocate_inflater();
-    if (!inflater) {
-        ESP_LOGE(TAG, "no memory for ZIP inflater (%u bytes)",
-                 (unsigned)sizeof(lgfx_tinfl_decompressor));
+    if (input.empty() || !inflater) {
+        if (!inflater) {
+            ESP_LOGE(TAG, "no memory for ZIP inflater (%u bytes)",
+                     (unsigned)sizeof(lgfx_tinfl_decompressor));
+        }
+        std::fclose(fp);
         out->clear();
         return false;
     }
+
     lgfx_tinfl_init(inflater.get());
-    size_t input_size = compressed.size();
-    size_t output_size = wanted;
-    const lgfx_tinfl_status status = lgfx_tinfl_decompress(
-        inflater.get(),
-        compressed.data(), &input_size,
-        out->data(), out->data(), &output_size,
-        TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
-    if (status != TINFL_STATUS_DONE && status != TINFL_STATUS_HAS_MORE_OUTPUT) {
+    size_t compressed_remaining = entry.compressed_size;
+    size_t input_available = 0;
+    size_t input_offset = 0;
+    size_t output_offset = 0;
+    lgfx_tinfl_status status = TINFL_STATUS_NEEDS_MORE_INPUT;
+    while (output_offset < wanted) {
+        if (input_available == 0) {
+            const size_t count = std::min(input.size(), compressed_remaining);
+            if (count == 0 || std::fread(input.data(), 1, count, fp) != count) {
+                status = TINFL_STATUS_FAILED;
+                break;
+            }
+            compressed_remaining -= count;
+            input_available = count;
+            input_offset = 0;
+        }
+
+        size_t input_size = input_available;
+        size_t output_size = wanted - output_offset;
+        const uint32_t flags = TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF |
+                               (compressed_remaining ? TINFL_FLAG_HAS_MORE_INPUT : 0);
+        status = lgfx_tinfl_decompress(inflater.get(),
+                                       input.data() + input_offset, &input_size,
+                                       out->data(), out->data() + output_offset,
+                                       &output_size, flags);
+        input_available -= input_size;
+        input_offset += input_size;
+        output_offset += output_size;
+
+        if (output_offset >= wanted || status == TINFL_STATUS_DONE ||
+            status == TINFL_STATUS_HAS_MORE_OUTPUT) {
+            break;
+        }
+        if (status != TINFL_STATUS_NEEDS_MORE_INPUT) break;
+    }
+    std::fclose(fp);
+
+    if (output_offset != wanted ||
+        (status != TINFL_STATUS_DONE && status != TINFL_STATUS_HAS_MORE_OUTPUT)) {
         out->clear();
         return false;
     }
-    out->resize(output_size);
-    return !out->empty();
+    out->resize(output_offset);
+    return true;
 }
 
 bool EpubZip::read_entry_to_memory(const std::string &name,
