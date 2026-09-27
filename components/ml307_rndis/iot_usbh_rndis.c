@@ -35,6 +35,8 @@ static const char *TAG = "usbh_rndis";
 #define RNDIS_CONTROL_RETRY_COUNT 10
 #define RNDIS_CONTROL_RETRY_DELAY_MS 40
 #define RNDIS_RESPONSE_DATA_OFFSET_BASE 8
+#define RNDIS_INIT_RETRIES 3
+#define RNDIS_INIT_RETRY_DELAY_MS 500
 
 #if CONFIG_USBH_CDC_CONTROL_TRANSFER_BUFFER_SIZE < RNDIS_CONTROL_BUFFER_SIZE
 #error "CONFIG_USBH_CDC_CONTROL_TRANSFER_BUFFER_SIZE must be at least RNDIS_CONTROL_BUFFER_SIZE for RNDIS control responses"
@@ -119,9 +121,16 @@ static esp_err_t usbh_rndis_recv_ctrl_response(usbh_rndis_t *rndis, uint32_t exp
 
     // Linux polls the control channel directly after SEND_ENCAPSULATED_COMMAND; notifications are only used to wake async response handling.
     for (int retry = 0; retry < RNDIS_CONTROL_RETRY_COUNT; retry++) {
+        if (rndis->cdc_dev_addr == 0 || rndis->cdc_port == NULL) {
+            return ESP_ERR_NOT_FOUND;
+        }
         memset(data, 0, data_len);
         esp_err_t ret = usbh_cdc_send_custom_request(rndis->cdc_port, req_type, CDC_REQ_GET_ENCAPSULATED_RESPONSE, 0, 0, data_len, data);
         if (ret != ESP_OK) {
+            if (rndis->cdc_dev_addr == 0 || rndis->cdc_port == NULL ||
+                ret == ESP_ERR_INVALID_ARG || ret == ESP_ERR_INVALID_STATE) {
+                return ret;
+            }
             ESP_LOGD(TAG, "RNDIS response read retry %d failed: %s", retry, esp_err_to_name(ret));
             vTaskDelay(pdMS_TO_TICKS(RNDIS_CONTROL_RETRY_DELAY_MS));
             continue;
@@ -656,11 +665,26 @@ static void _usbh_rndis_task(void *arg)
                 ESP_LOGI(TAG, "RNDIS device enumerated; control negotiation deferred");
                 continue;
             }
-            ret = usbh_rndis_connect(rndis);
-            if (ret == ESP_OK) {
-                ESP_LOGI(TAG, "RNDIS connected success");
-            } else {
-                ESP_LOGE(TAG, "RNDIS connected failed, please reconnect");
+            for (unsigned attempt = 0; attempt <= RNDIS_INIT_RETRIES; ++attempt) {
+                if (rndis->cdc_dev_addr == 0 || rndis->cdc_port == NULL) break;
+                ret = usbh_rndis_connect(rndis);
+                if (ret == ESP_OK) {
+                    ESP_LOGI(TAG, "RNDIS connected success (attempt %u/%u)",
+                             attempt + 1, RNDIS_INIT_RETRIES + 1);
+                    break;
+                }
+                if (rndis->cdc_dev_addr == 0 || rndis->cdc_port == NULL) {
+                    ESP_LOGW(TAG, "RNDIS device disconnected during initialization");
+                    break;
+                }
+                if (attempt == RNDIS_INIT_RETRIES) {
+                    ESP_LOGE(TAG, "RNDIS initialization failed after %u attempts; waiting for a new USB device",
+                             RNDIS_INIT_RETRIES + 1);
+                    break;
+                }
+                ESP_LOGW(TAG, "RNDIS initialization attempt %u/%u failed: %s; retrying",
+                         attempt + 1, RNDIS_INIT_RETRIES + 1, esp_err_to_name(ret));
+                vTaskDelay(pdMS_TO_TICKS(RNDIS_INIT_RETRY_DELAY_MS));
             }
         }
         if (events & RNDIS_DISCONNECTED) {
@@ -804,6 +828,13 @@ esp_err_t iot_usbh_rndis_set_connection_enabled(iot_eth_driver_t *rndis_drv,
     }
     ESP_LOGI(TAG, "RNDIS control negotiation %s", enabled ? "enabled" : "deferred");
     return ESP_OK;
+}
+
+uint8_t iot_usbh_rndis_get_device_address(const iot_eth_driver_t *rndis_drv)
+{
+    if (rndis_drv == NULL) return 0;
+    const usbh_rndis_t *rndis = __containerof(rndis_drv, usbh_rndis_t, base);
+    return rndis->cdc_dev_addr;
 }
 
 usbh_cdc_port_handle_t usb_rndis_get_cdc_port_handle(const iot_eth_driver_t *rndis_drv)

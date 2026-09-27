@@ -13,6 +13,7 @@
 #include "time/time_basis.h"
 #include "ui/SystemFont.h"
 #include "ui/VirtualKeyboard.h"
+#include "ui/home_preferences.h"
 #include "wifi/wifi_setting.h"
 #include "zhihu/ZhihuClient.h"
 #include "zhihu/ZhihuConfig.h"
@@ -33,10 +34,10 @@ namespace {
 
 constexpr int HEADER_H = 76;
 constexpr int PAD = 20;
-constexpr int SETTINGS_ROW_Y = 106;
-constexpr int SETTINGS_ROW_H = 112;
-constexpr int SETTINGS_ROW_GAP = 10;
-constexpr int SETTINGS_ITEM_COUNT = 9;
+constexpr int SETTINGS_ROW_Y = 94;
+constexpr int SETTINGS_ROW_H = 110;
+constexpr int SETTINGS_ROW_GAP = 0;
+constexpr int SETTINGS_ITEM_COUNT = 10;
 
 constexpr int SCAN_TOP = 94;
 constexpr int SCAN_ROW_H = 92;
@@ -1383,27 +1384,42 @@ private:
         else if (_focus == 5) ActivityManager::instance().push(new MapSettingsActivity());
         else if (_focus == 6) launch_epd_diagnostics();
         else if (_focus == 7) ActivityManager::instance().push(new RssCacheSettingsActivity());
-        else ActivityManager::instance().push(new TimeBasisSettingsActivity());
+        else if (_focus == 8) ActivityManager::instance().push(new TimeBasisSettingsActivity());
+        else {
+            const bool enabled = !home_icon_frames_enabled();
+            const esp_err_t result = home_set_icon_frames_enabled(enabled);
+            if (result != ESP_OK) {
+                ESP_LOGW(TAG, "save home icon frame preference failed: %s",
+                         esp_err_to_name(result));
+            }
+            draw(false);
+        }
     }
 
-    void draw_item(int index, const char *title, const std::string &detail)
+    void draw_item(int index, const char *title, const std::string &detail,
+                   bool navigable = true)
     {
         const int width = M5.Display.width();
         const int top = SETTINGS_ROW_Y + index * (SETTINGS_ROW_H + SETTINGS_ROW_GAP);
         const bool selected = index == _focus;
-        const uint16_t background = selected ? TFT_BLACK : TFT_WHITE;
-        const uint16_t foreground = selected ? TFT_WHITE : TFT_BLACK;
-        M5.Display.fillRoundRect(PAD, top, width - PAD * 2,
-                                 SETTINGS_ROW_H, 8, background);
-        M5.Display.drawRoundRect(PAD, top, width - PAD * 2,
-                                 SETTINGS_ROW_H, 8, TFT_BLACK);
+        if (index == 0) {
+            M5.Display.drawFastHLine(PAD, top, width - PAD * 2, TFT_BLACK);
+        }
+        M5.Display.drawFastHLine(PAD, top + SETTINGS_ROW_H - 1,
+                                width - PAD * 2, TFT_BLACK);
+        if (selected) {
+            M5.Display.fillRect(PAD + 2, top + 16, 5,
+                                SETTINGS_ROW_H - 32, TFT_BLACK);
+        }
         system_font::draw_left(M5.Display, title, PAD + 18,
-                               top + 10, foreground);
+                               top + 10, TFT_BLACK);
         system_font::draw_left(M5.Display,
                                system_font::ellipsize(detail, width - PAD * 2 - 80),
-                               PAD + 18, top + 62, foreground);
-        system_font::draw_right(M5.Display, ">", width - PAD - 20,
-                                top + 36, foreground);
+                               PAD + 18, top + 62, TFT_BLACK);
+        if (navigable) {
+            system_font::draw_right(M5.Display, ">", width - PAD - 20,
+                                    top + 36, TFT_BLACK);
+        }
     }
 
     void draw(bool quality)
@@ -1446,6 +1462,8 @@ private:
                       format_cache_bytes(rss_cache.bytes).c_str());
         draw_item(7, "Clear RSS Cache", rss_detail);
         draw_item(8, "Time Basis", time_basis_label());
+        draw_item(9, "Home Icon Frames",
+                  home_icon_frames_enabled() ? "On" : "Off", false);
         M5.Display.display();
         M5.Display.endWrite();
     }

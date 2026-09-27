@@ -129,13 +129,88 @@
 #define MYPAPER_EPD_2D_LINE_STREAM 0
 #endif
 
-// Experimental GC16-only balance correction.  The supplied 0->0 sequence
-// first drives white for 18 frames but returns black for only 17, which leaves
-// a light outline inside a black target.  Reuse idle phases immediately before
-// the final idle frame for black compensation; DU and all other transitions
-// remain byte-for-byte unchanged.  Set to 0 to restore the official table.
+// GC16 0->0 A/B adjustment: turn the last six white-drive phases (22..27)
+// into black drive. This keeps 48 phases and changes white18/black17 to
+// white12/black23 without touching other transitions or the 36-phase test.
+#ifndef MYPAPER_EPD_2D_GC16_00_REBALANCE
+#define MYPAPER_EPD_2D_GC16_00_REBALANCE 1
+#endif
+
+// GC16 0->1 A/B adjustment: turn white-drive phases 21..26 into black drive.
+// Keep the original final white phase 44 and all other transitions intact.
+#ifndef MYPAPER_EPD_2D_GC16_01_REBALANCE
+#define MYPAPER_EPD_2D_GC16_01_REBALANCE 1
+#endif
+
+// GC16 0->2 A/B adjustment: turn white-drive phases 22..24 into black drive.
+// Preserve the original alternating tail and all other transitions.
+#ifndef MYPAPER_EPD_2D_GC16_02_REBALANCE
+#define MYPAPER_EPD_2D_GC16_02_REBALANCE 1
+#endif
+
+// GC16 0->3 A/B adjustment: turn white-drive phase 24 into black drive.
+// Preserve the remaining phases and all other transitions.
+#ifndef MYPAPER_EPD_2D_GC16_03_REBALANCE
+#define MYPAPER_EPD_2D_GC16_03_REBALANCE 1
+#endif
+
+// GC16 0->4 A/B adjustment: turn white-drive phase 23 into black drive.
+// Preserve the remaining phases and all other transitions.
+#ifndef MYPAPER_EPD_2D_GC16_04_REBALANCE
+#define MYPAPER_EPD_2D_GC16_04_REBALANCE 1
+#endif
+
+// GC16 0->7 A/B adjustment: turn black-drive phases 23..25 into white drive.
+// Preserve the remaining phases and all other transitions.
+#ifndef MYPAPER_EPD_2D_GC16_07_REBALANCE
+#define MYPAPER_EPD_2D_GC16_07_REBALANCE 1
+#endif
+
+// GC16 0->8 A/B adjustment: turn black-drive phases 23..24 into white drive.
+// Preserve the remaining phases and all other transitions.
+#ifndef MYPAPER_EPD_2D_GC16_08_REBALANCE
+#define MYPAPER_EPD_2D_GC16_08_REBALANCE 1
+#endif
+
+// GC16 0->9 A/B adjustment: turn black-drive phases 23..24 into white drive.
+// Preserve the remaining phases and all other transitions.
+#ifndef MYPAPER_EPD_2D_GC16_09_REBALANCE
+#define MYPAPER_EPD_2D_GC16_09_REBALANCE 1
+#endif
+
+// GC16 0->10 A/B adjustment: turn black-drive phases 21..22 into white drive.
+// Preserve the remaining phases and all other transitions.
+#ifndef MYPAPER_EPD_2D_GC16_0A_REBALANCE
+#define MYPAPER_EPD_2D_GC16_0A_REBALANCE 1
+#endif
+
+// GC16 0->11 A/B adjustment: turn black-drive phases 19..20 into white drive.
+// Preserve the remaining phases and all other transitions.
+#ifndef MYPAPER_EPD_2D_GC16_0B_REBALANCE
+#define MYPAPER_EPD_2D_GC16_0B_REBALANCE 1
+#endif
+
+// GC16 0->12 A/B adjustment: turn black-drive phases 21..22 into white drive.
+// Preserve the remaining phases and all other transitions.
+#ifndef MYPAPER_EPD_2D_GC16_0C_REBALANCE
+#define MYPAPER_EPD_2D_GC16_0C_REBALANCE 1
+#endif
+
+// GC16 0->13 A/B adjustment: turn black-drive phases 19..20 into white drive.
+#ifndef MYPAPER_EPD_2D_GC16_0D_REBALANCE
+#define MYPAPER_EPD_2D_GC16_0D_REBALANCE 1
+#endif
+
+// GC16 0->14 A/B adjustment: turn black-drive phase 18 into white drive.
+#ifndef MYPAPER_EPD_2D_GC16_0E_REBALANCE
+#define MYPAPER_EPD_2D_GC16_0E_REBALANCE 1
+#endif
+
+// Separate, older experiment: reuse final idle phases for more black drive.
+// Leave at 0 to keep the final three idle phases; this does not disable the
+// white-to-black rebalance above.
 #ifndef MYPAPER_EPD_2D_GC16_00_BLACK_COMP_FRAMES
-#define MYPAPER_EPD_2D_GC16_00_BLACK_COMP_FRAMES 2
+#define MYPAPER_EPD_2D_GC16_00_BLACK_COMP_FRAMES 0
 #endif
 
 // E0470A01/ED047TC2-1216 timing: a 20 MHz source clock and 320 PCLKs per row

@@ -3,6 +3,7 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "ui/SystemFont.h"
+#include "waveforms/my_waveform.h"
 
 #include <M5Unified.h>
 #include <esp_log.h>
@@ -19,9 +20,9 @@ namespace {
 constexpr int HEADER_H = 76;
 constexpr int PAD = 20;
 constexpr int MENU_TOP = 108;
-constexpr int MENU_ROW_H = 84;
-constexpr int MENU_ROW_GAP = 8;
-constexpr int MENU_COUNT = 11;
+constexpr int MENU_ROW_H = 70;
+constexpr int MENU_ROW_GAP = 4;
+constexpr int MENU_COUNT = 13;
 
 const char *TAG = "EPD_DIAG";
 
@@ -35,6 +36,8 @@ const char *MENU_LABELS[MENU_COUNT] = {
     "Text / DU4 four-gray",
     "Fastest / A2 binary",
     "Quality timing A/B (20 / 16 us)",
+    "Quality GC16 A/B (48 / 36 phases)",
+    "Quality black hold (white -> black -> black)",
     "DU4 neutral-mask partial",
     "VCOM measurement",
 };
@@ -148,9 +151,22 @@ public:
             draw_ghost_target();
             return true;
         }
+        if (_view == View::Text4GrayBase) {
+            draw_text_four_gray_target();
+            return true;
+        }
         if (_view == View::QualityTimingAB) {
             _timing_line_us = (_timing_line_us == 20u) ? 16u : 20u;
             draw_quality_timing_ab();
+            return true;
+        }
+        if (_view == View::QualityWaveformAB) {
+            _quality_36 = !_quality_36;
+            draw_quality_waveform_ab();
+            return true;
+        }
+        if (_view == View::BlackHoldWhite || _view == View::BlackHoldBlack) {
+            draw_black_hold_black();
             return true;
         }
         if (_view == View::NeutralMaskSource || _view == View::NeutralMaskTarget) {
@@ -191,9 +207,23 @@ public:
             draw_ghost_target();
             return true;
         }
+        if (_view == View::Text4GrayBase && key == APP_KEY_OK) {
+            draw_text_four_gray_target();
+            return true;
+        }
         if (_view == View::QualityTimingAB && key == APP_KEY_OK) {
             _timing_line_us = (_timing_line_us == 20u) ? 16u : 20u;
             draw_quality_timing_ab();
+            return true;
+        }
+        if (_view == View::QualityWaveformAB && key == APP_KEY_OK) {
+            _quality_36 = !_quality_36;
+            draw_quality_waveform_ab();
+            return true;
+        }
+        if ((_view == View::BlackHoldWhite || _view == View::BlackHoldBlack)
+         && key == APP_KEY_OK) {
+            draw_black_hold_black();
             return true;
         }
         if ((_view == View::NeutralMaskSource || _view == View::NeutralMaskTarget)
@@ -217,9 +247,13 @@ private:
         MatrixTarget,
         GhostSource,
         GhostTarget,
+        Text4GrayBase,
         Text4Gray,
         A2Binary,
         QualityTimingAB,
+        QualityWaveformAB,
+        BlackHoldWhite,
+        BlackHoldBlack,
         NeutralMaskSource,
         NeutralMaskTarget,
         Vcom,
@@ -229,6 +263,8 @@ private:
     int _focus = 0;
     bool _neutral_mask_dark = true;
     uint32_t _timing_line_us = MYPAPER_EPD_2D_LINE_PERIOD_US;
+    bool _quality_36 = false;
+    unsigned _black_hold_refreshes = 0;
 
     void restore_default_timing()
     {
@@ -296,11 +332,13 @@ private:
             case 3: draw_grayscale_from(0, "BLACK -> 16 gray / tap to return"); break;
             case 4: draw_matrix_old(); break;
             case 5: draw_ghost_source(); break;
-            case 6: draw_text_four_gray(); break;
+            case 6: draw_text_four_gray_base(); break;
             case 7: draw_a2_binary(); break;
             case 8: draw_quality_timing_ab(); break;
-            case 9: draw_neutral_mask_source(); break;
-            case 10: run_vcom_measurement(); break;
+            case 9: _quality_36 = false; draw_quality_waveform_ab(); break;
+            case 10: draw_black_hold_white(); break;
+            case 11: draw_neutral_mask_source(); break;
+            case 12: run_vcom_measurement(); break;
             default: break;
         }
     }
@@ -392,7 +430,33 @@ private:
         ESP_LOGI(TAG, "neutral-mask: partial DU4 complete; inspect outer reference");
     }
 
-    void draw_text_four_gray()
+    void draw_text_four_gray_base()
+    {
+        _view = View::Text4GrayBase;
+        const int width = M5.Display.width();
+        const int height = M5.Display.height();
+        constexpr int header_h = 96;
+        constexpr int footer_h = 116;
+        const int pattern_top = header_h;
+        const int pattern_bottom = height - footer_h;
+        const int split_y = pattern_top + (pattern_bottom - pattern_top) / 2;
+
+        // Pause after GC16 so its residual image can be inspected separately
+        // from the subsequent DU4 transition.
+        ESP_LOGI(TAG, "text four-gray: establish black/white split Quality begin");
+        begin_draw(epd_mode_t::epd_quality);
+        M5.Display.fillScreen(TFT_WHITE);
+        M5.Display.fillRect(0, pattern_top, width, split_y - pattern_top,
+                            TFT_BLACK);
+        system_font::draw_left(M5.Display, "Quality base: top BLACK", 12, 18,
+                               TFT_BLACK);
+        draw_center_fit("Inspect both halves before DU4", pattern_bottom + 16);
+        draw_center_fit("Tap or OK to show four gray levels", pattern_bottom + 58);
+        finish_draw();
+        ESP_LOGI(TAG, "text four-gray: Quality base complete; waiting for DU4 tap");
+    }
+
+    void draw_text_four_gray_target()
     {
         _view = View::Text4Gray;
         const int width = M5.Display.width();
@@ -402,18 +466,6 @@ private:
         const int pattern_top = header_h;
         const int pattern_bottom = height - footer_h;
         const int pattern_h = pattern_bottom - pattern_top;
-        const int split_y = pattern_top + pattern_h / 2;
-
-        // Establish two deliberately different physical starting states with
-        // GC16.  The following DU4 result must converge to identical shades
-        // above and below the center line.
-        ESP_LOGI(TAG, "text four-gray: establish white/black split Quality begin");
-        begin_draw(epd_mode_t::epd_quality);
-        M5.Display.fillScreen(TFT_WHITE);
-        M5.Display.fillRect(0, split_y, width, height - split_y,
-                            TFT_BLACK);
-        finish_draw();
-        ESP_LOGI(TAG, "text four-gray: base split complete");
 
         begin_draw(epd_mode_t::epd_text);
         M5.Display.fillScreen(TFT_WHITE);
@@ -434,7 +486,7 @@ private:
         system_font::draw_right(M5.Display, "15 WHITE", width - 12, 18,
                                 TFT_BLACK);
         draw_center_fit("Text / DU4: four columns should be uniform", pattern_bottom + 16);
-        draw_center_fit("No seam between white-start and black-start halves", pattern_bottom + 58);
+        draw_center_fit("Top starts black; bottom starts white", pattern_bottom + 58);
         ESP_LOGI(TAG, "text four-gray: epd_text refresh begin");
         finish_draw();
         ESP_LOGI(TAG, "text four-gray: complete");
@@ -545,6 +597,124 @@ private:
         finish_draw();
         ESP_LOGI(TAG, "timing A/B: complete line=%lu us", (unsigned long)actual);
 
+    }
+
+    void draw_quality_waveform_ab()
+    {
+#if MYPAPER_EPD_USE_2D_ENGINE
+        auto* panel = static_cast<lgfx::Panel_EPD_2D*>(M5.Display.panel());
+        const EpdWaveform* trimmed = my_waveform_gc16_36();
+        if (panel == nullptr || trimmed == nullptr) {
+            ESP_LOGE(TAG, "GC16 A/B: 36-phase table unavailable");
+            draw_menu(false);
+            return;
+        }
+        _view = View::QualityWaveformAB;
+        const EpdWaveform* original = panel->waveform();
+        const int width = M5.Display.width();
+        const int height = M5.Display.height();
+        constexpr int top = 96;
+        constexpr int footer_h = 116;
+        const int bottom = height - footer_h;
+        const int black_bottom = top + (bottom - top) * 2 / 5;
+        const int gray_bottom = top + (bottom - top) * 7 / 10;
+
+        // Identical physical source for A and B. Always prepare it with the
+        // normal 48-phase table; only the target refresh varies.
+        panel->waveform(original);
+        begin_draw(epd_mode_t::epd_quality);
+        M5.Display.fillScreen(TFT_WHITE);
+        finish_draw();
+        begin_draw(epd_mode_t::epd_quality);
+        M5.Display.fillScreen(TFT_WHITE);
+        for (int x = 0; x < width; x += 48) {
+            M5.Display.fillRect(x, top, std::min(24, width - x),
+                                bottom - top, TFT_BLACK);
+        }
+        finish_draw();
+
+        const int phases = _quality_36 ? 36 : 48;
+        ESP_LOGI(TAG, "GC16 A/B: target begin phases=%d line=%lu us",
+                 phases,
+                 (unsigned long)lgfx::epd2d_continuous_scan_get_line_period_us());
+        panel->waveform(_quality_36 ? trimmed : original);
+        begin_draw(epd_mode_t::epd_quality);
+        M5.Display.fillScreen(TFT_WHITE);
+        M5.Display.fillRect(0, top, width, black_bottom - top, TFT_BLACK);
+        for (int level = 0; level < 16; ++level) {
+            const int x0 = level * width / 16;
+            const int x1 = (level + 1) * width / 16;
+            M5.Display.fillRect(x0, black_bottom, x1 - x0,
+                                gray_bottom - black_bottom, gray_color(level));
+            char label[4] = {};
+            snprintf(label, sizeof(label), "%d", level);
+            system_font::draw_center(M5.Display, label, (x0 + x1) / 2,
+                                     black_bottom + 12,
+                                     level < 7 ? TFT_WHITE : TFT_BLACK);
+        }
+        char title[48] = {};
+        snprintf(title, sizeof(title), "Quality GC16: %d phases", phases);
+        draw_header(title);
+        draw_center_fit("BLACK / 16 grays / WHITE: inspect old stripes",
+                        bottom + 16);
+        draw_center_fit("Tap for the other waveform", bottom + 58);
+        finish_draw();
+        panel->waveform(original);
+        ESP_LOGI(TAG, "GC16 A/B: target complete phases=%d", phases);
+#else
+        draw_menu(false);
+#endif
+    }
+
+    void draw_black_hold_white()
+    {
+        _view = View::BlackHoldWhite;
+        _black_hold_refreshes = 0;
+        const int width = M5.Display.width();
+        const int height = M5.Display.height();
+        constexpr int footer_h = 116;
+        const int bottom = height - footer_h;
+
+        ESP_LOGI(TAG, "black hold: Quality white baseline begin");
+        begin_draw(epd_mode_t::epd_quality);
+        M5.Display.fillScreen(TFT_WHITE);
+        draw_header("Quality black hold: WHITE baseline");
+        M5.Display.drawFastHLine(0, bottom, width, TFT_BLACK);
+        draw_center_fit("Inspect WHITE field; tap for first BLACK", bottom + 16);
+        draw_center_fit("Then tap repeatedly without changing BLACK", bottom + 58);
+        finish_draw();
+        ESP_LOGI(TAG, "black hold: Quality white baseline complete; waiting for tap");
+    }
+
+    void draw_black_hold_black()
+    {
+        const bool first_black = _view == View::BlackHoldWhite;
+        _view = View::BlackHoldBlack;
+        ++_black_hold_refreshes;
+        const int width = M5.Display.width();
+        const int height = M5.Display.height();
+        constexpr int top = 96;
+        constexpr int footer_h = 116;
+        const int bottom = height - footer_h;
+
+        ESP_LOGI(TAG, "black hold: Quality %s begin refresh=%u",
+                 first_black ? "white->black" : "black->black",
+                 _black_hold_refreshes);
+        begin_draw(epd_mode_t::epd_quality);
+        M5.Display.fillScreen(TFT_WHITE);
+        M5.Display.fillRect(0, top, width, bottom - top, TFT_BLACK);
+        draw_header("Quality black hold: BLACK target");
+        M5.Display.drawFastHLine(0, bottom, width, TFT_BLACK);
+        char caption[80] = {};
+        snprintf(caption, sizeof(caption), "BLACK refresh #%u: %s",
+                 _black_hold_refreshes,
+                 first_black ? "from WHITE" : "from BLACK");
+        draw_center_fit(caption, bottom + 16);
+        draw_center_fit("Compare darkness; tap to repeat BLACK", bottom + 58);
+        finish_draw();
+        ESP_LOGI(TAG, "black hold: Quality %s complete refresh=%u",
+                 first_black ? "white->black" : "black->black",
+                 _black_hold_refreshes);
     }
 
     void draw_direction_pattern()

@@ -920,6 +920,8 @@ static void host_task(void *arg)
         ESP_LOGE(TAG, "ML307A RNDIS startup failed: %s", esp_err_to_name(ret));
     }
     int64_t sms_retry_not_before_us = 0;
+    unsigned sms_enable_failures = 0;
+    bool sms_enable_issued = false;
     while (true) {
         uint32_t flags = 0;
         ret = usb_host_lib_handle_events(pdMS_TO_TICKS(20), &flags);
@@ -928,22 +930,40 @@ static void host_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(50));
         }
         const int64_t now = esp_timer_get_time();
+        const uint8_t current_address = iot_usbh_rndis_get_device_address(s_rndis_driver);
+        if (current_address != s_modem_address) {
+            s_modem_address = current_address;
+            sms_enable_issued = false;
+            sms_enable_failures = 0;
+            sms_retry_not_before_us = 0;
+            if (current_address != 0) {
+                ESP_LOGI(TAG, "ML307A enumerated at USB address %u; initialization attempts reset",
+                         current_address);
+            }
+        }
         const EventBits_t bits = xEventGroupGetBits(s_events);
-        const bool rndis_ready = (bits & PROBE_RNDIS_LINK_BIT) != 0 &&
+        const bool rndis_ready = current_address != 0 &&
+            (bits & PROBE_RNDIS_LINK_BIT) != 0 &&
             s_sms_enable_not_before_us != 0 && now >= s_sms_enable_not_before_us;
-        const bool voice_fallback = !rndis_ready && s_modem_address != 0 &&
+        const bool voice_fallback = !rndis_ready && current_address != 0 &&
             now - rndis_start_us >= AT_VOICE_FALLBACK_DELAY_US;
-        if ((rndis_ready || voice_fallback) && !ml307_sms_is_ready() &&
-            now >= sms_retry_not_before_us) {
-            if (voice_fallback && sms_retry_not_before_us == 0) {
+        if ((rndis_ready || voice_fallback) && !sms_enable_issued &&
+            sms_enable_failures <= 3 && now >= sms_retry_not_before_us) {
+            if (voice_fallback && sms_enable_failures == 0) {
                 ESP_LOGW(TAG, "RNDIS not connected after 8 s; enabling independent voice/SMS AT port");
             }
-            ret = ml307_sms_transport_enable(s_modem_address);
+            ret = ml307_sms_transport_enable(current_address);
             if (ret == ESP_OK) {
                 ESP_LOGI(TAG, "ML307A SMS transport enabled after RNDIS negotiation");
+                sms_enable_issued = true;
+            } else if (ret == ESP_ERR_NOT_FINISHED) {
+                ESP_LOGI(TAG, "ML307A SMS transport initialization scheduled");
+                sms_enable_issued = true;
             } else {
-                ESP_LOGW(TAG, "ML307A SMS transport enable failed: %s; retrying",
-                         esp_err_to_name(ret));
+                ++sms_enable_failures;
+                ESP_LOGW(TAG, "ML307A SMS transport request failed (%u/4): %s%s",
+                         sms_enable_failures, esp_err_to_name(ret),
+                         sms_enable_failures > 3 ? "; stopping until reconnect" : "; retrying");
                 sms_retry_not_before_us = esp_timer_get_time() + 2000000;
             }
         }

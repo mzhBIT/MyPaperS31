@@ -35,6 +35,7 @@ constexpr EventBits_t PORT_EVENT = BIT1;
 constexpr EventBits_t TX_EVENT = BIT2;
 constexpr EventBits_t CLIENT_EVENT = BIT3;
 constexpr size_t RX_CAPACITY = 16384;
+constexpr unsigned AT_PORT_OPEN_RETRIES = 3;
 
 SemaphoreHandle_t s_command_mutex;
 SemaphoreHandle_t s_rx_mutex;
@@ -49,6 +50,7 @@ bool s_initialized;
 bool s_task_started;
 volatile uint8_t s_device_address;
 volatile bool s_enable_requested;
+std::atomic_uint s_open_attempts{0};
 volatile bool s_interface_claimed;
 volatile bool s_device_gone;
 volatile bool s_rx_in_flight;
@@ -497,6 +499,8 @@ void client_event(const usb_host_client_event_msg_t *event, void *)
     if (event->event == USB_HOST_CLIENT_EVENT_DEV_GONE &&
                event->dev_gone.dev_hdl == s_device) {
         s_device_gone = true;
+        s_enable_requested = false;
+        s_device_address = 0;
         s_sms_configured = false;
         s_at_ready = false;
         xEventGroupClearBits(s_events, PORT_EVENT);
@@ -524,7 +528,6 @@ void close_native_port()
     }
     s_device = nullptr;
     s_device_gone = false;
-    s_device_address = 0;
     s_sms_configured = false;
     s_at_ready = false;
     xEventGroupClearBits(s_events, PORT_EVENT);
@@ -578,11 +581,7 @@ esp_err_t open_native_port(uint8_t device_address)
 
 fail:
     ESP_LOGE(TAG, "open native SMS AT port failed: %s", esp_err_to_name(error));
-    const bool was_gone = s_device_gone;
     close_native_port();
-    // Preserve the enumerated address for a later claim retry.  It is only
-    // cleared by an actual DEV_GONE event.
-    if (!was_gone) s_device_address = device_address;
     return error;
 }
 
@@ -621,7 +620,21 @@ void transport_task(void *)
         if (s_enable_requested && !s_device && s_device_address != 0) {
             const uint8_t address = s_device_address;
             const esp_err_t open_error = open_native_port(address);
-            if (open_error != ESP_OK) vTaskDelay(pdMS_TO_TICKS(250));
+            if (open_error == ESP_OK) {
+                s_open_attempts.store(0, std::memory_order_relaxed);
+            } else if (s_enable_requested && s_device_address == address) {
+                const unsigned attempt = s_open_attempts.fetch_add(
+                    1, std::memory_order_relaxed) + 1;
+                if (attempt > AT_PORT_OPEN_RETRIES) {
+                    s_enable_requested = false;
+                    ESP_LOGE(TAG, "native AT port failed after %u attempts; waiting for a new USB device",
+                             attempt);
+                } else {
+                    ESP_LOGW(TAG, "native AT port attempt %u/%u failed: %s; retrying",
+                             attempt, AT_PORT_OPEN_RETRIES + 1, esp_err_to_name(open_error));
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                }
+            }
         }
     }
 }
@@ -817,6 +830,9 @@ extern "C" esp_err_t ml307_sms_transport_enable(uint8_t device_address)
     if (!s_initialized) return ESP_ERR_INVALID_STATE;
     if (ml307_sms_is_ready()) return ESP_OK;
     if (device_address == 0) return ESP_ERR_INVALID_ARG;
+    if (!s_enable_requested || s_device_address != device_address) {
+        s_open_attempts.store(0, std::memory_order_relaxed);
+    }
     s_device_address = device_address;
     s_enable_requested = true;
     if (!s_task_started) {
@@ -825,6 +841,7 @@ extern "C" esp_err_t ml307_sms_transport_enable(uint8_t device_address)
             transport_task, "ml307_sms_usb", 4096, nullptr, 9, nullptr, 0);
         if (created != pdPASS) {
             s_task_started = false;
+            s_enable_requested = false;
             return ESP_ERR_NO_MEM;
         }
     }

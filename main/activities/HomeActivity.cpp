@@ -17,6 +17,7 @@
 #include "renderer/P4JpegDecoder.h"
 #include "renderer/TurboJpegDecoder.h"
 #include "ui/home_icons_1bpp.h"
+#include "ui/home_preferences.h"
 #include "ui/SystemFont.h"
 #include <M5Unified.h>
 #include <algorithm>
@@ -43,7 +44,7 @@ static const int COVER_H  = 260;
 static const int ROW_H    = 80;
 static const int ROW_GAP  = 8;
 static const int SIDE_PAD = 20;
-static const int MENU_CNT = 9;
+static const int MENU_CNT = 12;
 static const int HOME_PAGE_CNT = 2;
 static const int HOME_DESIGN_W = 684;
 static const int HOME_DESIGN_H = 1216;
@@ -76,11 +77,14 @@ static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
         {"Music",    go_music},
         {"Radio",    go_radio},
         {"Setting",  go_settings},
+        {"Map",      go_map},
+        {"DeepSeek", go_deepseek},
+        {"WeRead",   go_weread},
     },
     {
-        {"DeepSeek", go_deepseek},
-        {"WeRead", go_weread}, {"ZhiHu", go_zhihu},
-        {"Map", go_map}, {"Messages", go_sms}, {"Phone", go_phone},
+        {"ZhiHu", go_zhihu}, {"Messages", go_sms}, {"Phone", go_phone},
+        {nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
+        {nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
         {nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
     },
 };
@@ -106,17 +110,20 @@ static const HomeIconId g_icons[HOME_PAGE_CNT][MENU_CNT] = {
         HomeIconId::Music,
         HomeIconId::Radio,
         HomeIconId::Setting,
+        HomeIconId::Map,
+        HomeIconId::DeepSeek,
+        HomeIconId::WeChatReading,
     },
     {
-        HomeIconId::DeepSeek,
-        HomeIconId::WeChatReading, HomeIconId::ZhiHu,
-        HomeIconId::Map, HomeIconId::Messages, HomeIconId::Phone,
+        HomeIconId::ZhiHu, HomeIconId::Messages, HomeIconId::Phone,
+        HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
+        HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
         HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
     },
 };
 
 static const int g_tile_x[3] = {52, 268, 484};
-static const int g_tile_y[3] = {158, 533, 908};
+static const int g_tile_y[4] = {110, 385, 660, 935};
 
 static std::string ellipsize_bytes(const std::string &s, size_t max_bytes) {
     if (s.size() <= max_bytes) return s;
@@ -632,31 +639,40 @@ static bool bitmap_bit(const uint8_t *data, int x, int y) {
     return (data[offset] & (0x80 >> (x & 7))) != 0;
 }
 
-static void draw_tile_icon(HomeIconId icon, int x, int y, int size, uint16_t fg, uint16_t bg) {
+static void draw_tile_icon(HomeIconId icon, int x, int y, int size,
+                           uint16_t fg, uint16_t bg, bool show_frame) {
     const uint8_t *data = home_icon_1bpp_data(icon);
     if (!data) return;
     if (size == (int)HOME_ICON_1BPP_WIDTH) {
         M5.Display.drawBitmap(x, y, data, HOME_ICON_1BPP_WIDTH, HOME_ICON_1BPP_HEIGHT, fg, bg);
-        return;
+    } else {
+        for (int dy = 0; dy < size; ++dy) {
+            int src_y = dy * (int)HOME_ICON_1BPP_HEIGHT / size;
+            int run_x = 0;
+            bool run_black = bitmap_bit(data, 0, src_y);
+            for (int dx = 1; dx <= size; ++dx) {
+                int src_x = dx < size ? dx * (int)HOME_ICON_1BPP_WIDTH / size : (int)HOME_ICON_1BPP_WIDTH;
+                bool black = dx < size ? bitmap_bit(data, src_x, src_y) : !run_black;
+                if (dx == size || black != run_black) {
+                    M5.Display.fillRect(x + run_x, y + dy, dx - run_x, 1, run_black ? fg : bg);
+                    run_x = dx;
+                    run_black = black;
+                }
+            }
+        }
     }
 
-    for (int dy = 0; dy < size; ++dy) {
-        int src_y = dy * (int)HOME_ICON_1BPP_HEIGHT / size;
-        int run_x = 0;
-        bool run_black = bitmap_bit(data, 0, src_y);
-        for (int dx = 1; dx <= size; ++dx) {
-            int src_x = dx < size ? dx * (int)HOME_ICON_1BPP_WIDTH / size : (int)HOME_ICON_1BPP_WIDTH;
-            bool black = dx < size ? bitmap_bit(data, src_x, src_y) : !run_black;
-            if (dx == size || black != run_black) {
-                M5.Display.fillRect(x + run_x, y + dy, dx - run_x, 1, run_black ? fg : bg);
-                run_x = dx;
-                run_black = black;
-            }
+    if (show_frame) {
+        // The bitmap contains artwork only; draw the same frame for every icon.
+        const int frame_width = std::max(1, size * 3 / (int)HOME_ICON_1BPP_WIDTH);
+        for (int inset = 0; inset < frame_width; ++inset) {
+            M5.Display.drawRect(x + inset, y + inset,
+                                size - inset * 2, size - inset * 2, fg);
         }
     }
 }
 
-static void draw_menu_tile(int index) {
+static void draw_menu_tile(int index, bool show_frame) {
     if (index < 0 || index >= MENU_CNT) return;
     HomeTile tile = tile_at(index);
     if (!tile.item->label) return;
@@ -666,9 +682,9 @@ static void draw_menu_tile(int index) {
     int label_y = tile.y + tile.size + sy(20);
     int label_h = system_font::line_height() + 8;
 
-    M5.Display.fillRect(tile.x - 4, tile.y - 4,
-                        tile.size + 8, tile.size + label_h + sy(24), TFT_WHITE);
-    draw_tile_icon(tile.icon, tile.x, tile.y, tile.size, fg, bg);
+    M5.Display.fillRect(tile.x - 8, tile.y - 4,
+                        tile.size + 16, tile.size + label_h + sy(24), TFT_WHITE);
+    draw_tile_icon(tile.icon, tile.x, tile.y, tile.size, fg, bg, show_frame);
     M5.Display.fillRect(tile.x - 8, label_y - 2,
                         tile.size + 16, label_h, bg);
     draw_label_center(tile.item->label, tile.x + tile.size / 2,
@@ -676,8 +692,9 @@ static void draw_menu_tile(int index) {
 }
 
 static void draw_menu() {
+    const bool show_frame = home_icon_frames_enabled();
     for (int i = 0; i < MENU_CNT; i++) {
-        draw_menu_tile(i);
+        draw_menu_tile(i, show_frame);
     }
 }
 
@@ -726,7 +743,7 @@ public:
         for (int &focus : g_focus) focus = 0;
         M5.Display.startWrite();
         M5.Display.setDither(false);
-        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
         draw_home_page();
         M5.Display.display();
         M5.Display.endWrite();
@@ -740,7 +757,7 @@ public:
         }
         M5.Display.startWrite();
         M5.Display.setDither(false);
-        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
         draw_home_page();
         M5.Display.display();
         M5.Display.endWrite();
@@ -829,7 +846,7 @@ private:
         g_page = page;
         M5.Display.startWrite();
         M5.Display.setDither(false);
-        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
         draw_home_page();
         M5.Display.display();
         M5.Display.endWrite();

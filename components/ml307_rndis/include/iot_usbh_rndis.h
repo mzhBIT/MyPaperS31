@@ -48,6 +48,9 @@ esp_err_t iot_eth_new_usb_rndis(const iot_usbh_rndis_config_t *config, iot_eth_d
 esp_err_t iot_usbh_rndis_set_connection_enabled(iot_eth_driver_t *rndis_drv,
                                                 bool enabled);
 
+/** Return the currently enumerated USB address, or zero after disconnect. */
+uint8_t iot_usbh_rndis_get_device_address(const iot_eth_driver_t *rndis_drv);
+
 /**
  * @brief Get the CDC port handle of the RNDIS driver.
  *

@@ -177,14 +177,96 @@ namespace lgfx
     }
   }
 
-  static void apply_gc16_black_hold_compensation(
+  static void apply_gc16_transition_adjustments(
       uint8_t* transition, uint8_t waveform_type,
       int phase, int phase_count)
   {
-#if MYPAPER_EPD_2D_GC16_00_BLACK_COMP_FRAMES > 0
-    if (waveform_type != WAVEFORM_MODE_GC16 || phase_count < 2) {
+    // Keep the 36-phase diagnostic trim byte-for-byte intact.
+    if (waveform_type != WAVEFORM_MODE_GC16 || phase_count != 48) {
       return;
     }
+#if MYPAPER_EPD_2D_GC16_00_REBALANCE
+    // Original 0->0: idle 10, white 18, black 17, idle 3. Reassign the
+    // final six white phases: idle 10, white 12, black 23, idle 3.
+    if (phase >= 22 && phase <= 27) {
+      transition[0x00] = 1;
+    }
+#endif
+#if MYPAPER_EPD_2D_GC16_01_REBALANCE
+    // Original 0->1: idle 9, white 18, black 17, white 1, idle 3.
+    // Move the last six phases of its first white segment to black.
+    if (phase >= 21 && phase <= 26) {
+      transition[0x01] = 1;
+    }
+#endif
+#if MYPAPER_EPD_2D_GC16_02_REBALANCE
+    // Original 0->2: idle 6, white 19, black 17, white 1, black 1,
+    // white 1, idle 3. Move phases 22..24 to black; leave the tail intact.
+    if (phase >= 22 && phase <= 24) {
+      transition[0x02] = 1;
+    }
+#endif
+#if MYPAPER_EPD_2D_GC16_03_REBALANCE
+    // Original 0->3 phase 24 is the end of its first white-drive segment.
+    if (phase == 24) {
+      transition[0x03] = 1;
+    }
+#endif
+#if MYPAPER_EPD_2D_GC16_04_REBALANCE
+    // Original 0->4 phase 23 is the end of its first white-drive segment.
+    if (phase == 23) {
+      transition[0x04] = 1;
+    }
+#endif
+#if MYPAPER_EPD_2D_GC16_07_REBALANCE
+    // Original 0->7 phases 23..25 begin its first black-drive segment.
+    if (phase >= 23 && phase <= 25) {
+      transition[0x07] = 2;
+    }
+#endif
+#if MYPAPER_EPD_2D_GC16_08_REBALANCE
+    // Original 0->8 phases 23..24 begin its black-drive segment.
+    if (phase >= 23 && phase <= 24) {
+      transition[0x08] = 2;
+    }
+#endif
+#if MYPAPER_EPD_2D_GC16_09_REBALANCE
+    // Original 0->9 phases 23..24 begin its first black-drive segment.
+    if (phase >= 23 && phase <= 24) {
+      transition[0x09] = 2;
+    }
+#endif
+#if MYPAPER_EPD_2D_GC16_0A_REBALANCE
+    // Original 0->10 phases 21..23 begin its black-drive segment.
+    if (phase >= 21 && phase <= 23) {
+      transition[0x0A] = 2;
+    }
+#endif
+#if MYPAPER_EPD_2D_GC16_0B_REBALANCE
+    // Original 0->11 phases 19..22 begin its first black-drive segment.
+    if (phase >= 19 && phase <= 22) {
+      transition[0x0B] = 2;
+    }
+#endif
+#if MYPAPER_EPD_2D_GC16_0C_REBALANCE
+    // Original 0->12 phases 21..24 begin its black-drive segment.
+    if (phase >= 21 && phase <= 24) {
+      transition[0x0C] = 2;
+    }
+#endif
+#if MYPAPER_EPD_2D_GC16_0D_REBALANCE
+    // Original 0->13 phases 19..20 begin its first black-drive segment.
+    if (phase >= 19 && phase <= 20) {
+      transition[0x0D] = 2;
+    }
+#endif
+#if MYPAPER_EPD_2D_GC16_0E_REBALANCE
+    // Original 0->14 phase 18 begins its black-drive segment.
+    if (phase == 18) {
+      transition[0x0E] = 2;
+    }
+#endif
+#if MYPAPER_EPD_2D_GC16_00_BLACK_COMP_FRAMES > 0
     // Preserve the final phase as an all-idle settling frame.  Consume up to
     // the configured number of phases immediately before it.  Index 0x00 is
     // exactly old-gray 0 -> new-gray 0; drive value 1 is black-direction.
@@ -195,11 +277,6 @@ namespace lgfx
     if (phase >= first && phase < phase_count - 1) {
       transition[0x00] = 1;
     }
-#else
-    (void)transition;
-    (void)waveform_type;
-    (void)phase;
-    (void)phase_count;
 #endif
   }
 
@@ -313,7 +390,7 @@ namespace lgfx
     for (int phase = 0; phase < phases->phases; ++phase) {
       build_transition_lut(
           transition, phases->luts + size_t(phase) * 64);
-      apply_gc16_black_hold_compensation(
+      apply_gc16_transition_adjustments(
           transition, waveform_type, phase, phases->phases);
       for (size_t i = 0; i < 256; ++i) {
         driven[i] |= transition[i] != 0;
@@ -1568,8 +1645,100 @@ namespace lgfx
         ESP_LOGW(TAG_2D,
                  "phase_times present; fixed full-panel scan timing is used in this validation engine");
       }
+#if MYPAPER_EPD_2D_GC16_00_REBALANCE
+      if (selected.type == WAVEFORM_MODE_GC16
+       && selected.phases->phases == 48) {
+        ESP_LOGI(TAG_2D,
+                 "GC16 0->0 rebalance: phases=22..27 white=12 black=23 final_idle=3");
+      }
+#endif
+#if MYPAPER_EPD_2D_GC16_01_REBALANCE
+      if (selected.type == WAVEFORM_MODE_GC16
+       && selected.phases->phases == 48) {
+        ESP_LOGI(TAG_2D,
+                 "GC16 0->1 rebalance: phases=21..26 white=12 black=23 final_white=1 idle=3");
+      }
+#endif
+#if MYPAPER_EPD_2D_GC16_02_REBALANCE
+      if (selected.type == WAVEFORM_MODE_GC16
+       && selected.phases->phases == 48) {
+        ESP_LOGI(TAG_2D,
+                 "GC16 0->2 rebalance: phases=22..24 white=18 black=21 tail=white/black/white");
+      }
+#endif
+#if MYPAPER_EPD_2D_GC16_03_REBALANCE
+      if (selected.type == WAVEFORM_MODE_GC16
+       && selected.phases->phases == 48) {
+        ESP_LOGI(TAG_2D,
+                 "GC16 0->3 rebalance: phase=24 white=19 black=18");
+      }
+#endif
+#if MYPAPER_EPD_2D_GC16_04_REBALANCE
+      if (selected.type == WAVEFORM_MODE_GC16
+       && selected.phases->phases == 48) {
+        ESP_LOGI(TAG_2D,
+                 "GC16 0->4 rebalance: phase=23 white=19 black=17");
+      }
+#endif
+#if MYPAPER_EPD_2D_GC16_07_REBALANCE
+      if (selected.type == WAVEFORM_MODE_GC16
+       && selected.phases->phases == 48) {
+        ESP_LOGI(TAG_2D,
+                 "GC16 0->7 rebalance: phases=23..25 white=26 black=15");
+      }
+#endif
+#if MYPAPER_EPD_2D_GC16_08_REBALANCE
+      if (selected.type == WAVEFORM_MODE_GC16
+       && selected.phases->phases == 48) {
+        ESP_LOGI(TAG_2D,
+                 "GC16 0->8 rebalance: phases=23..24 white=24 black=15");
+      }
+#endif
+#if MYPAPER_EPD_2D_GC16_09_REBALANCE
+      if (selected.type == WAVEFORM_MODE_GC16
+       && selected.phases->phases == 48) {
+        ESP_LOGI(TAG_2D,
+                 "GC16 0->9 rebalance: phases=23..24 white=24 black=14");
+      }
+#endif
+#if MYPAPER_EPD_2D_GC16_0A_REBALANCE
+      if (selected.type == WAVEFORM_MODE_GC16
+       && selected.phases->phases == 48) {
+        ESP_LOGI(TAG_2D,
+                 "GC16 0->10 rebalance: phases=21..22 white=25 black=15");
+      }
+#endif
+#if MYPAPER_EPD_2D_GC16_0B_REBALANCE
+      if (selected.type == WAVEFORM_MODE_GC16
+       && selected.phases->phases == 48) {
+        ESP_LOGI(TAG_2D,
+                 "GC16 0->11 rebalance: phases=19..20 white=26 black=15");
+      }
+#endif
+#if MYPAPER_EPD_2D_GC16_0C_REBALANCE
+      if (selected.type == WAVEFORM_MODE_GC16
+       && selected.phases->phases == 48) {
+        ESP_LOGI(TAG_2D,
+                 "GC16 0->12 rebalance: phases=21..22 white=27 black=15");
+      }
+#endif
+#if MYPAPER_EPD_2D_GC16_0D_REBALANCE
+      if (selected.type == WAVEFORM_MODE_GC16
+       && selected.phases->phases == 48) {
+        ESP_LOGI(TAG_2D,
+                 "GC16 0->13 rebalance: phases=19..20 white=28 black=15");
+      }
+#endif
+#if MYPAPER_EPD_2D_GC16_0E_REBALANCE
+      if (selected.type == WAVEFORM_MODE_GC16
+       && selected.phases->phases == 48) {
+        ESP_LOGI(TAG_2D,
+                 "GC16 0->14 rebalance: phase=18 white=29 black=16");
+      }
+#endif
 #if MYPAPER_EPD_2D_GC16_00_BLACK_COMP_FRAMES > 0
-      if (selected.type == WAVEFORM_MODE_GC16) {
+      if (selected.type == WAVEFORM_MODE_GC16
+       && selected.phases->phases == 48) {
         ESP_LOGI(TAG_2D,
                  "GC16 0->0 black compensation enabled: frames=%d final_idle=1",
                  MYPAPER_EPD_2D_GC16_00_BLACK_COMP_FRAMES);
@@ -1628,7 +1797,7 @@ namespace lgfx
               const uint8_t* phase_lut = selected.phases->luts
                                        + size_t(phase) * 64;
               build_transition_lut(transition, phase_lut);
-              apply_gc16_black_hold_compensation(
+              apply_gc16_transition_adjustments(
                   transition, selected.type, phase, phase_count);
 
               int match = -1;
@@ -1873,7 +2042,7 @@ namespace lgfx
             const uint8_t* phase_lut = selected.phases->luts
                                      + size_t(phase) * 64;
             build_transition_lut(transition, phase_lut);
-            apply_gc16_black_hold_compensation(
+            apply_gc16_transition_adjustments(
                 transition, selected.type, phase, phase_count);
             render_transition = transition;
           }
@@ -2058,7 +2227,7 @@ namespace lgfx
         {
         const uint8_t* phase_lut = selected.phases->luts + size_t(phase) * 64;
         build_transition_lut(transition, phase_lut);
-        apply_gc16_black_hold_compensation(
+        apply_gc16_transition_adjustments(
             transition, selected.type, phase, selected.phases->phases);
         phase_line_context_t line_context = {
           .physical = me->_physical_buf,
@@ -2149,7 +2318,7 @@ namespace lgfx
 #else
         const uint8_t* phase_lut = selected.phases->luts + size_t(phase) * 64;
         build_transition_lut(transition, phase_lut);
-        apply_gc16_black_hold_compensation(
+        apply_gc16_transition_adjustments(
             transition, selected.type, phase, selected.phases->phases);
         render_phase_frame(
             me->_scan_frame_2d, me->_scan_frame_bytes_2d,
@@ -2217,7 +2386,7 @@ namespace lgfx
       for (int phase = 0; phase < selected.phases->phases; ++phase) {
         const uint8_t* phase_lut = selected.phases->luts + size_t(phase) * 64;
         build_transition_lut(transition, phase_lut);
-        apply_gc16_black_hold_compensation(
+        apply_gc16_transition_adjustments(
             transition, selected.type, phase, selected.phases->phases);
         const int64_t phase_begin = esp_timer_get_time();
         auto render_row = [&](size_t y, uint8_t* dma, size_t dma_len) {

@@ -19,7 +19,7 @@
  * gray 5 = 111111210022000, gray 10 = 111110022222000.  Black/white endpoint
  * transitions retain the validated direct pulses. Transitions inside one
  * quantization bucket remain idle to prevent unchanged grays from walking,
- * except black->black which receives one consolidation pulse.
+ * except black->black which receives consolidation pulses.
  */
 
 #define MY_DU4_PHASE_COUNT 15
@@ -63,14 +63,16 @@ static void my_du4_init(void)
                     const uint8_t from_bucket = my_du4_bucket(from);
                     uint8_t drive = 0;
                     if (from_bucket == to_bucket) {
-                        // Improve black density, then retain the three idle
-                        // frames at the end of the official endpoint sequence.
-                        if (to_bucket == 0 && phase == 11) {
+                        // Reinforce black->black at phase indices 10 and 11.
+                        if (to_bucket == 0 && (phase == 10 || phase == 11)) {
                             drive = 1;
                         }
                     } else {
                         if (to_bucket == 1 || to_bucket == 2) {
                             drive = my_du4_middle_sequence[to_bucket - 1][phase];
+                            if (from_bucket == 0 && to_bucket == 1 && phase == 7) {
+                                drive = 2;
+                            }
                             // A white start retained slightly too much of its
                             // old state. Add black before the terminal white
                             // correction so the last pulse does not dominate.

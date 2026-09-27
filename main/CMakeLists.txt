@@ -36,6 +36,7 @@ set(srcs
     "ui/TextInputOverlay.cpp"
     "ui/icon_bitmap_1bpp.cpp"
     "ui/home_icons_1bpp.cpp"
+    "ui/home_preferences.cpp"
     "ui/music_icons_1bpp.cpp"
     "storage/app_paths.cpp"
     "storage/storage_sdcard.c"
