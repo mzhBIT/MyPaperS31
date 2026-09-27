@@ -27,6 +27,7 @@ set(srcs
     "weread/WereadContentSource.cpp"
     "ui/reader_font.cpp"
     "ui/reader_style.cpp"
+    "ui/script_conversion.cpp"
     "ui/reader_background.cpp"
     "ui/reader_book_cover.cpp"
     "ui/SystemFont.cpp"

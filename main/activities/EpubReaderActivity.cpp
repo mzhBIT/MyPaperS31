@@ -350,10 +350,13 @@ public:
         chapters.progress = overlay_progress;
         chapters.seek = overlay_seek_progress;
         _overlay.set_chapters(chapters);
+        _overlay.set_book_path(path);
 
         _ok = g_epub.open(path);
         _overlay.set_weread_mode(_ok && g_epub.is_weread());
         if (_ok) {
+            _script_mode = script_conversion::book_mode(path);
+            if (!script_conversion::prepare(_script_mode)) _script_mode = script_conversion::Mode::Original;
             if (g_epub.is_weread()) {
                 _annotation_result_queue = xQueueCreate(1, sizeof(AnnotationFetchResult *));
                 _annotation_done = xSemaphoreCreateBinary();
@@ -588,10 +591,13 @@ private:
         return current;
     }
 
-    static std::string overlay_chapter_title(void *, int index)
+    static std::string overlay_chapter_title(void *context, int index)
     {
         if (index < 0 || index >= g_epub.toc_count()) return std::string();
-        return g_epub.toc_item(index).title;
+        const auto &title = g_epub.toc_item(index).title;
+        auto *reader = static_cast<EpubReaderActivity *>(context);
+        return reader && reader->_script_mode != script_conversion::Mode::Original
+            ? script_conversion::convert(title, reader->_script_mode).text : title;
     }
 
     static int overlay_chapter_depth(void *, int index)
@@ -671,7 +677,14 @@ private:
         bool apply_layout = _overlay.settings_dirty();
         _overlay.close();
         if (apply_layout && _ok) {
+            if (_script_mode != _overlay.script_mode()) {
+                _footnote_cache.clear();
+                _missing_footnotes.clear();
+                invalidate_page_prefetch();
+            }
+            _script_mode = _overlay.script_mode();
             refresh_text_renderer();
+            _layout_sig = layout_signature();
             repaginate_current_spine();
             _overlay.clear_settings_dirty();
         }
@@ -750,6 +763,7 @@ private:
     };
 
     bool _ok = false;
+    script_conversion::Mode _script_mode = script_conversion::Mode::Original;
     bool _seen_show = false;
     int _spine_index = 0;
     int _page_index = 0;
@@ -862,6 +876,10 @@ private:
                  g_epub.spine_count(),
                  file_size);
         sig += buf;
+        sig += ";script=" + std::to_string(static_cast<int>(_script_mode));
+        if (_script_mode != script_conversion::Mode::Original) {
+            sig += ";dict=" + std::to_string(script_conversion::dictionary_signature());
+        }
         return hash32_string(sig);
     }
 
@@ -883,7 +901,8 @@ private:
         // more here; WereadApi applies its UTF-8 character limit on upload.
         for (const auto &item : _pages[static_cast<size_t>(_page_index)]) {
             if (item.type != PageItemType::Text || item.text.empty()) continue;
-            for (unsigned char c : item.text) {
+            const std::string &source = item.source_text.empty() ? item.text : item.source_text;
+            for (unsigned char c : source) {
                 if (c == '\r' || c == '\n' || c == '\t') {
                     if (!summary.empty() && summary.back() != ' ') summary.push_back(' ');
                 } else {
@@ -1710,6 +1729,12 @@ private:
 
         std::vector<document_layout::Block> document_blocks;
         document_blocks.reserve(blocks.size());
+        const int64_t prepare_start_us = esp_timer_get_time();
+        int64_t convert_us = 0;
+        int64_t range_map_us = 0;
+        size_t source_bytes = 0;
+        size_t display_bytes = 0;
+        size_t converted_blocks = 0;
         uint64_t content_position = 0;
         for (auto &block : blocks) {
             if (block.type == EpubContentBlockType::Image &&
@@ -1732,7 +1757,31 @@ private:
             } else {
                 output.type = document_layout::BlockType::Paragraph;
             }
-            output.text = std::move(block.text);
+            const size_t source_text_bytes = block.text.size();
+            if (!is_image && block.type == EpubContentBlockType::Text &&
+                _script_mode != script_conversion::Mode::Original) {
+                const int64_t convert_start_us = esp_timer_get_time();
+                script_conversion::Result converted = script_conversion::convert(block.text, _script_mode);
+                convert_us += esp_timer_get_time() - convert_start_us;
+                const int64_t map_start_us = esp_timer_get_time();
+                for (auto &ref : block.footnotes) {
+                    ref.byte_start = converted.display_offset(ref.byte_start);
+                    ref.byte_end = converted.display_offset(ref.byte_end);
+                }
+                for (auto &style : block.styles) {
+                    style.byte_start = converted.display_offset(style.byte_start);
+                    style.byte_end = converted.display_offset(style.byte_end);
+                }
+                range_map_us += esp_timer_get_time() - map_start_us;
+                source_bytes += source_text_bytes;
+                display_bytes += converted.text.size();
+                ++converted_blocks;
+                output.text = std::move(converted.text);
+                output.source_points = std::move(converted.points);
+                if (g_epub.is_weread()) output.source_text = block.text;
+            } else {
+                output.text = std::move(block.text);
+            }
             output.resource = std::move(block.href);
             output.content_position = content_position;
             output.image_width = block.image_width;
@@ -1751,11 +1800,13 @@ private:
                 output_ref.byte_start = ref.byte_start;
                 output_ref.byte_end = ref.byte_end;
                 output_ref.target = std::move(ref.target);
-                output_ref.content = std::move(ref.content);
+                output_ref.content = _script_mode == script_conversion::Mode::Original
+                    ? std::move(ref.content)
+                    : script_conversion::convert(ref.content, _script_mode).text;
                 output.footnotes.push_back(std::move(output_ref));
             }
             output.styles = std::move(block.styles);
-            size_t text_bytes = output.text.size();
+            size_t text_bytes = source_text_bytes;
             document_blocks.push_back(std::move(output));
 
             if (is_image) {
@@ -1795,7 +1846,17 @@ private:
             return true;
         };
         options.image_context = this;
+        const int64_t layout_start_us = esp_timer_get_time();
         *out_pages = document_layout::paginate(document_blocks, options);
+        if (_script_mode != script_conversion::Mode::Original) {
+            ESP_LOGI("SCRIPT_CONVERT",
+                     "reflow mode=%s blocks=%u bytes=%u->%u convert=%lld us range_map=%lld us block_prep=%lld us paginate=%lld us",
+                     script_conversion::mode_name(_script_mode),
+                     (unsigned)converted_blocks, (unsigned)source_bytes, (unsigned)display_bytes,
+                     convert_us, range_map_us,
+                     layout_start_us - prepare_start_us,
+                     esp_timer_get_time() - layout_start_us);
+        }
 
         for (const auto &page : *out_pages) {
             for (const auto &item : page) {
@@ -2260,6 +2321,9 @@ private:
             if (!is_annotation_ref(ref)) _missing_footnotes.insert(ref.target);
             ESP_LOGW(TAG, "footnote target unresolved: %s", ref.target.c_str());
             return false;
+        }
+        if (_script_mode != script_conversion::Mode::Original && !is_annotation_ref(ref)) {
+            *content = script_conversion::convert(*content, _script_mode).text;
         }
         _footnote_cache[ref.target] = *content;
         return true;

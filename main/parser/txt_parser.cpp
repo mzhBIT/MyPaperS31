@@ -232,6 +232,10 @@ uint32_t TxtBook::layout_signature() const
              _enc,
              (unsigned long)_file_size);
     sig += buf;
+    sig += ";script=" + std::to_string(static_cast<int>(_script_mode));
+    if (_script_mode != script_conversion::Mode::Original) {
+        sig += ";dict=" + std::to_string(script_conversion::dictionary_signature());
+    }
     return hash32_string(sig);
 }
 
@@ -272,6 +276,8 @@ bool TxtBook::open(const char *path)
     }
     fclose(fp);
 
+    _script_mode = script_conversion::book_mode(path);
+    if (!script_conversion::prepare(_script_mode)) _script_mode = script_conversion::Mode::Original;
     refresh_layout_settings();
     _layout_sig = layout_signature();
 
@@ -312,6 +318,7 @@ void TxtBook::close()
     _content_offset = 0;
     _layout_sig = 0;
     _enc = 0;
+    _script_mode = script_conversion::Mode::Original;
 }
 
 TxtPage TxtBook::read_page(uint32_t offset)
@@ -381,6 +388,10 @@ TxtPage TxtBook::read_page(uint32_t offset)
         used_height += height;
     };
     int64_t t0 = esp_timer_get_time();
+    int64_t script_convert_us = 0;
+    size_t script_source_bytes = 0;
+    size_t script_display_bytes = 0;
+    size_t script_paragraphs = 0;
 
     struct SourcePoint {
         size_t utf8_offset = 0;
@@ -415,11 +426,29 @@ TxtPage TxtBook::read_page(uint32_t offset)
             paragraph += cp_to_utf8(cp);
         }
 
-        auto source_offset_for = [&](size_t utf8_offset) -> uint32_t {
-            if (utf8_offset >= paragraph.size()) return after_paragraph;
+        const size_t original_paragraph_size = paragraph.size();
+        auto original_offset_for = [&](size_t utf8_offset) -> uint32_t {
+            if (utf8_offset >= original_paragraph_size) return after_paragraph;
             auto it = std::lower_bound(source_points.begin(), source_points.end(), utf8_offset,
                 [](const SourcePoint &point, size_t wanted) { return point.utf8_offset < wanted; });
             return it != source_points.end() ? it->file_offset : after_paragraph;
+        };
+
+        script_conversion::Result converted;
+        if (_script_mode != script_conversion::Mode::Original && !paragraph.empty()) {
+            const int64_t convert_start_us = esp_timer_get_time();
+            converted = script_conversion::convert(paragraph, _script_mode);
+            script_convert_us += esp_timer_get_time() - convert_start_us;
+            script_source_bytes += paragraph.size();
+            script_display_bytes += converted.text.size();
+            ++script_paragraphs;
+            paragraph = std::move(converted.text);
+        }
+        auto source_offset_for = [&](size_t utf8_offset) -> uint32_t {
+            if (_script_mode == script_conversion::Mode::Original || converted.points.empty()) {
+                return original_offset_for(utf8_offset);
+            }
+            return original_offset_for(converted.source_offset(utf8_offset));
         };
 
         if (paragraph.empty()) {
@@ -477,6 +506,13 @@ TxtPage TxtBook::read_page(uint32_t offset)
     page.eof = page.next_offset >= _file_size;
     fclose(fp);
     int64_t t1 = esp_timer_get_time();
+    if (_script_mode != script_conversion::Mode::Original) {
+        ESP_LOGI("SCRIPT_CONVERT",
+                 "txt mode=%s paragraphs=%u bytes=%u->%u convert=%lld us page_total=%lld us",
+                 script_conversion::mode_name(_script_mode),
+                 (unsigned)script_paragraphs, (unsigned)script_source_bytes,
+                 (unsigned)script_display_bytes, script_convert_us, t1 - t0);
+    }
     ESP_LOGI(TAG, "read_page offset=%lu next=%lu lines=%d eof=%d time=%lld ms",
              (unsigned long)page.start_offset,
              (unsigned long)page.next_offset,

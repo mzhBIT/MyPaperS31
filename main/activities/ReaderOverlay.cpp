@@ -27,7 +27,8 @@ const char *base_name(const char *path)
     return slash ? slash + 1 : path;
 }
 
-void setting_text(int index, std::string *name, std::string *value)
+void setting_text(int index, script_conversion::Mode script_mode, bool script_failed,
+                  std::string *name, std::string *value)
 {
     ReaderStyle style = reader_style_get();
     char buf[64] = {};
@@ -65,6 +66,10 @@ void setting_text(int index, std::string *name, std::string *value)
         *name = "Right margin";
         snprintf(buf, sizeof(buf), "%d", style.margin_right);
         *value = buf;
+        break;
+    case 7:
+        *name = "Script";
+        *value = script_failed ? "Dict missing" : script_conversion::mode_name(script_mode);
         break;
     default:
         name->clear();
@@ -153,6 +158,14 @@ void ReaderOverlay::set_weread_mode(bool enabled)
 {
     m_weread_mode = enabled;
     m_setting_focus = std::max(0, std::min(active_setting_count() - 1, m_setting_focus));
+}
+
+void ReaderOverlay::set_book_path(const char *path)
+{
+    m_book_path = path ? path : "";
+    m_script_mode = script_conversion::book_mode(m_book_path.c_str());
+    m_script_load_failed = !script_conversion::prepare(m_script_mode);
+    if (m_script_load_failed) m_script_mode = script_conversion::Mode::Original;
 }
 
 int ReaderOverlay::beauty_base_index(int index) const
@@ -263,6 +276,19 @@ void ReaderOverlay::adjust_setting(int delta)
     ReaderStyle style = reader_style_get();
     if (m_tab == Tab::Settings) {
         if (m_setting_focus == 0) return;
+        if (m_setting_focus == 7) {
+            if (m_book_path.empty()) return;
+            int next = (static_cast<int>(m_script_mode) + (delta < 0 ? 2 : 1)) % 3;
+            auto mode = static_cast<script_conversion::Mode>(next);
+            if (script_conversion::set_book_mode(m_book_path.c_str(), mode)) {
+                m_script_mode = mode;
+                m_script_load_failed = false;
+                m_settings_dirty = true;
+            } else {
+                m_script_load_failed = true;
+            }
+            return;
+        }
         switch (m_setting_focus) {
         case 1:
             style.font_size += delta * 2;
@@ -326,7 +352,8 @@ void ReaderOverlay::adjust_setting(int delta)
 
 int ReaderOverlay::active_setting_count() const
 {
-    return m_tab == Tab::Beauty ? BEAUTY_COUNT + (m_weread_mode ? 1 : 0) : SETTING_COUNT;
+    return m_tab == Tab::Beauty ? BEAUTY_COUNT + (m_weread_mode ? 1 : 0)
+        : SETTING_COUNT - (m_book_path.empty() ? 1 : 0);
 }
 
 void ReaderOverlay::move_setting_focus(int delta)
@@ -361,9 +388,10 @@ int ReaderOverlay::hit_setting(int x, int y, int *direction) const
     if (has_controls && direction) {
         int plus_x = cell_x + cell_w - STEP_BOX_W;
         int minus_x = plus_x - STEP_BOX_GAP - VALUE_W - STEP_BOX_GAP - STEP_BOX_W;
-        bool toggle = m_tab == Tab::Beauty &&
-                      (is_public_comments_row(index) || beauty_index <= 1 ||
-                       beauty_index == 4 || beauty_index == 5);
+        bool toggle = (m_tab == Tab::Settings && index == 7) ||
+                      (m_tab == Tab::Beauty &&
+                       (is_public_comments_row(index) || beauty_index <= 1 ||
+                        beauty_index == 4 || beauty_index == 5));
         if (toggle && x >= minus_x && x < plus_x + STEP_BOX_W) {
             *direction = 1;
         } else if (x >= minus_x && x < minus_x + STEP_BOX_W) *direction = -1;
@@ -541,7 +569,7 @@ void ReaderOverlay::draw_settings(const Geometry &g)
         std::string name;
         std::string value;
         if (m_tab == Tab::Beauty) beauty_text(index, m_weread_mode, &name, &value);
-        else setting_text(index, &name, &value);
+        else setting_text(index, m_script_mode, m_script_load_failed, &name, &value);
         int text_y = row_y0 + std::max(1, (row_h - system_font::line_height()) / 2);
         system_font::draw_left(M5.Display, name, x + 12, text_y, fg);
 
@@ -558,9 +586,10 @@ void ReaderOverlay::draw_settings(const Geometry &g)
             int box_y = row_y0 + 6;
             int box_h = std::max(28, row_h - 12);
             int control_text_y = box_y + std::max(0, (box_h - system_font::line_height()) / 2);
-            bool toggle = m_tab == Tab::Beauty &&
-                          (is_public_comments_row(index) || beauty_index <= 1 ||
-                           beauty_index == 4 || beauty_index == 5);
+            bool toggle = (m_tab == Tab::Settings && index == 7) ||
+                          (m_tab == Tab::Beauty &&
+                           (is_public_comments_row(index) || beauty_index <= 1 ||
+                            beauty_index == 4 || beauty_index == 5));
             if (toggle) {
                 int toggle_w = plus_x + STEP_BOX_W - minus_x;
                 M5.Display.drawRoundRect(minus_x, box_y, toggle_w, box_h, 4, fg);

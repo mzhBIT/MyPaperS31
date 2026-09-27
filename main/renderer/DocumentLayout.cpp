@@ -63,7 +63,28 @@ struct Builder {
         item.type = PageItemType::Text;
         item.text = line.text;
         item.height = options.line_height;
-        item.content_position = block.content_position + line.byte_start;
+        if (!block.source_points.empty()) {
+            auto point = std::upper_bound(block.source_points.begin(), block.source_points.end(),
+                line.byte_start, [](size_t value, const script_conversion::Point &p) {
+                    return value < p.display;
+                });
+            if (point != block.source_points.begin()) --point;
+            item.content_position = block.content_position + point->source;
+            if (!block.source_text.empty()) {
+                const size_t start = point->source;
+                auto finish = std::lower_bound(block.source_points.begin(), block.source_points.end(),
+                    line.byte_end, [](const script_conversion::Point &p, size_t value) {
+                        return p.display < value;
+                    });
+                const size_t end = finish == block.source_points.end()
+                    ? block.source_text.size() : finish->source;
+                if (end > start && start < block.source_text.size()) {
+                    item.source_text = block.source_text.substr(start, end - start);
+                }
+            }
+        } else {
+            item.content_position = block.content_position + line.byte_start;
+        }
         item.justify = line.justify && !centered;
         item.x_offset = line.x_offset;
         item.width = std::max(1, options.content_width - line.x_offset);

@@ -2,6 +2,7 @@
 
 #include "renderer/TextLayout.h"
 #include "renderer/InlineStyle.h"
+#include "ui/script_conversion.h"
 
 #include <cstdint>
 #include <string>
@@ -21,6 +22,8 @@ enum class BlockType {
 struct Block {
     BlockType type = BlockType::Paragraph;
     std::string text;
+    std::string source_text;
+    std::vector<script_conversion::Point> source_points;
     std::string resource;
     uint64_t content_position = 0;
     int image_width = 0;
@@ -57,6 +60,7 @@ enum class PageItemType {
 struct PageItem {
     PageItemType type = PageItemType::Text;
     std::string text;
+    std::string source_text;
     std::string resource;
     int width = 0;
     int height = 0;

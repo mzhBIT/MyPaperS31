@@ -171,6 +171,7 @@ public:
         chapters.progress = overlay_progress;
         chapters.seek = overlay_seek_progress;
         m_overlay.set_chapters(chapters);
+        m_overlay.set_book_path(path);
         if (g_book.open(path)) recent_book_save(path, "txt", g_book.title.c_str());
         g_history.clear();
         g_offset = g_book.load_progress(&g_history);
@@ -428,6 +429,7 @@ private:
         bool apply_layout = m_overlay.settings_dirty();
         m_overlay.close();
         if (apply_layout) {
+            g_book.set_script_mode(m_overlay.script_mode());
             g_book.refresh_layout_settings();
             g_page = g_book.read_page(g_page.start_offset);
             m_overlay.clear_settings_dirty();
