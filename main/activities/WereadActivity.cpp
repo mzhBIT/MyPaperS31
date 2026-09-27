@@ -6,6 +6,7 @@
 #include "renderer/CoverThumbnail.h"
 #include "storage/app_paths.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include "weread/WereadApi.h"
 #include "weread/WereadCrypto.h"
 #include "weread/WereadQr.h"
@@ -384,6 +385,27 @@ void weread_task(void *argument)
     send_final(job.get(), error_result("QR code expired"), external_stack, &client);
 }
 
+std::string localized_weread_error(const std::string &message)
+{
+    using ui_locale::TextId;
+    struct ErrorText { const char *source; TextId id; };
+    static constexpr ErrorText known[] = {
+        {"Protocol self-test failed", TextId::ProtocolSelfTestFailed},
+        {"WiFi connection failed and no offline cache is available", TextId::NoNetworkOrOfflineCache},
+        {"Invalid chapter index", TextId::InvalidChapterIndex},
+        {"Failed to save chapter cache", TextId::ChapterCacheSaveFailed},
+        {"Shelf loading failed", TextId::ShelfLoadingFailed},
+        {"Login view closed", TextId::LoginViewClosed},
+        {"Login succeeded, but shelf loading failed", TextId::LoginShelfFailed},
+        {"Login failed", TextId::LoginFailed},
+        {"QR code expired", TextId::QrExpired},
+    };
+    for (const auto &entry : known) {
+        if (message == entry.source) return ui_locale::text(entry.id);
+    }
+    return message;
+}
+
 void draw_header(const std::string &title)
 {
     const int width = M5.Display.width();
@@ -441,7 +463,7 @@ public:
         // Keep Wi-Fi and the ESP-Hosted C6 alive while navigating between the
         // shelf, catalog and reader. Power them down only when the WeRead
         // activity itself is actually left.
-        wifi_setting_deinit(true);
+        wifi_setting_release();
     }
 
     void on_create() override
@@ -583,7 +605,9 @@ public:
         } else {
             _return_to_shelf_after_reader = false;
             _view = View::Error;
-            _status = result->message.empty() ? "Unknown error" : result->message;
+            _status = result->message.empty()
+                ? ui_locale::text(ui_locale::TextId::UnknownError)
+                : localized_weread_error(result->message);
             draw_error();
         }
     }
@@ -612,7 +636,7 @@ public:
             }
 
             _view = View::Error;
-            _status = "Failed to restore cached chapter list";
+            _status = ui_locale::text(ui_locale::TextId::RestoreChapterListFailed);
             ESP_LOGE(TAG, "reader returned: failed to restore catalog book=%s",
                      _selected_book.id.c_str());
             draw_error();
@@ -646,7 +670,7 @@ public:
         // Never leave the reader's last framebuffer visible if the parent
         // state is unexpectedly incomplete.
         _view = View::Error;
-        _status = "Failed to restore WeRead page";
+        _status = ui_locale::text(ui_locale::TextId::RestoreWereadPageFailed);
         draw_error();
     }
 
@@ -733,7 +757,7 @@ private:
     void draw_loading(const char *message)
     {
         begin_frame(epd_mode_t::epd_quality);
-        draw_header("WeRead");
+        draw_header(ui_locale::text(ui_locale::TextId::WeRead));
         system_font::draw_center(M5.Display, message, M5.Display.width() / 2, 500, TFT_BLACK);
         end_frame();
     }
@@ -741,17 +765,17 @@ private:
     void draw_login()
     {
         begin_frame(epd_mode_t::epd_quality);
-        draw_header("WeRead Login");
+        draw_header(ui_locale::text(ui_locale::TextId::WeReadLogin));
         const int size = std::min(520, static_cast<int>(M5.Display.width()) - 80);
         const int x = (M5.Display.width() - size) / 2;
         if (!weread::draw_qr(M5.Display, _login_url, x, 180, size)) {
-            system_font::draw_center(M5.Display, "QR generation failed", M5.Display.width() / 2, 470);
+            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::QrGenerationFailed), M5.Display.width() / 2, 470);
         }
-        system_font::draw_center(M5.Display, "Scan with WeChat or WeRead",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ScanWithWeChat),
                                  M5.Display.width() / 2, 760, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Waiting for confirmation...",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::WaitingForConfirmation),
                                  M5.Display.width() / 2, 820, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Tap < to cancel", M5.Display.width() / 2,
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::TapBackToCancel), M5.Display.width() / 2,
                                  1060, TFT_DARKGRAY);
         end_frame();
     }
@@ -759,7 +783,7 @@ private:
     void draw_shelf()
     {
         begin_frame();
-        draw_header("WeRead Shelf");
+        draw_header(ui_locale::text(ui_locale::TextId::WeReadShelf));
         const int total_pages = std::max(1, static_cast<int>((_books.size() + LIST_ROWS - 1) / LIST_ROWS));
         _page = std::clamp(_page, 0, total_pages - 1);
         _shelf_page = _page;
@@ -794,10 +818,10 @@ private:
         system_font::draw_center(M5.Display, std::to_string(_page + 1) + "/" + std::to_string(total_pages),
                                  M5.Display.width() / 2, FOOTER_Y, TFT_BLACK);
         if (_offline) {
-            system_font::draw_right(M5.Display, "Offline", M5.Display.width() - 24,
+            system_font::draw_right(M5.Display, ui_locale::text(ui_locale::TextId::Offline), M5.Display.width() - 24,
                                     FOOTER_Y, TFT_DARKGRAY);
         } else if (_cached) {
-            system_font::draw_right(M5.Display, "Cached", M5.Display.width() - 24,
+            system_font::draw_right(M5.Display, ui_locale::text(ui_locale::TextId::Cached), M5.Display.width() - 24,
                                     FOOTER_Y, TFT_DARKGRAY);
         }
         if (_book_menu_visible) draw_book_menu_overlay();
@@ -820,11 +844,11 @@ private:
         M5.Display.drawRect(box_x + 24, box_y + 126, (box_w - 64) / 2, 104, TFT_BLACK);
         M5.Display.drawRect(box_x + 40 + (box_w - 64) / 2, box_y + 126,
                            (box_w - 64) / 2, 104, TFT_BLACK);
-        system_font::draw_center(M5.Display, "章节目录",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ChapterCatalog),
                                  box_x + 24 + (box_w - 64) / 4, box_y + 154, TFT_BLACK);
-        system_font::draw_center(M5.Display, "书评",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::BookReviews),
                                  box_x + 40 + 3 * (box_w - 64) / 4, box_y + 154, TFT_BLACK);
-        system_font::draw_center(M5.Display, "点击空白处关闭", width / 2, box_y + 250, TFT_DARKGRAY);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::TapBlankToClose), width / 2, box_y + 250, TFT_DARKGRAY);
     }
 
     void draw_reviews()
@@ -833,8 +857,8 @@ private:
         draw_header(_selected_book.title);
         const int width = M5.Display.width();
         const int half = width / 2;
-        system_font::draw_center(M5.Display, "推荐", half / 2, REVIEW_TABS_TOP + 15, TFT_BLACK);
-        system_font::draw_center(M5.Display, "最新", half + half / 2, REVIEW_TABS_TOP + 15, TFT_BLACK);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Recommended), half / 2, REVIEW_TABS_TOP + 15, TFT_BLACK);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Latest), half + half / 2, REVIEW_TABS_TOP + 15, TFT_BLACK);
         M5.Display.drawFastHLine(0, REVIEW_TABS_TOP + REVIEW_TABS_H - 1, width, TFT_LIGHTGRAY);
         const int active_x = _review_list_type == 3 ? 20 : half + 20;
         M5.Display.fillRect(active_x, REVIEW_TABS_TOP + REVIEW_TABS_H - 5, half - 40, 5, TFT_BLACK);
@@ -862,7 +886,7 @@ private:
             M5.Display.drawFastHLine(20, y + REVIEW_ROW_H - 1, width - 40, TFT_BLACK);
         }
         if (_reviews.empty()) {
-            system_font::draw_center(M5.Display, "暂无书评", width / 2, 520, TFT_DARKGRAY);
+            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::NoBookReviews), width / 2, 520, TFT_DARKGRAY);
         }
         system_font::draw_center(M5.Display, std::to_string(_page + 1) + "/" + std::to_string(total_pages),
                                  width / 2, FOOTER_Y, TFT_BLACK);
@@ -873,7 +897,7 @@ private:
     {
         if (_review_index < 0 || _review_index >= static_cast<int>(_reviews.size())) return;
         begin_frame();
-        draw_header("书评");
+        draw_header(ui_locale::text(ui_locale::TextId::BookReviews));
         const auto &review = _reviews[static_cast<size_t>(_review_index)];
         const int width = M5.Display.width();
         system_font::draw_left(M5.Display,
@@ -918,10 +942,10 @@ private:
         system_font::draw_center(M5.Display, std::to_string(_page + 1) + "/" + std::to_string(total_pages),
                                  M5.Display.width() / 2, FOOTER_Y, TFT_BLACK);
         if (_offline) {
-            system_font::draw_right(M5.Display, "Offline", M5.Display.width() - 24,
+            system_font::draw_right(M5.Display, ui_locale::text(ui_locale::TextId::Offline), M5.Display.width() - 24,
                                     FOOTER_Y, TFT_DARKGRAY);
         } else if (_cached) {
-            system_font::draw_right(M5.Display, "Cached", M5.Display.width() - 24,
+            system_font::draw_right(M5.Display, ui_locale::text(ui_locale::TextId::Cached), M5.Display.width() - 24,
                                     FOOTER_Y, TFT_DARKGRAY);
         }
         end_frame();
@@ -930,7 +954,7 @@ private:
     void draw_error()
     {
         begin_frame();
-        draw_header("WeRead Error");
+        draw_header(ui_locale::text(ui_locale::TextId::WeReadError));
         const auto lines = wrap_text(_status, M5.Display.width() - 80);
         const int line_height = system_font::line_height() + 10;
         const int first_y = 430 - static_cast<int>(lines.size() - 1) * line_height / 2;
@@ -938,7 +962,7 @@ private:
             system_font::draw_center(M5.Display, lines[i], M5.Display.width() / 2,
                                      first_y + static_cast<int>(i) * line_height, TFT_BLACK);
         }
-        system_font::draw_center(M5.Display, "Tap to retry", M5.Display.width() / 2,
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::TapToRetry), M5.Display.width() / 2,
                                  first_y + static_cast<int>(lines.size()) * line_height + 45, TFT_BLACK);
         end_frame();
     }
@@ -1053,14 +1077,16 @@ private:
 
     static const char *work_loading_message(WorkKind kind)
     {
+        using ui_locale::TextId;
+        using ui_locale::text;
         switch (kind) {
-        case WorkKind::LoadShelf: return "Loading shelf...";
-        case WorkKind::LoadCatalog: return "Loading chapters...";
-        case WorkKind::LoadChapter: return "Downloading chapter...";
-        case WorkKind::LoadReviews: return "Loading book reviews...";
-        case WorkKind::LoadCovers: return "Loading covers...";
+        case WorkKind::LoadShelf: return text(TextId::LoadingShelf);
+        case WorkKind::LoadCatalog: return text(TextId::LoadingChapters);
+        case WorkKind::LoadChapter: return text(TextId::DownloadingChapter);
+        case WorkKind::LoadReviews: return text(TextId::LoadingBookReviews);
+        case WorkKind::LoadCovers: return text(TextId::LoadingCovers);
         }
-        return "Loading...";
+        return text(TextId::Loading);
     }
 
     void start_work(WorkKind kind, const weread::Book &book, int chapter_index = 0,
@@ -1120,7 +1146,7 @@ private:
             delete job;
             _busy = false;
             _view = View::Error;
-            _status = "Failed to start network task";
+            _status = ui_locale::text(ui_locale::TextId::NetworkTaskStartFailed);
             draw_error();
         }
     }
@@ -1195,7 +1221,7 @@ private:
         if (_busy) {
             _cancelled = true;
             _exit_when_done = true;
-            draw_loading("Cancelling...");
+            draw_loading(ui_locale::text(ui_locale::TextId::Cancelling));
             return;
         }
         if (_cover_prefetch_active) {
@@ -1237,7 +1263,7 @@ private:
         _cancelled = true;
         _exit_when_done = true;
         _view = View::Loading;
-        draw_loading("Cancelling login...");
+        draw_loading(ui_locale::text(ui_locale::TextId::CancellingLogin));
         ESP_LOGI(TAG, "QR login cancellation requested");
     }
 

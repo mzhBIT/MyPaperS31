@@ -1,6 +1,8 @@
 #include "CalibrateActivity.h"
 #include "ActivityManager.h"
 #include "../touch_calibration.h"
+#include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include <M5Unified.h>
 #include <esp_log.h>
 #include <cmath>
@@ -45,8 +47,8 @@ void CalibrateActivity::_draw_crosshair(int sx, int sy, int num) {
     snprintf(buf, sizeof(buf), "%d/%d", num, NUM_POINTS);
     d.drawString(buf, sx - 20, sy + 40);
 
-    d.setFont(&fonts::lv_font_montserrat_20);
-    d.drawString("Touch the crosshair", _sw / 2 - 100, _sh - 40);
+    system_font::draw_center(d, ui_locale::text(ui_locale::TextId::TouchCrosshair),
+                             _sw / 2, _sh - 40, TFT_BLACK);
 
     d.setEpdMode(epd_mode_t::epd_fastest);
     d.display();
@@ -57,12 +59,9 @@ void CalibrateActivity::_draw_message(const char *line1, const char *line2) {
     auto &d = M5.Display;
     d.startWrite();
     d.fillScreen(TFT_WHITE);
-    d.setFont(&fonts::lv_font_montserrat_28);
-    d.setTextColor(TFT_BLACK);
-    d.drawString(line1, _sw / 2 - 140, _sh / 2 - 40);
+    system_font::draw_center(d, line1, _sw / 2, _sh / 2 - 40, TFT_BLACK);
     if (line2) {
-        d.setFont(&fonts::lv_font_montserrat_20);
-        d.drawString(line2, _sw / 2 - 180, _sh / 2 + 20);
+        system_font::draw_center(d, line2, _sw / 2, _sh / 2 + 20, TFT_BLACK);
     }
     d.setEpdMode(epd_mode_t::epd_fastest);
     d.display();
@@ -73,14 +72,13 @@ void CalibrateActivity::_draw_success(float error_px) {
     auto &d = M5.Display;
     d.startWrite();
     d.fillScreen(TFT_WHITE);
-    d.setFont(&fonts::lv_font_montserrat_28);
-    d.setTextColor(TFT_BLACK);
-    d.drawString("Calibration OK", _sw / 2 - 120, _sh / 2 - 60);
-    d.setFont(&fonts::lv_font_montserrat_20);
+    system_font::draw_center(d, ui_locale::text(ui_locale::TextId::CalibrationOk),
+                             _sw / 2, _sh / 2 - 60, TFT_BLACK);
     char buf[64];
-    snprintf(buf, sizeof(buf), "Average error: %.1f pixels", error_px);
-    d.drawString(buf, _sw / 2 - 130, _sh / 2 - 10);
-    d.drawString("Starting reader...", _sw / 2 - 90, _sh / 2 + 40);
+    snprintf(buf, sizeof(buf), ui_locale::text(ui_locale::TextId::CalibrationErrorFormat), error_px);
+    system_font::draw_center(d, buf, _sw / 2, _sh / 2 - 10, TFT_BLACK);
+    system_font::draw_center(d, ui_locale::text(ui_locale::TextId::StartingReader),
+                             _sw / 2, _sh / 2 + 40, TFT_BLACK);
     d.setEpdMode(epd_mode_t::epd_fastest);
     d.display();
     d.endWrite();
@@ -90,12 +88,10 @@ void CalibrateActivity::_draw_fail() {
     auto &d = M5.Display;
     d.startWrite();
     d.fillScreen(TFT_WHITE);
-    d.setFont(&fonts::lv_font_montserrat_28);
-    d.setTextColor(TFT_BLACK);
-    d.drawString("Calibration Failed", _sw / 2 - 140, _sh / 2 - 60);
-    d.setFont(&fonts::lv_font_montserrat_20);
-    d.setTextColor(TFT_DARKGRAY);
-    d.drawString("Touch screen to retry", _sw / 2 - 120, _sh / 2 - 10);
+    system_font::draw_center(d, ui_locale::text(ui_locale::TextId::CalibrationFailed),
+                             _sw / 2, _sh / 2 - 60, TFT_BLACK);
+    system_font::draw_center(d, ui_locale::text(ui_locale::TextId::TouchToRetry),
+                             _sw / 2, _sh / 2 - 10, TFT_DARKGRAY);
     d.setEpdMode(epd_mode_t::epd_fastest);
     d.display();
     d.endWrite();

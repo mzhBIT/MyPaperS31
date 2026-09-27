@@ -6,6 +6,7 @@
 #include "audio/audio_file_formats.h"
 #include "reader_font.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include "ui/TextInputOverlay.h"
 #include "ui/reader_background.h"
 #include "ui/reader_book_cover.h"
@@ -382,8 +383,15 @@ public:
         std::string name = g_focus >= 0 && g_focus < (int)g_entries.size() ? g_entries[g_focus].name : "";
         system_font::draw_center(M5.Display, system_font::ellipsize(name, box_w - 40), w / 2, y + 28, TFT_BLACK);
 
-        const char *normal_labels[] = {"Rename", "Delete", "Cancel"};
-        const char *image_labels[] = {"Rename", "Background", "Delete", "Cancel"};
+        const char *normal_labels[] = {
+            ui_locale::text(ui_locale::TextId::Rename),
+            ui_locale::text(ui_locale::TextId::Delete),
+            ui_locale::text(ui_locale::TextId::Cancel)};
+        const char *image_labels[] = {
+            ui_locale::text(ui_locale::TextId::Rename),
+            ui_locale::text(ui_locale::TextId::Background),
+            ui_locale::text(ui_locale::TextId::Delete),
+            ui_locale::text(ui_locale::TextId::Cancel)};
         const char **labels = background_action ? image_labels : normal_labels;
         int count = action_count();
         int gap = 12;
@@ -450,7 +458,7 @@ public:
     void rename_entry(const std::string &old_path, const std::string &new_name) {
         m_notice.clear();
         if (!valid_file_name(new_name)) {
-            m_notice = "Invalid file name";
+            m_notice = ui_locale::text(ui_locale::TextId::InvalidFileName);
             return;
         }
         std::string new_path = g_path + "/" + new_name;
@@ -458,7 +466,7 @@ public:
         struct stat st = {};
         bool case_only = strcasecmp(old_path.c_str(), new_path.c_str()) == 0;
         if (!case_only && stat(new_path.c_str(), &st) == 0) {
-            m_notice = "A file with that name already exists";
+            m_notice = ui_locale::text(ui_locale::TextId::FileAlreadyExists);
             return;
         }
 
@@ -476,7 +484,7 @@ public:
         }
         if (result != 0) {
             ESP_LOGW(TAG, "rename failed old=%s new=%s errno=%d", old_path.c_str(), new_path.c_str(), errno);
-            m_notice = "Rename failed";
+            m_notice = ui_locale::text(ui_locale::TextId::RenameFailed);
             return;
         }
 
@@ -507,10 +515,10 @@ public:
             }
         }
         TextInputOptions options;
-        options.title = "Rename";
+        options.title = ui_locale::text(ui_locale::TextId::Rename);
         options.initial_text = stem;
         options.fixed_suffix = suffix;
-        options.submit_label = "Rename";
+        options.submit_label = ui_locale::text(ui_locale::TextId::Rename);
         options.max_bytes = 255;
         options.start_in_chinese = true;
         m_text_input.open(options, [this, old_path](const std::string &name) {
@@ -535,7 +543,7 @@ public:
         }
         else if (choice == (background_action ? 2 : 1)) {
             if (g_focus >= 0 && g_focus < (int)g_entries.size() && g_entries[g_focus].is_dir) {
-                m_notice = "Folder deletion is not supported";
+                m_notice = ui_locale::text(ui_locale::TextId::FolderDeleteUnsupported);
                 redraw_all();
             } else begin_delete_confirm();
         }
@@ -551,7 +559,7 @@ public:
         M5.Display.fillRoundRect(x, y, box_w, 140, 7, TFT_WHITE);
         M5.Display.drawRoundRect(x, y, box_w, 140, 7, TFT_BLACK);
         system_font::draw_center(M5.Display, system_font::ellipsize(m_notice, box_w - 30), w / 2, y + 24, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Tap to close", w / 2, y + 78, TFT_BLACK);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::TapToClose), w / 2, y + 78, TFT_BLACK);
     }
 
     void draw_delete_dialog() {
@@ -565,7 +573,7 @@ public:
         M5.Display.fillRoundRect(x, y, box_w, box_h, 6, TFT_WHITE);
         M5.Display.drawRoundRect(x, y, box_w, box_h, 6, TFT_BLACK);
         M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-        system_font::draw_center(M5.Display, "Delete file?", w / 2, y + 18);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::DeleteFileQuestion), w / 2, y + 18);
 
         std::string name = g_entries[g_focus].name;
         std::string label = system_font::ellipsize(ellipsize_middle(name, 32), box_w - 48);
@@ -581,12 +589,12 @@ public:
         M5.Display.fillRoundRect(bx0, by, btn_w, btn_h, 6, m_delete_choice == 0 ? TFT_BLACK : TFT_WHITE);
         M5.Display.drawRoundRect(bx0, by, btn_w, btn_h, 6, TFT_BLACK);
         M5.Display.setTextColor(m_delete_choice == 0 ? TFT_WHITE : TFT_BLACK, m_delete_choice == 0 ? TFT_BLACK : TFT_WHITE);
-        system_font::draw_center(M5.Display, "Cancel", bx0 + btn_w / 2, by + 9, m_delete_choice == 0 ? TFT_WHITE : TFT_BLACK);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Cancel), bx0 + btn_w / 2, by + 9, m_delete_choice == 0 ? TFT_WHITE : TFT_BLACK);
 
         M5.Display.fillRoundRect(bx1, by, btn_w, btn_h, 6, m_delete_choice == 1 ? TFT_BLACK : TFT_WHITE);
         M5.Display.drawRoundRect(bx1, by, btn_w, btn_h, 6, TFT_BLACK);
         M5.Display.setTextColor(m_delete_choice == 1 ? TFT_WHITE : TFT_BLACK, m_delete_choice == 1 ? TFT_BLACK : TFT_WHITE);
-        system_font::draw_center(M5.Display, "Delete", bx1 + btn_w / 2, by + 9, m_delete_choice == 1 ? TFT_WHITE : TFT_BLACK);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Delete), bx1 + btn_w / 2, by + 9, m_delete_choice == 1 ? TFT_WHITE : TFT_BLACK);
     }
 
     int delete_dialog_choice_at(int tx, int ty) const {

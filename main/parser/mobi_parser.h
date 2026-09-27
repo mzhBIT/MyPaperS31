@@ -40,6 +40,7 @@ public:
     uint64_t text_length() const { return _decoded_text_length; }
 
     bool read_section_to_string(const std::string &href, std::string *out) const;
+    bool read_kf8_flow(uint32_t flow_index, std::string *out) const;
     bool resolve_filepos_footnote(uint64_t position, std::string *out) const;
     std::string normalize_resource_href(const std::string &href) const;
     bool read_resource_prefix(const std::string &href, std::vector<uint8_t> *out,

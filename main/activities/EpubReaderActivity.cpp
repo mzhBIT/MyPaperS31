@@ -15,6 +15,7 @@
 #include "renderer/TurboJpegDecoder.h"
 #include "storage/app_paths.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include "ui/reader_background.h"
 #include "weread/WereadApi.h"
 #include "weread/WereadHttpClient.h"
@@ -356,6 +357,7 @@ public:
         _overlay.set_weread_mode(_ok && g_epub.is_weread());
         if (_ok) {
             _script_mode = script_conversion::book_mode(path);
+            _writing_override = reader_writing_mode::book_mode(path);
             if (!script_conversion::prepare(_script_mode)) _script_mode = script_conversion::Mode::Original;
             if (g_epub.is_weread()) {
                 _annotation_result_queue = xQueueCreate(1, sizeof(AnnotationFetchResult *));
@@ -367,6 +369,16 @@ public:
             _is_mobi = g_epub.is_mobi();
             _is_fb2 = g_epub.is_fb2();
             _is_markdown = g_epub.is_markdown();
+            if (_is_mobi) {
+                std::string css;
+                if (g_epub.read_kf8_flow(1, &css)) {
+                    const size_t mode = css.find("writing-mode");
+                    _kf8_vertical_style = mode != std::string::npos &&
+                        css.find("vertical-rl", mode) != std::string::npos;
+                    ESP_LOGI(TAG, "KF8 style flow: bytes=%u vertical=%d",
+                             static_cast<unsigned>(css.size()), _kf8_vertical_style ? 1 : 0);
+                }
+            }
             _progress_root = _is_mobi ? app_paths::mobi_progress_dir()
                                       : (_is_fb2 ? app_paths::fb2_progress_dir()
                                                  : app_paths::epub_progress_dir());
@@ -683,6 +695,7 @@ private:
                 invalidate_page_prefetch();
             }
             _script_mode = _overlay.script_mode();
+            _writing_override = _overlay.writing_mode();
             refresh_text_renderer();
             _layout_sig = layout_signature();
             repaginate_current_spine();
@@ -764,6 +777,7 @@ private:
 
     bool _ok = false;
     script_conversion::Mode _script_mode = script_conversion::Mode::Original;
+    reader_writing_mode::Mode _writing_override = reader_writing_mode::Mode::Auto;
     bool _seen_show = false;
     int _spine_index = 0;
     int _page_index = 0;
@@ -776,6 +790,8 @@ private:
     bool _is_mobi = false;
     bool _is_fb2 = false;
     bool _is_markdown = false;
+    bool _kf8_vertical_style = false;
+    mutable std::unordered_map<std::string, bool> _stylesheet_vertical_cache;
     bool _progress_dirty = false;
     int64_t _progress_dirty_at = 0;
     int64_t _weread_last_tick_us = 0;
@@ -877,6 +893,7 @@ private:
                  file_size);
         sig += buf;
         sig += ";script=" + std::to_string(static_cast<int>(_script_mode));
+        sig += ";writing=" + std::to_string(static_cast<int>(_writing_override));
         if (_script_mode != script_conversion::Mode::Original) {
             sig += ";dict=" + std::to_string(script_conversion::dictionary_signature());
         }
@@ -1251,27 +1268,42 @@ private:
         }
         int64_t t_read = esp_timer_get_time();
 
+        const bool declared_vertical = section_declares_vertical(xhtml, spine.href);
+        const bool vertical = _writing_override == reader_writing_mode::Mode::VerticalRl ||
+            (_writing_override == reader_writing_mode::Mode::Auto && declared_vertical);
         std::vector<EpubContentBlock> blocks;
-        if (!parse_source_blocks(xhtml, spine.href, &blocks)) {
+        if (!parse_source_blocks(xhtml, spine.href, &blocks, declared_vertical)) {
             ESP_LOGW(TAG, "parse spine failed index=%d href=%s", index, spine.href.c_str());
             return false;
         }
         size_t footnote_ref_count = 0;
-        for (const auto &block : blocks) footnote_ref_count += block.footnotes.size();
+        size_t ruby_count = 0;
+        size_t inline_sup_count = 0;
+        for (const auto &block : blocks) {
+            footnote_ref_count += block.footnotes.size();
+            for (const auto &ref : block.footnotes) {
+                if (ref.kind == EpubFootnoteRef::Kind::RubyText) ++ruby_count;
+                if (ref.kind == EpubFootnoteRef::Kind::InlineSup) ++inline_sup_count;
+            }
+        }
         int64_t t_parse = esp_timer_get_time();
 
         _spine_index = index;
         _page_index = 0;
-        build_pages(blocks);
+        build_pages(blocks, vertical);
         int64_t t_layout = esp_timer_get_time();
 
-        ESP_LOGI(TAG, "load_spine index=%d/%d href=%s blocks=%u pages=%d footnotes=%u read=%lld parse=%lld layout=%lld total=%lld ms",
+        ESP_LOGI(TAG, "load_spine index=%d/%d href=%s blocks=%u pages=%d writing=%s declared=%d footnotes=%u ruby=%u inline_sup=%u read=%lld parse=%lld layout=%lld total=%lld ms",
                  _spine_index + 1,
                  g_epub.spine_count(),
                  spine.href.c_str(),
                  (unsigned)blocks.size(),
                  _page_count,
+                 vertical ? "vertical-rl" : "horizontal-tb",
+                 declared_vertical ? 1 : 0,
                  (unsigned)footnote_ref_count,
+                 (unsigned)ruby_count,
+                 (unsigned)inline_sup_count,
                  (t_read - t0) / 1000,
                  (t_parse - t_read) / 1000,
                  (t_layout - t_parse) / 1000,
@@ -1336,12 +1368,89 @@ private:
         return ext == ".jpg" || ext == ".png" || ext == ".bmp";
     }
 
+    bool section_declares_vertical(const std::string &source, const std::string &href) const
+    {
+        if (_is_markdown || g_epub.is_weread() || _is_fb2) return false;
+        if (_is_mobi && _kf8_vertical_style) return true;
+        // Limit automatic detection to document-level declarations. A
+        // vertical class used for one caption must not rotate the chapter.
+        const size_t head_end = source.find("</head>");
+        const std::string head = source.substr(0, std::min<size_t>(
+            head_end == std::string::npos ? 4096 : head_end, 16384));
+        auto declares_vertical = [](const std::string &css) {
+            size_t rule = 0;
+            while ((rule = css.find('{', rule)) != std::string::npos) {
+                const size_t start = css.rfind('}', rule);
+                const std::string selector = css.substr(start == std::string::npos ? 0 : start + 1,
+                                                        rule - (start == std::string::npos ? 0 : start + 1));
+                const size_t end = css.find('}', rule + 1);
+                if (end == std::string::npos) break;
+                const std::string body = css.substr(rule + 1, end - rule - 1);
+                if ((selector.find("html") != std::string::npos ||
+                     selector.find("body") != std::string::npos ||
+                     selector.find(":root") != std::string::npos) &&
+                    body.find("writing-mode") != std::string::npos &&
+                    body.find("vertical-rl") != std::string::npos) return true;
+                rule = end + 1;
+            }
+            return false;
+        };
+        if (declares_vertical(head)) return true;
+        if (head.find("writing-mode") != std::string::npos &&
+            head.find("vertical-rl") != std::string::npos &&
+            head.find("style=") != std::string::npos) return true;
+        if (g_epub.format() != ReflowBook::Format::Epub) return false;
+        size_t link = 0;
+        while ((link = head.find("<link", link)) != std::string::npos) {
+            const size_t end = head.find('>', link + 5);
+            if (end == std::string::npos) break;
+            const std::string tag = head.substr(link, end - link + 1);
+            link = end + 1;
+            if (tag.find("stylesheet") == std::string::npos) continue;
+            size_t attr = tag.find("href=");
+            if (attr == std::string::npos || attr + 6 >= tag.size()) continue;
+            const char quote = tag[attr + 5];
+            if (quote != '\'' && quote != '"') continue;
+            const size_t close = tag.find(quote, attr + 6);
+            if (close == std::string::npos) continue;
+            std::string css_href = tag.substr(attr + 6, close - attr - 6);
+            if (css_href.find(':') != std::string::npos || css_href.empty()) continue;
+            const size_t slash = href.find_last_of('/');
+            std::string path = slash == std::string::npos ? std::string() : href.substr(0, slash + 1);
+            while (css_href.rfind("../", 0) == 0) {
+                css_href.erase(0, 3);
+                if (!path.empty()) {
+                    path.pop_back();
+                    const size_t parent = path.find_last_of('/');
+                    path = parent == std::string::npos ? std::string() : path.substr(0, parent + 1);
+                }
+            }
+            const std::string resource = path + css_href;
+            auto cached = _stylesheet_vertical_cache.find(resource);
+            if (cached != _stylesheet_vertical_cache.end()) {
+                if (cached->second) return true;
+                continue;
+            }
+            std::string css;
+            const bool vertical = g_epub.read_item_to_string(resource, &css) &&
+                css.size() <= 128 * 1024 && declares_vertical(css);
+            if (_stylesheet_vertical_cache.size() >= 8) _stylesheet_vertical_cache.clear();
+            _stylesheet_vertical_cache[resource] = vertical;
+            if (vertical) {
+                ESP_LOGI(TAG, "vertical stylesheet: %s", resource.c_str());
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool parse_source_blocks(const std::string &source, const std::string &href,
-                             std::vector<EpubContentBlock> *blocks) const
+                             std::vector<EpubContentBlock> *blocks,
+                             bool vertical) const
     {
         return _is_markdown
             ? markdown_parse_blocks(source, g_epub.path(), blocks)
-            : epub_parse_xhtml_blocks(source, href, blocks);
+            : epub_parse_xhtml_blocks(source, href, blocks, vertical);
     }
 
     bool is_ignored_layout_image(const std::string &href) const
@@ -1720,7 +1829,8 @@ private:
         draw_image_placeholder(M5.Display, x, y, w, h, message);
     }
 
-    bool paginate_blocks(std::vector<EpubContentBlock> &blocks, document_layout::Pages *out_pages)
+    bool paginate_blocks(std::vector<EpubContentBlock> &blocks, document_layout::Pages *out_pages,
+                         bool vertical)
     {
         if (!out_pages) return false;
         auto &renderer = reader_text_renderer();
@@ -1757,7 +1867,17 @@ private:
             } else {
                 output.type = document_layout::BlockType::Paragraph;
             }
-            const size_t source_text_bytes = block.text.size();
+            const size_t source_text_bytes = block.source_text_bytes > 0
+                ? block.source_text_bytes : block.text.size();
+            auto original_offset = [&block](size_t display) -> size_t {
+                if (block.source_points.empty()) return display;
+                auto point = std::upper_bound(block.source_points.begin(),
+                    block.source_points.end(), display,
+                    [](size_t value, const EpubSourcePoint &p) { return value < p.display; });
+                if (point == block.source_points.begin()) return display;
+                --point;
+                return point->source + display - point->display;
+            };
             if (!is_image && block.type == EpubContentBlockType::Text &&
                 _script_mode != script_conversion::Mode::Original) {
                 const int64_t convert_start_us = esp_timer_get_time();
@@ -1778,9 +1898,15 @@ private:
                 ++converted_blocks;
                 output.text = std::move(converted.text);
                 output.source_points = std::move(converted.points);
+                if (!block.source_points.empty()) {
+                    for (auto &point : output.source_points)
+                        point.source = original_offset(point.source);
+                }
                 if (g_epub.is_weread()) output.source_text = block.text;
             } else {
                 output.text = std::move(block.text);
+                for (const auto &point : block.source_points)
+                    output.source_points.push_back({point.display, point.source});
             }
             output.resource = std::move(block.href);
             output.content_position = content_position;
@@ -1800,6 +1926,7 @@ private:
                 output_ref.byte_start = ref.byte_start;
                 output_ref.byte_end = ref.byte_end;
                 output_ref.target = std::move(ref.target);
+                output_ref.kind = static_cast<document_layout::Block::FootnoteRef::Kind>(ref.kind);
                 output_ref.content = _script_mode == script_conversion::Mode::Original
                     ? std::move(ref.content)
                     : script_conversion::convert(ref.content, _script_mode).text;
@@ -1816,18 +1943,37 @@ private:
             }
         }
 
+        bool has_vertical_ruby = false;
+        if (vertical) {
+            for (const auto &block : document_blocks) {
+                if (std::any_of(block.footnotes.begin(), block.footnotes.end(),
+                        [](const auto &ref) {
+                            return ref.kind == document_layout::Block::FootnoteRef::Kind::RubyText;
+                        })) {
+                    has_vertical_ruby = true;
+                    break;
+                }
+            }
+        }
         document_layout::Options options;
         options.content_width = content_width();
         options.content_height = content_height();
-        options.line_height = line_h;
+        options.line_height = has_vertical_ruby
+            ? std::max(line_h, renderer.verticalCellAdvance() + renderer.verticalRubyLaneWidth())
+            : line_h;
         ReaderStyle reader_style = reader_style_get();
         int fullwidth_advance = renderer.measureFullwidthCellForLayout();
         options.first_line_indent = fullwidth_advance * reader_style.first_line_indent;
         options.paragraph_spacing_percent = reader_style.paragraph_spacing * 10;
         options.ignore_tiny_declared_image_size = _is_mobi;
-        options.layout_paragraph = [](void *context, const std::string &text, int width, int indent) {
-            return static_cast<TextRenderer *>(context)->layoutUtf8Paragraph(text, width, indent);
-        };
+        options.vertical = vertical;
+        options.layout_paragraph = vertical
+            ? +[](void *context, const std::string &text, int height, int indent) {
+                  return static_cast<TextRenderer *>(context)->layoutUtf8VerticalParagraph(text, height, indent);
+              }
+            : +[](void *context, const std::string &text, int width, int indent) {
+                  return static_cast<TextRenderer *>(context)->layoutUtf8Paragraph(text, width, indent);
+              };
         options.text_context = &renderer;
         options.resolve_image = [](void *context,
                                    const std::string &resource,
@@ -1848,6 +1994,11 @@ private:
         options.image_context = this;
         const int64_t layout_start_us = esp_timer_get_time();
         *out_pages = document_layout::paginate(document_blocks, options);
+        if (has_vertical_ruby) {
+            for (auto &page : *out_pages) {
+                for (auto &item : page) item.vertical_ruby_lane = true;
+            }
+        }
         if (_script_mode != script_conversion::Mode::Original) {
             ESP_LOGI("SCRIPT_CONVERT",
                      "reflow mode=%s blocks=%u bytes=%u->%u convert=%lld us range_map=%lld us block_prep=%lld us paginate=%lld us",
@@ -1873,9 +2024,9 @@ private:
         return true;
     }
 
-    void build_pages(std::vector<EpubContentBlock> &blocks)
+    void build_pages(std::vector<EpubContentBlock> &blocks, bool vertical)
     {
-        paginate_blocks(blocks, &_pages);
+        paginate_blocks(blocks, &_pages, vertical);
 
         _page_count = (int)_pages.size();
         _page_index = std::min(_page_index, std::max(0, _page_count - 1));
@@ -1894,14 +2045,17 @@ private:
         }
         int64_t t_read = esp_timer_get_time();
 
+        const bool declared_vertical = section_declares_vertical(xhtml, spine.href);
+        const bool vertical = _writing_override == reader_writing_mode::Mode::VerticalRl ||
+            (_writing_override == reader_writing_mode::Mode::Auto && declared_vertical);
         std::vector<EpubContentBlock> blocks;
-        if (!parse_source_blocks(xhtml, spine.href, &blocks)) {
+        if (!parse_source_blocks(xhtml, spine.href, &blocks, declared_vertical)) {
             ESP_LOGW(TAG, "prefetch parse spine failed index=%d href=%s", index, spine.href.c_str());
             return false;
         }
         int64_t t_parse = esp_timer_get_time();
 
-        if (!paginate_blocks(blocks, out_pages)) return false;
+        if (!paginate_blocks(blocks, out_pages, vertical)) return false;
         int64_t t_layout = esp_timer_get_time();
 
         ESP_LOGI(TAG,
@@ -1925,6 +2079,14 @@ private:
             if (item.type == PageItemType::Text && !item.text.empty()) {
                 page_text += item.text;
                 page_text += '\n';
+                if (item.vertical) {
+                    for (const auto &ref : item.footnotes) {
+                        if (ref.kind == PageItem::FootnoteRef::Kind::RubyText) {
+                            page_text += ref.content;
+                            page_text += '\n';
+                        }
+                    }
+                }
             }
         }
         return page_text;
@@ -2367,12 +2529,47 @@ private:
         return output;
     }
 
+    bool vertical_footnote_popup() const
+    {
+        return !_footnote_popup_annotation && _page_index >= 0 &&
+            _page_index < static_cast<int>(_pages.size()) &&
+            !_pages[_page_index].empty() && _pages[_page_index].front().vertical;
+    }
+
+    std::vector<std::string> footnote_popup_columns(int text_height)
+    {
+        std::vector<std::string> columns;
+        auto &renderer = reader_text_renderer();
+        size_t begin = 0;
+        while (begin <= _footnote_popup_text.size()) {
+            const size_t end = _footnote_popup_text.find('\n', begin);
+            std::string paragraph = _footnote_popup_text.substr(
+                begin, end == std::string::npos ? std::string::npos : end - begin);
+            if (!paragraph.empty() && paragraph.back() == '\r') paragraph.pop_back();
+            if (paragraph.empty()) {
+                columns.emplace_back();
+            } else {
+                auto wrapped = renderer.layoutUtf8VerticalParagraph(paragraph, text_height, 0);
+                for (auto &column : wrapped) columns.push_back(std::move(column.text));
+            }
+            if (end == std::string::npos) break;
+            begin = end + 1;
+        }
+        return columns;
+    }
+
     int footnote_popup_page_count()
     {
         if (_footnote_popup_text.empty()) return 1;
         auto &renderer = reader_text_renderer();
         const int line_h = std::max(42, renderer.lineHeight());
         const int max_box_h = M5.Display.height() * 68 / 100;
+        if (vertical_footnote_popup()) {
+            const int box_w = std::max(80, static_cast<int>(M5.Display.width()) - 48);
+            const int max_columns = std::max(1, (box_w - 56) / line_h);
+            const auto columns = footnote_popup_columns(std::max(1, max_box_h - 94));
+            return std::max(1, (static_cast<int>(columns.size()) + max_columns - 1) / max_columns);
+        }
         const int max_lines = std::max(1, (max_box_h - 94) / line_h);
         const auto lines = footnote_popup_lines(
             std::max(40, static_cast<int>(M5.Display.width()) - 104));
@@ -2451,7 +2648,7 @@ private:
                              result->annotation.total_count,
                              result->annotation.has_more ? 1 : 0);
                 } else if (current) {
-                    _footnote_popup_text = "Comments are temporarily unavailable.\n\n" +
+            _footnote_popup_text = std::string(ui_locale::text(ui_locale::TextId::CommentsUnavailable)) + "\n\n" +
                                            result->error;
                     _annotation_redraw_pending = true;
                     ESP_LOGW(TAG, "annotation fetch failed range=%s error=%s",
@@ -2490,6 +2687,39 @@ private:
     {
         if (!result || _page_index < 0 || _page_index >= static_cast<int>(_pages.size())) return false;
         auto &renderer = reader_text_renderer();
+        const auto &page = _pages[static_cast<size_t>(_page_index)];
+        if (!page.empty() && page.front().vertical) {
+            int right = content_x() + content_width();
+            for (const auto &item : page) {
+                if (item.type == PageItemType::Text) {
+                    const int column_width = std::max(1, item.height);
+                    int top = content_y() + item.x_offset;
+                    if (item.centered) {
+                        top = content_y() + std::max(0,
+                            (content_height() - renderer.measureUtf8Vertical(item.text)) / 2);
+                    }
+                    for (const auto &ref : item.footnotes) {
+                        if (is_annotation_ref(ref) &&
+                            !weread::store::public_comments_enabled()) continue;
+                        if (ref.byte_start >= ref.byte_end || ref.byte_end > item.text.size()) continue;
+                        const int ref_top = top + renderer.measureUtf8Vertical(
+                            item.text.substr(0, ref.byte_start));
+                        const int ref_height = std::max(renderer.verticalCellAdvance(),
+                            renderer.measureUtf8Vertical(item.text.substr(
+                                ref.byte_start, ref.byte_end - ref.byte_start)));
+                        if (touch_x >= right - column_width - 12 && touch_x <= right + 12 &&
+                            touch_y >= ref_top - 12 && touch_y <= ref_top + ref_height + 12) {
+                            *result = ref;
+                            return true;
+                        }
+                    }
+                    right -= column_width;
+                } else {
+                    right -= item.type == PageItemType::Image ? item.width : item.height;
+                }
+            }
+            return false;
+        }
         int y = content_y();
         const int line_h = std::max(1, renderer.lineHeight());
         for (const auto &item : _pages[static_cast<size_t>(_page_index)]) {
@@ -2534,13 +2764,13 @@ private:
             } else {
                 annotation.range = range;
                 _footnote_popup_annotation_data = annotation;
-                _footnote_popup_text = "Loading comments...";
+                _footnote_popup_text = ui_locale::text(ui_locale::TextId::CommentsLoading);
                 queue_annotation_fetch(ref.target, annotation, false);
             }
         } else if (!resolve_footnote_content(ref, &_footnote_popup_text)) {
             _footnote_popup_text = _footnote_popup_annotation
                 ? "Comments for this underline are unavailable."
-                : "Footnote content is unavailable.";
+                : ui_locale::text(ui_locale::TextId::FootnoteUnavailable);
         }
         _footnote_popup_page = 0;
         _footnote_popup_visible = true;
@@ -2555,8 +2785,39 @@ private:
         const int box_w = std::max(80, w - box_x * 2);
         const int text_x = box_x + 28;
         const int text_w = std::max(40, box_w - 56);
-        auto lines = footnote_popup_lines(text_w);
         const int max_box_h = h * 68 / 100;
+        if (vertical_footnote_popup()) {
+            const int column_w = std::max(42, renderer.lineHeight());
+            const int max_columns = std::max(1, text_w / column_w);
+            const auto columns = footnote_popup_columns(std::max(1, max_box_h - 94));
+            const int page_count = std::max(1,
+                (static_cast<int>(columns.size()) + max_columns - 1) / max_columns);
+            _footnote_popup_page = std::clamp(_footnote_popup_page, 0, page_count - 1);
+            const size_t first = static_cast<size_t>(_footnote_popup_page * max_columns);
+            const size_t last = std::min(columns.size(), first + static_cast<size_t>(max_columns));
+            const int box_y = h - max_box_h - 24;
+            gfx.fillRect(box_x, box_y, box_w, max_box_h, TFT_WHITE);
+            gfx.drawRect(box_x, box_y, box_w, max_box_h, TFT_BLACK);
+            gfx.drawFastHLine(box_x, box_y + 58, box_w, TFT_BLACK);
+            std::string title = ui_locale::text(ui_locale::TextId::Footnote);
+            if (page_count > 1) {
+                title += " " + std::to_string(_footnote_popup_page + 1) + "/" +
+                    std::to_string(page_count);
+            }
+            system_font::draw_left(gfx, title.c_str(), text_x, box_y + 10, TFT_BLACK);
+            std::string visible_text;
+            for (size_t i = first; i < last; ++i) visible_text += columns[i];
+            renderer.preparePage(visible_text);
+            const int right = box_x + box_w - 28;
+            const int text_y = box_y + 72;
+            for (size_t i = first; i < last; ++i) {
+                const int x = right - static_cast<int>(i - first + 1) * column_w;
+                renderer.drawStyledUtf8VerticalColumn(gfx, columns[i], {}, x, text_y,
+                                                      column_w, TFT_BLACK);
+            }
+            return;
+        }
+        auto lines = footnote_popup_lines(text_w);
         const int max_lines = std::max(1, (max_box_h - 94) / line_h);
         const int page_count = std::max(1, (static_cast<int>(lines.size()) + max_lines - 1) / max_lines);
         _footnote_popup_page = std::clamp(_footnote_popup_page, 0, page_count - 1);
@@ -2569,8 +2830,12 @@ private:
         gfx.fillRect(box_x, box_y, box_w, box_h, TFT_WHITE);
         gfx.drawRect(box_x, box_y, box_w, box_h, TFT_BLACK);
         gfx.drawFastHLine(box_x, box_y + 58, box_w, TFT_BLACK);
-        std::string title = _footnote_popup_annotation ? "Underline comments" : "Footnote";
-        if (_footnote_popup_annotation && _annotation_loading) title += " · Loading";
+        std::string title = ui_locale::text(_footnote_popup_annotation
+            ? ui_locale::TextId::UnderlineComments : ui_locale::TextId::Footnote);
+        if (_footnote_popup_annotation && _annotation_loading) {
+            title += " · ";
+            title += ui_locale::text(ui_locale::TextId::CommentsLoading);
+        }
         if (page_count > 1) {
             title += " " + std::to_string(_footnote_popup_page + 1) + "/" + std::to_string(page_count);
         }
@@ -2665,6 +2930,82 @@ private:
         draw_topbar(M5.Display, w);
     }
 
+    void draw_vertical_page_content(lgfx::LGFXBase &gfx,
+                                    const document_layout::Page &page,
+                                    bool prepare_glyphs,
+                                    bool allow_hw_jpeg)
+    {
+        const int64_t started = esp_timer_get_time();
+        auto &renderer = reader_text_renderer();
+        const std::string page_text = page_text_for_prepare(page);
+        if (prepare_glyphs && !page_text.empty() &&
+            !(prefetch_matches(_spine_index, _page_index) && _prefetch.glyph_ready)) {
+            renderer.preparePage(page_text);
+        }
+        const int cell = renderer.verticalCellAdvance();
+        int right = content_x() + content_width();
+        for (size_t i = 0; i < page.size() && right > content_x(); ++i) {
+            if ((i & 7) == 0) vTaskDelay(1);
+            const PageItem &item = page[i];
+            if (item.type == PageItemType::Text) {
+                const int column_width = std::max(1, item.height);
+                const int x = right - column_width;
+                const int base_width = item.vertical_ruby_lane ? cell : column_width;
+                int y = content_y() + item.x_offset;
+                if (item.centered) {
+                    y = content_y() + std::max(0,
+                        (content_height() - renderer.measureUtf8Vertical(item.text)) / 2);
+                }
+                renderer.drawStyledUtf8VerticalColumn(gfx, item.text, item.styles,
+                                                      x, y, base_width, TFT_BLACK);
+                for (const auto &ref : item.footnotes) {
+                    if (is_annotation_ref(ref) &&
+                        !weread::store::public_comments_enabled()) continue;
+                    if (ref.byte_start >= ref.byte_end || ref.byte_end > item.text.size()) continue;
+                    const int top = y + renderer.measureUtf8Vertical(
+                        item.text.substr(0, ref.byte_start));
+                    const int length = std::max(cell, renderer.measureUtf8Vertical(
+                        item.text.substr(ref.byte_start, ref.byte_end - ref.byte_start)));
+                    if (ref.kind == PageItem::FootnoteRef::Kind::RubyText) {
+                        const bool drawn = item.vertical_ruby_lane &&
+                            renderer.drawUtf8VerticalRuby(gfx, ref.content,
+                                x + base_width + 2, top, length,
+                                column_width - base_width - 2, TFT_BLACK);
+                        if (!drawn) gfx.drawCircle(x + column_width - 5, top + 5, 3, TFT_BLACK);
+                    } else if (top < content_y() + content_height()) {
+                        gfx.drawFastVLine(x - 2, top, std::min(length,
+                            content_y() + content_height() - top), TFT_BLACK);
+                    }
+                }
+                right -= column_width;
+            } else if (item.type == PageItemType::Space) {
+                right -= item.height;
+            } else if (item.type == PageItemType::HorizontalRule) {
+                gfx.drawFastVLine(right - item.height / 2,
+                                  content_y() + content_height() / 8,
+                                  content_height() * 3 / 4, TFT_BLACK);
+                right -= item.height;
+            } else if (item.type == PageItemType::Image) {
+                CachedImage image;
+                const int draw_x = right - item.width;
+                const int draw_y = content_y() +
+                    std::max(0, (content_height() - item.height) / 2);
+                if (probe_resource_image(item.resource, &image)) {
+                    ImageDrawStats stats;
+                    draw_resource_image_memory(gfx, item.resource, image,
+                                               draw_x, draw_y, item.width, item.height,
+                                               item.scale, allow_hw_jpeg, &stats);
+                } else {
+                    system_font::draw_left(gfx, "[image]", draw_x, draw_y);
+                }
+                right -= item.width;
+            }
+        }
+        ESP_LOGI(TAG, "vertical page draw: items=%u time=%lld ms",
+                 static_cast<unsigned>(page.size()),
+                 (esp_timer_get_time() - started) / 1000);
+    }
+
     void draw_page_content(lgfx::LGFXBase &gfx,
                            const document_layout::Page &page,
                            int w,
@@ -2673,6 +3014,10 @@ private:
                            bool allow_hw_jpeg,
                            bool log_image_stats)
     {
+        if (!page.empty() && page.front().vertical) {
+            draw_vertical_page_content(gfx, page, prepare_glyphs, allow_hw_jpeg);
+            return;
+        }
         const int64_t draw_begin = esp_timer_get_time();
         int64_t prepare_us = 0;
         int64_t text_us = 0;

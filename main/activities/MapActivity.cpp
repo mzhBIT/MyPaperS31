@@ -10,6 +10,7 @@
 #include "renderer/TurboJpegDecoder.h"
 #include "storage/app_paths.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include "wifi/wifi_setting.h"
 
 #include <M5Unified.h>
@@ -44,11 +45,44 @@ bool file_exists(const char *path)
     return true;
 }
 
+std::string localized_map_error(const std::string &error)
+{
+    using ui_locale::TextId;
+    struct ErrorText { const char *source; TextId id; };
+    static constexpr ErrorText exact[] = {
+        {"Network time synchronization failed", TextId::MapTimeSyncFailed},
+        {"AMap returned an invalid image", TextId::MapInvalidImage},
+        {"AMap API key is invalid or expired", TextId::MapKeyInvalid},
+        {"AMap daily request limit reached", TextId::MapDailyLimit},
+        {"AMap request rate limit reached", TextId::MapRateLimit},
+        {"AMap API key is not configured", TextId::MapKeyMissing},
+        {"Failed to create map cache file", TextId::MapCacheCreateFailed},
+        {"Failed to create AMap HTTPS client", TextId::MapHttpsInitFailed},
+        {"AMap image is too large", TextId::MapImageTooLarge},
+        {"Failed while downloading map image", TextId::MapDownloadFailed},
+        {"Failed to commit map cache file", TextId::MapCacheCommitFailed},
+    };
+    for (const auto &entry : exact) {
+        if (error == entry.source) return ui_locale::text(entry.id);
+    }
+    static constexpr ErrorText prefixes[] = {
+        {"AMap connection failed: ", TextId::MapConnectionFailedPrefix},
+        {"AMap HTTP error ", TextId::MapHttpErrorPrefix},
+    };
+    for (const auto &entry : prefixes) {
+        const std::string prefix(entry.source);
+        if (error.rfind(prefix, 0) == 0) {
+            return std::string(ui_locale::text(entry.id)) + error.substr(prefix.size());
+        }
+    }
+    return error;
+}
+
 class MapActivity final : public Activity {
 public:
     ~MapActivity() override
     {
-        wifi_setting_deinit(true);
+        wifi_setting_release();
     }
 
     void on_create() override
@@ -57,14 +91,14 @@ public:
         _map_format = AmapClient::probe_image(app_paths::map_image_file());
         _has_map = _map_format != AmapImageFormat::Unknown;
         if (_has_map) {
-            draw_map(true, "Cached map");
+            draw_map(true, ui_locale::text(ui_locale::TextId::CachedMap));
         } else {
-            draw_status("Loading map...", true);
+            draw_status(ui_locale::text(ui_locale::TextId::LoadingMap), true);
         }
         M5.Display.waitDisplay();
 
         if (_config.api_key.empty()) {
-            _message = "Set AMap API Key in Settings";
+            _message = ui_locale::text(ui_locale::TextId::SetAmapKeyHint);
             draw_current(false);
             return;
         }
@@ -141,7 +175,7 @@ private:
     bool connect_wifi()
     {
         if (wifi_setting_is_connected()) return true;
-        _message = "Connecting WiFi...";
+        _message = ui_locale::text(ui_locale::TextId::ConnectingWifi);
         draw_current(false);
         M5.Display.waitDisplay();
         const esp_err_t error =
@@ -151,7 +185,8 @@ private:
             ESP_LOGI(TAG, "WiFi ready for map session");
             return true;
         }
-        _message = std::string("WiFi failed: ") + esp_err_to_name(error);
+        _message = std::string(ui_locale::text(ui_locale::TextId::WifiFailedPrefix)) +
+                   esp_err_to_name(error);
         ESP_LOGW(TAG, "WiFi connection failed: %s", esp_err_to_name(error));
         return false;
     }
@@ -200,7 +235,7 @@ private:
     bool reload_map()
     {
         if (_config.api_key.empty()) {
-            _message = "Set AMap API Key in Settings";
+            _message = ui_locale::text(ui_locale::TextId::SetAmapKeyHint);
             draw_current(false);
             return false;
         }
@@ -209,7 +244,7 @@ private:
             draw_current(false);
             return false;
         }
-        _message = "Loading map...";
+        _message = ui_locale::text(ui_locale::TextId::LoadingMap);
         draw_current(false);
         M5.Display.waitDisplay();
         AmapMapResult result = _client.fetch_static_map(
@@ -220,7 +255,7 @@ private:
         // decoding and the memory-sensitive GC16 refresh pipeline start.
         _client.close();
         if (!result.success) {
-            _message = result.error;
+            _message = localized_map_error(result.error);
             draw_current(false);
             return false;
         }
@@ -286,7 +321,7 @@ private:
         const int width = M5.Display.width();
         M5.Display.fillRect(0, 0, width, HEADER_H, TFT_WHITE);
         system_font::draw_left(M5.Display, "<", 18, 12, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Map", width / 2, 12, TFT_BLACK);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Map), width / 2, 12, TFT_BLACK);
         M5.Display.drawFastHLine(0, HEADER_H - 1, width, TFT_BLACK);
     }
 
@@ -329,7 +364,7 @@ private:
         M5.Display.fillScreen(TFT_WHITE);
         if (!draw_image()) {
             _has_map = false;
-            system_font::draw_center(M5.Display, "Map image decode failed",
+            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::MapDecodeFailed),
                                      M5.Display.width() / 2,
                                      M5.Display.height() / 2, TFT_BLACK);
         }
@@ -356,7 +391,8 @@ private:
     void draw_current(bool quality)
     {
         if (_has_map) draw_map(quality, _message);
-        else draw_status(_message.empty() ? "Tap to load map" : _message, quality);
+        else draw_status(_message.empty() ? ui_locale::text(ui_locale::TextId::TapToLoadMap)
+                                          : _message, quality);
     }
 };
 

@@ -3,6 +3,7 @@
 #include "reader_font.h"
 #include "reader_style.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include "ui/reader_background.h"
 #include "ui/reader_book_cover.h"
 #include "weread/WereadStore.h"
@@ -22,54 +23,66 @@ constexpr int CHAPTER_INDEX_H = 52;
 
 const char *base_name(const char *path)
 {
-    if (!path || !path[0]) return "Default";
+    if (!path || !path[0]) return ui_locale::text(ui_locale::TextId::DefaultFont);
     const char *slash = strrchr(path, '/');
     return slash ? slash + 1 : path;
 }
 
 void setting_text(int index, script_conversion::Mode script_mode, bool script_failed,
+                  reader_writing_mode::Mode writing_mode,
                   std::string *name, std::string *value)
 {
     ReaderStyle style = reader_style_get();
     char buf[64] = {};
     switch (index) {
     case 0:
-        *name = "Font";
+        *name = ui_locale::text(ui_locale::TextId::Font);
         *value = base_name(reader_font_path());
         break;
     case 1:
-        *name = "Font size";
+        *name = ui_locale::text(ui_locale::TextId::FontSize);
         snprintf(buf, sizeof(buf), "%d", style.font_size);
         *value = buf;
         break;
     case 2:
-        *name = "Line spacing";
+        *name = ui_locale::text(ui_locale::TextId::LineSpacing);
         snprintf(buf, sizeof(buf), "%d", style.line_spacing);
         *value = buf;
         break;
     case 3:
-        *name = "First-line indent";
+        *name = ui_locale::text(ui_locale::TextId::FirstLineIndent);
         snprintf(buf, sizeof(buf), "%d", style.first_line_indent);
         *value = buf;
         break;
     case 4:
-        *name = "Paragraph gap";
+        *name = ui_locale::text(ui_locale::TextId::ParagraphGap);
         snprintf(buf, sizeof(buf), "%.1f", style.paragraph_spacing * 0.1f);
         *value = buf;
         break;
     case 5:
-        *name = "Left margin";
+        *name = ui_locale::text(ui_locale::TextId::LeftMargin);
         snprintf(buf, sizeof(buf), "%d", style.margin_left);
         *value = buf;
         break;
     case 6:
-        *name = "Right margin";
+        *name = ui_locale::text(ui_locale::TextId::RightMargin);
         snprintf(buf, sizeof(buf), "%d", style.margin_right);
         *value = buf;
         break;
     case 7:
-        *name = "Script";
-        *value = script_failed ? "Dict missing" : script_conversion::mode_name(script_mode);
+        *name = ui_locale::text(ui_locale::TextId::Script);
+        *value = script_failed ? ui_locale::text(ui_locale::TextId::DictionaryMissing)
+                 : ui_locale::text(script_mode == script_conversion::Mode::Simplified
+                     ? ui_locale::TextId::Simplified
+                     : script_mode == script_conversion::Mode::Traditional
+                         ? ui_locale::TextId::Traditional : ui_locale::TextId::Original);
+        break;
+    case 8:
+        *name = ui_locale::text(ui_locale::TextId::WritingDirection);
+        *value = ui_locale::text(writing_mode == reader_writing_mode::Mode::VerticalRl
+            ? ui_locale::TextId::VerticalRightToLeft
+            : writing_mode == reader_writing_mode::Mode::Horizontal
+                ? ui_locale::TextId::Horizontal : ui_locale::TextId::Automatic);
         break;
     default:
         name->clear();
@@ -83,8 +96,8 @@ void beauty_text(int index, bool weread_mode, std::string *name, std::string *va
     ReaderStyle style = reader_style_get();
     char buf[64] = {};
     if (weread_mode && index == 5) {
-        *name = "Public comments";
-        *value = weread::store::public_comments_enabled() ? "On" : "Off";
+        *name = ui_locale::text(ui_locale::TextId::PublicComments);
+        *value = ui_locale::text(weread::store::public_comments_enabled() ? ui_locale::TextId::On : ui_locale::TextId::Off);
         return;
     }
     static constexpr int kBeautyOrder[] = {
@@ -102,35 +115,36 @@ void beauty_text(int index, bool weread_mode, std::string *name, std::string *va
         : -1;
     switch (base_index) {
     case 0:
-        *name = "Underline";
-        *value = reader_style_underline_name(style.underline_type);
+        *name = ui_locale::text(ui_locale::TextId::Underline);
+        *value = ui_locale::text(style.underline_type == 1 ? ui_locale::TextId::Solid
+                  : style.underline_type == 2 ? ui_locale::TextId::Dashed : ui_locale::TextId::None);
         break;
     case 1:
-        *name = "Hide header";
-        *value = style.hide_header ? "On" : "Off";
+        *name = ui_locale::text(ui_locale::TextId::HideHeader);
+        *value = ui_locale::text(style.hide_header ? ui_locale::TextId::On : ui_locale::TextId::Off);
         break;
     case 2:
-        *name = "Background";
+        *name = ui_locale::text(ui_locale::TextId::Background);
         *value = reader_background_enabled()
                    ? base_name(reader_background_path())
-                   : "Off";
+                   : ui_locale::text(ui_locale::TextId::Off);
         break;
     case 3:
-        *name = "Book cover";
+        *name = ui_locale::text(ui_locale::TextId::BookCover);
         *value = reader_book_cover_enabled()
                    ? base_name(reader_book_cover_path())
-                   : "Off";
+                   : ui_locale::text(ui_locale::TextId::Off);
         break;
     case 4:
-        *name = "Refresh";
+        *name = ui_locale::text(ui_locale::TextId::Refresh);
         *value = reader_style_refresh_mode_name(style.refresh_mode);
         break;
     case 5:
-        *name = "Show images";
-        *value = style.show_images ? "On" : "Off";
+        *name = ui_locale::text(ui_locale::TextId::ShowImages);
+        *value = ui_locale::text(style.show_images ? ui_locale::TextId::On : ui_locale::TextId::Off);
         break;
     case 6:
-        *name = "Full refresh";
+        *name = ui_locale::text(ui_locale::TextId::FullRefresh);
         snprintf(buf, sizeof(buf), "%d", style.full_refresh_pages);
         *value = buf;
         break;
@@ -164,6 +178,7 @@ void ReaderOverlay::set_book_path(const char *path)
 {
     m_book_path = path ? path : "";
     m_script_mode = script_conversion::book_mode(m_book_path.c_str());
+    m_writing_mode = reader_writing_mode::book_mode(m_book_path.c_str());
     m_script_load_failed = !script_conversion::prepare(m_script_mode);
     if (m_script_load_failed) m_script_mode = script_conversion::Mode::Original;
 }
@@ -289,6 +304,16 @@ void ReaderOverlay::adjust_setting(int delta)
             }
             return;
         }
+        if (m_setting_focus == 8) {
+            if (m_book_path.empty()) return;
+            const int next = (static_cast<int>(m_writing_mode) + (delta < 0 ? 2 : 1)) % 3;
+            const auto mode = static_cast<reader_writing_mode::Mode>(next);
+            if (reader_writing_mode::set_book_mode(m_book_path.c_str(), mode)) {
+                m_writing_mode = mode;
+                m_settings_dirty = true;
+            }
+            return;
+        }
         switch (m_setting_focus) {
         case 1:
             style.font_size += delta * 2;
@@ -353,7 +378,7 @@ void ReaderOverlay::adjust_setting(int delta)
 int ReaderOverlay::active_setting_count() const
 {
     return m_tab == Tab::Beauty ? BEAUTY_COUNT + (m_weread_mode ? 1 : 0)
-        : SETTING_COUNT - (m_book_path.empty() ? 1 : 0);
+        : SETTING_COUNT - (m_book_path.empty() ? 2 : 0);
 }
 
 void ReaderOverlay::move_setting_focus(int delta)
@@ -388,7 +413,7 @@ int ReaderOverlay::hit_setting(int x, int y, int *direction) const
     if (has_controls && direction) {
         int plus_x = cell_x + cell_w - STEP_BOX_W;
         int minus_x = plus_x - STEP_BOX_GAP - VALUE_W - STEP_BOX_GAP - STEP_BOX_W;
-        bool toggle = (m_tab == Tab::Settings && index == 7) ||
+        bool toggle = (m_tab == Tab::Settings && (index == 7 || index == 8)) ||
                       (m_tab == Tab::Beauty &&
                        (is_public_comments_row(index) || beauty_index <= 1 ||
                         beauty_index == 4 || beauty_index == 5));
@@ -569,9 +594,11 @@ void ReaderOverlay::draw_settings(const Geometry &g)
         std::string name;
         std::string value;
         if (m_tab == Tab::Beauty) beauty_text(index, m_weread_mode, &name, &value);
-        else setting_text(index, m_script_mode, m_script_load_failed, &name, &value);
+        else setting_text(index, m_script_mode, m_script_load_failed,
+                          m_writing_mode, &name, &value);
         int text_y = row_y0 + std::max(1, (row_h - system_font::line_height()) / 2);
-        system_font::draw_left(M5.Display, name, x + 12, text_y, fg);
+        const int max_name_w = std::max(40, w - STEP_BOX_W * 2 - STEP_BOX_GAP * 2 - VALUE_W - 32);
+        system_font::draw_left(M5.Display, system_font::ellipsize(name, max_name_w), x + 12, text_y, fg);
 
         const int beauty_index = m_tab == Tab::Beauty ? beauty_base_index(index) : -1;
         if ((m_tab == Tab::Settings && index == 0) ||
@@ -586,7 +613,7 @@ void ReaderOverlay::draw_settings(const Geometry &g)
             int box_y = row_y0 + 6;
             int box_h = std::max(28, row_h - 12);
             int control_text_y = box_y + std::max(0, (box_h - system_font::line_height()) / 2);
-            bool toggle = (m_tab == Tab::Settings && index == 7) ||
+            bool toggle = (m_tab == Tab::Settings && (index == 7 || index == 8)) ||
                           (m_tab == Tab::Beauty &&
                            (is_public_comments_row(index) || beauty_index <= 1 ||
                             beauty_index == 4 || beauty_index == 5));
@@ -620,8 +647,9 @@ void ReaderOverlay::draw_chapters(const Geometry &g)
     int list_y = g.body_y + CHAPTER_INDEX_H;
     int list_h = std::max(1, g.body_h - CHAPTER_INDEX_H - PROGRESS_AREA_H);
     char position[40] = {};
-    if (count > 0) snprintf(position, sizeof(position), "Chapter  %d / %d", m_chapter_focus + 1, count);
-    else snprintf(position, sizeof(position), "No chapter directory");
+    if (count > 0) snprintf(position, sizeof(position), "%s  %d / %d",
+                            ui_locale::text(ui_locale::TextId::Chapter), m_chapter_focus + 1, count);
+    else snprintf(position, sizeof(position), "%s", ui_locale::text(ui_locale::TextId::NoChapterDirectory));
     int index_text_y = g.body_y + std::max(1, (CHAPTER_INDEX_H - system_font::line_height()) / 2);
     system_font::draw_center(M5.Display, position, g.x + g.w / 2, index_text_y, TFT_BLACK);
     M5.Display.drawFastHLine(g.x + PANEL_PAD, list_y, g.w - PANEL_PAD * 2, TFT_BLACK);
@@ -655,7 +683,8 @@ void ReaderOverlay::draw_chapters(const Geometry &g)
         : std::clamp(m_chapters.progress ? m_chapters.progress(m_chapters.context) : 0,
                      0, 100);
     char progress_label[32] = {};
-    snprintf(progress_label, sizeof(progress_label), "Progress  %d%%", percent);
+    snprintf(progress_label, sizeof(progress_label), "%s  %d%%",
+             ui_locale::text(ui_locale::TextId::Progress), percent);
     system_font::draw_center(M5.Display, progress_label, g.x + g.w / 2,
                              progress_y + 10, TFT_BLACK);
     const int bar_x = g.x + PANEL_PAD + 24;
@@ -683,9 +712,9 @@ void ReaderOverlay::draw_tabs(const Geometry &g)
         M5.Display.fillRect(g.x + half + 1, g.tab_y + 1, g.w - half - 2, g.tab_h - 2,
                             settings ? TFT_WHITE : TFT_BLACK);
         int text_y = g.tab_y + std::max(2, (g.tab_h - system_font::line_height()) / 2);
-        system_font::draw_center(M5.Display, "Settings", g.x + half / 2, text_y,
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Settings), g.x + half / 2, text_y,
                                  settings ? TFT_WHITE : TFT_BLACK);
-        system_font::draw_center(M5.Display, "Beauty", g.x + half + (g.w - half) / 2, text_y,
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Beauty), g.x + half + (g.w - half) / 2, text_y,
                                  settings ? TFT_BLACK : TFT_WHITE);
         return;
     }
@@ -708,11 +737,11 @@ void ReaderOverlay::draw_tabs(const Geometry &g)
     M5.Display.fillRect(x2 + 1, g.tab_y + 1, x3 - x2 - 2, g.tab_h - 2,
                         chapters ? TFT_BLACK : TFT_WHITE);
     int text_y = g.tab_y + std::max(2, (g.tab_h - system_font::line_height()) / 2);
-    system_font::draw_center(M5.Display, "Settings", x0 + (x1 - x0) / 2, text_y,
+    system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Settings), x0 + (x1 - x0) / 2, text_y,
                              settings ? TFT_WHITE : TFT_BLACK);
-    system_font::draw_center(M5.Display, "Beauty", x1 + (x2 - x1) / 2, text_y,
+    system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Beauty), x1 + (x2 - x1) / 2, text_y,
                              beauty ? TFT_WHITE : TFT_BLACK);
-    system_font::draw_center(M5.Display, "Chapters", x2 + (x3 - x2) / 2, text_y,
+    system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Chapters), x2 + (x3 - x2) / 2, text_y,
                              chapters ? TFT_WHITE : TFT_BLACK);
 }
 

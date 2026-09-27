@@ -12,6 +12,7 @@
 #include "storage/app_paths.h"
 #include "time/time_basis.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include "ui/VirtualKeyboard.h"
 #include "ui/home_preferences.h"
 #include "wifi/wifi_setting.h"
@@ -37,7 +38,8 @@ constexpr int PAD = 20;
 constexpr int SETTINGS_ROW_Y = 94;
 constexpr int SETTINGS_ROW_H = 110;
 constexpr int SETTINGS_ROW_GAP = 0;
-constexpr int SETTINGS_ITEM_COUNT = 10;
+constexpr int SETTINGS_ITEM_COUNT = 11;
+constexpr int SETTINGS_VISIBLE_ROWS = 10;
 
 constexpr int SCAN_TOP = 94;
 constexpr int SCAN_ROW_H = 92;
@@ -172,7 +174,7 @@ private:
     void shutdown_wifi()
     {
         if (!_wifi_active) return;
-        esp_err_t ret = wifi_setting_deinit(true);
+        esp_err_t ret = wifi_setting_release();
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "Wi-Fi shutdown after settings operation failed: %s",
                      esp_err_to_name(ret));
@@ -185,7 +187,7 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("WiFi Settings");
+        draw_header(ui_locale::text(ui_locale::TextId::WifiSettings));
         system_font::draw_center(M5.Display, message, M5.Display.width() / 2,
                                  M5.Display.height() / 2 - system_font::line_height(),
                                  TFT_BLACK);
@@ -198,7 +200,7 @@ private:
     {
         _view = View::Scan;
         _scan_message.clear();
-        draw_waiting("Scanning nearby WiFi...", first_draw);
+        draw_waiting(ui_locale::text(ui_locale::TextId::ScanningWifi), first_draw);
 
         wifi_setting_ap_t records[24] = {};
         size_t count = 0;
@@ -220,9 +222,9 @@ private:
             std::sort(_aps.begin(), _aps.end(), [](const AccessPoint &a, const AccessPoint &b) {
                 return a.rssi > b.rssi;
             });
-            if (_aps.empty()) _scan_message = "No visible WiFi networks";
+            if (_aps.empty()) _scan_message = ui_locale::text(ui_locale::TextId::NoVisibleWifi);
         } else {
-            _scan_message = std::string("Scan failed: ") + esp_err_to_name(ret);
+            _scan_message = std::string(ui_locale::text(ui_locale::TextId::ScanFailed)) + esp_err_to_name(ret);
         }
         _focus = 0;
         _scroll = 0;
@@ -245,11 +247,11 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("WiFi Settings");
+        draw_header(ui_locale::text(ui_locale::TextId::WifiSettings));
 
         if (_aps.empty()) {
             system_font::draw_center(M5.Display,
-                                     _scan_message.empty() ? "No WiFi networks" : _scan_message,
+                                     _scan_message.empty() ? ui_locale::text(ui_locale::TextId::NoWifiNetworks) : _scan_message,
                                      width / 2, 260, TFT_BLACK);
         }
 
@@ -268,10 +270,14 @@ private:
                                    system_font::ellipsize(_aps[index].ssid, width - 250),
                                    PAD + 14, y + 5, foreground);
             char details[72] = {};
+            const std::string saved = _aps[index].ssid == _saved_ssid
+                                          ? std::string("  ") + ui_locale::text(ui_locale::TextId::Saved)
+                                          : std::string();
             snprintf(details, sizeof(details), "%d dBm  CH %d  %s%s",
                      _aps[index].rssi, _aps[index].channel,
-                     _aps[index].secured ? "Locked" : "Open",
-                     _aps[index].ssid == _saved_ssid ? "  Saved" : "");
+                     _aps[index].secured ? ui_locale::text(ui_locale::TextId::Locked)
+                                         : ui_locale::text(ui_locale::TextId::OpenNetwork),
+                     saved.c_str());
             system_font::draw_left(M5.Display, details, PAD + 14, y + 45, foreground);
         }
 
@@ -279,7 +285,7 @@ private:
                                  width - PAD * 2, SCAN_FOOTER_H, 8, TFT_WHITE);
         M5.Display.drawRoundRect(PAD, SCAN_FOOTER_Y,
                                  width - PAD * 2, SCAN_FOOTER_H, 8, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Rescan", width / 2,
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Rescan), width / 2,
                                  SCAN_FOOTER_Y +
                                      std::max(0, (SCAN_FOOTER_H - system_font::line_height()) / 2),
                                  TFT_BLACK);
@@ -328,11 +334,11 @@ private:
         _focus = index;
         _keyboard.reset();
         _keyboard.set_secret(true);
-        _keyboard.set_placeholder("Password");
-        _keyboard.set_submit_label("Connect & Save");
+        _keyboard.set_placeholder(ui_locale::text(ui_locale::TextId::Password));
+        _keyboard.set_submit_label(ui_locale::text(ui_locale::TextId::ConnectAndSave));
         _keyboard_message = _aps[index].secured
-                                ? "Enter the network password"
-                                : "Open network: no password required";
+                                ? ui_locale::text(ui_locale::TextId::EnterNetworkPassword)
+                                : ui_locale::text(ui_locale::TextId::OpenNetworkNoPassword);
         _view = View::Keyboard;
         draw_keyboard();
     }
@@ -344,7 +350,7 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("WiFi Password");
+        draw_header(ui_locale::text(ui_locale::TextId::WifiPassword));
         system_font::draw_center(M5.Display,
                                  system_font::ellipsize(_aps[_selected].ssid, width - PAD * 2),
                                  width / 2, 104, TFT_BLACK);
@@ -379,7 +385,7 @@ private:
                 connect_selected();
                 return true;
             case ui::VirtualKeyboardAction::LimitReached:
-                _keyboard_message = "Password is limited to 63 characters";
+                _keyboard_message = ui_locale::text(ui_locale::TextId::PasswordLengthHint);
                 draw_keyboard();
                 return true;
             case ui::VirtualKeyboardAction::None:
@@ -393,12 +399,12 @@ private:
         if (_selected < 0 || _selected >= static_cast<int>(_aps.size())) return;
         const AccessPoint &ap = _aps[_selected];
         if (ap.secured && _keyboard.empty()) {
-            _keyboard_message = "Password is required for this network";
+            _keyboard_message = ui_locale::text(ui_locale::TextId::PasswordRequired);
             draw_keyboard();
             return;
         }
 
-        draw_waiting("Verifying WiFi connection...", false);
+        draw_waiting(ui_locale::text(ui_locale::TextId::VerifyingWifi), false);
         _wifi_active = true;
         esp_err_t connect_ret = wifi_setting_connect(ap.ssid.c_str(), _keyboard.text().c_str(),
                                                      CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS);
@@ -411,12 +417,12 @@ private:
 
         _result_success = connect_ret == ESP_OK && save_ret == ESP_OK;
         if (_result_success) {
-            _result_message = "Connected and saved as default";
+            _result_message = ui_locale::text(ui_locale::TextId::ConnectedAndSaved);
             load_saved_ssid();
         } else if (connect_ret != ESP_OK) {
-            _result_message = std::string("Connection failed: ") + esp_err_to_name(connect_ret);
+            _result_message = std::string(ui_locale::text(ui_locale::TextId::ConnectionFailed)) + esp_err_to_name(connect_ret);
         } else {
-            _result_message = std::string("NVS save failed: ") + esp_err_to_name(save_ret);
+            _result_message = std::string(ui_locale::text(ui_locale::TextId::NvsSaveFailed)) + esp_err_to_name(save_ret);
         }
         _view = View::Result;
         draw_result();
@@ -428,8 +434,9 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("WiFi Settings");
-        system_font::draw_center(M5.Display, _result_success ? "WiFi Ready" : "WiFi Error",
+        draw_header(ui_locale::text(ui_locale::TextId::WifiSettings));
+        system_font::draw_center(M5.Display, _result_success ? ui_locale::text(ui_locale::TextId::WifiReady)
+                                                       : ui_locale::text(ui_locale::TextId::WifiError),
                                  width / 2, 300, TFT_BLACK);
         if (_selected >= 0 && _selected < static_cast<int>(_aps.size())) {
             system_font::draw_center(M5.Display,
@@ -440,7 +447,8 @@ private:
                                  system_font::ellipsize(_result_message, width - PAD * 2),
                                  width / 2, 480, TFT_BLACK);
 
-        const char *action = _result_success ? "Done" : "Retry Password";
+        const char *action = _result_success ? ui_locale::text(ui_locale::TextId::Done)
+                                             : ui_locale::text(ui_locale::TextId::RetryPassword);
         M5.Display.fillRoundRect(80, 650, width - 160, 90, 9, TFT_BLACK);
         system_font::draw_center(M5.Display, action, width / 2,
                                  650 + std::max(0, (90 - system_font::line_height()) / 2),
@@ -516,8 +524,8 @@ private:
     void edit_api_key()
     {
         TextInputOptions options;
-        options.title = "DeepSeek API Key";
-        options.submit_label = "Save";
+        options.title = ui_locale::text(ui_locale::TextId::DeepSeekApiKey);
+        options.submit_label = ui_locale::text(ui_locale::TextId::Save);
         options.max_bytes = 255;
         options.start_in_chinese = false;
         options.secret = true;
@@ -544,8 +552,8 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("DeepSeek Settings");
-        system_font::draw_center(M5.Display, "Validating API key...",
+        draw_header(ui_locale::text(ui_locale::TextId::DeepSeekSettings));
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ValidatingApiKey),
                                  M5.Display.width() / 2, 420, TFT_BLACK);
         M5.Display.display();
         M5.Display.endWrite();
@@ -571,17 +579,17 @@ private:
     {
         DeepSeekConfig config;
         bool has_key = deepseek_config_load(&config);
-        std::string key_detail = has_key ? "Configured (tap to replace)"
-                                         : "Not configured";
+        std::string key_detail = has_key ? ui_locale::text(ui_locale::TextId::ConfiguredTapReplace)
+                                         : ui_locale::text(ui_locale::TextId::NotConfigured);
         M5.Display.startWrite();
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("DeepSeek Settings");
-        draw_row(130, "API Key", key_detail, _focus == 0);
-        draw_row(290, "Default Model", deepseek_model_label(config.default_model), _focus == 1);
-        draw_row(450, "Test Connection", "Validate Flash and Pro access", _focus == 2);
+        draw_header(ui_locale::text(ui_locale::TextId::DeepSeekSettings));
+        draw_row(130, ui_locale::text(ui_locale::TextId::DeepSeekApiKey), key_detail, _focus == 0);
+        draw_row(290, ui_locale::text(ui_locale::TextId::DefaultModel), deepseek_model_label(config.default_model), _focus == 1);
+        draw_row(450, ui_locale::text(ui_locale::TextId::TestConnection), ui_locale::text(ui_locale::TextId::ValidateModelsHint), _focus == 2);
         system_font::draw_center(M5.Display,
-                                 _message.empty() ? "The API key is stored in device NVS" :
+                                 _message.empty() ? ui_locale::text(ui_locale::TextId::ApiKeyNvsHint) :
                                                     system_font::ellipsize(_message, M5.Display.width() - 40),
                                  M5.Display.width() / 2, 630, TFT_BLACK);
         M5.Display.display();
@@ -649,8 +657,8 @@ private:
     void edit_access_secret()
     {
         TextInputOptions options;
-        options.title = "Zhihu Access Secret";
-        options.submit_label = "Save";
+        options.title = ui_locale::text(ui_locale::TextId::ZhihuAccessSecret);
+        options.submit_label = ui_locale::text(ui_locale::TextId::Save);
         options.max_bytes = 255;
         options.start_in_chinese = false;
         options.secret = true;
@@ -669,14 +677,14 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("ZhiHu Settings");
-        system_font::draw_center(M5.Display, "Loading Zhihu hot list...",
+        draw_header(ui_locale::text(ui_locale::TextId::ZhihuSettings));
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::LoadingZhihuHotList),
                                  M5.Display.width() / 2, 420, TFT_BLACK);
         M5.Display.display();
         M5.Display.endWrite();
         M5.Display.waitDisplay();
         ZhihuHotListResult result = ZhihuClient::fetch_hot_list(config, 1, true);
-        _message = result.success ? "Connection successful" : result.error;
+        _message = result.success ? ui_locale::text(ui_locale::TextId::ConnectionSuccessful) : result.error;
         draw(false);
     }
 
@@ -699,13 +707,15 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("ZhiHu Settings");
-        draw_row(170, "Access Secret",
-                 configured ? "Configured (tap to replace)" : "Not configured",
+        draw_header(ui_locale::text(ui_locale::TextId::ZhihuSettings));
+        draw_row(170, ui_locale::text(ui_locale::TextId::AccessSecret),
+                 configured ? ui_locale::text(ui_locale::TextId::ConfiguredTapReplace)
+                            : ui_locale::text(ui_locale::TextId::NotConfigured),
                  _focus == 0);
-        draw_row(330, "Test Connection", "Request one hot-list item", _focus == 1);
+        draw_row(330, ui_locale::text(ui_locale::TextId::TestConnection),
+                 ui_locale::text(ui_locale::TextId::RequestHotListHint), _focus == 1);
         system_font::draw_center(M5.Display,
-                                 _message.empty() ? "The secret is stored in device NVS" :
+                                 _message.empty() ? ui_locale::text(ui_locale::TextId::SecretNvsHint) :
                                                     system_font::ellipsize(_message,
                                                                            M5.Display.width() - 40),
                                  M5.Display.width() / 2, 540, TFT_BLACK);
@@ -774,8 +784,8 @@ private:
     void edit_api_key()
     {
         TextInputOptions options;
-        options.title = "AMap Web Service Key";
-        options.submit_label = "Save";
+        options.title = ui_locale::text(ui_locale::TextId::AmapWebServiceKey);
+        options.submit_label = ui_locale::text(ui_locale::TextId::Save);
         options.max_bytes = 255;
         options.start_in_chinese = false;
         options.secret = true;
@@ -792,7 +802,8 @@ private:
     void clear_cache()
     {
         const int removed = std::remove(app_paths::map_image_file());
-        _message = removed == 0 ? "Map cache cleared" : "Map cache is already empty";
+        _message = removed == 0 ? ui_locale::text(ui_locale::TextId::MapCacheCleared)
+                                : ui_locale::text(ui_locale::TextId::MapCacheEmpty);
         draw(false);
     }
 
@@ -821,15 +832,17 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_text);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("Map Settings");
-        draw_row(180, "AMap API Key",
-                 configured ? "Configured (tap to replace)" : "Not configured",
+        draw_header(ui_locale::text(ui_locale::TextId::MapSettings));
+        draw_row(180, ui_locale::text(ui_locale::TextId::AmapApiKey),
+                 configured ? ui_locale::text(ui_locale::TextId::ConfiguredTapReplace)
+                            : ui_locale::text(ui_locale::TextId::NotConfigured),
                  _focus == 0);
-        draw_row(340, "Clear Map Cache",
-                 cached ? "Cached map is available" : "No cached map",
+        draw_row(340, ui_locale::text(ui_locale::TextId::ClearMapCache),
+                 cached ? ui_locale::text(ui_locale::TextId::CachedMapAvailable)
+                        : ui_locale::text(ui_locale::TextId::NoCachedMap),
                  _focus == 1);
         system_font::draw_center(M5.Display,
-                                 _message.empty() ? "The API key is stored in device NVS"
+                                 _message.empty() ? ui_locale::text(ui_locale::TextId::ApiKeyNvsHint)
                                                   : _message,
                                  M5.Display.width() / 2, 550, TFT_BLACK);
         M5.Display.display();
@@ -941,9 +954,11 @@ private:
         _confirm = false;
         _confirm_choice = 0;
         char message[80] = {};
-        std::snprintf(message, sizeof(message),
-                      ok ? "Cleared %u files, %s" : "Partially cleared %u files, %s",
+        std::snprintf(message, sizeof(message), "%s %u %s, %s",
+                      ui_locale::text(ok ? ui_locale::TextId::ClearedFiles
+                                         : ui_locale::TextId::PartiallyClearedFiles),
                       static_cast<unsigned>(removed.files),
+                      ui_locale::text(ui_locale::TextId::ImageFiles),
                       format_cache_bytes(removed.bytes).c_str());
         _message = message;
         draw(false);
@@ -955,20 +970,21 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("RSS Cache");
+        draw_header(ui_locale::text(ui_locale::TextId::RssCache));
 
         char summary[80] = {};
-        std::snprintf(summary, sizeof(summary), "%u image files, %s",
+        std::snprintf(summary, sizeof(summary), "%u %s, %s",
                       static_cast<unsigned>(_info.files),
+                      ui_locale::text(ui_locale::TextId::ImageFiles),
                       format_cache_bytes(_info.bytes).c_str());
         system_font::draw_center(M5.Display, summary, width / 2, 180, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Removes downloaded RSS images and temporary article data",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::RssCacheRemoveHint),
                                  width / 2, 260, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Subscriptions and saved Bing wallpapers are kept",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::RssCacheKeepHint),
                                  width / 2, 320, TFT_BLACK);
 
         M5.Display.fillRoundRect(70, 430, width - 140, 100, 8, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Clear RSS Cache", width / 2,
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ClearRssCache), width / 2,
                                  430 + std::max(0, (100 - system_font::line_height()) / 2),
                                  TFT_WHITE);
         if (!_message.empty()) {
@@ -980,7 +996,7 @@ private:
         if (_confirm) {
             M5.Display.fillRoundRect(35, 665, width - 70, 250, 10, TFT_WHITE);
             M5.Display.drawRoundRect(35, 665, width - 70, 250, 10, TFT_BLACK);
-            system_font::draw_center(M5.Display, "Clear all RSS temporary cache?",
+            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::RssCacheConfirm),
                                      width / 2, 700, TFT_BLACK);
             const int button_y = 790;
             const int button_w = (width - 105) / 2;
@@ -992,10 +1008,10 @@ private:
             M5.Display.fillRoundRect(right_x, button_y, button_w, 90, 8,
                                      _confirm_choice == 1 ? TFT_BLACK : TFT_WHITE);
             M5.Display.drawRoundRect(right_x, button_y, button_w, 90, 8, TFT_BLACK);
-            system_font::draw_center(M5.Display, "Cancel", left_x + button_w / 2,
+            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Cancel), left_x + button_w / 2,
                                      button_y + 20,
                                      _confirm_choice == 0 ? TFT_WHITE : TFT_BLACK);
-            system_font::draw_center(M5.Display, "Clear", right_x + button_w / 2,
+            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Clear), right_x + button_w / 2,
                                      button_y + 20,
                                      _confirm_choice == 1 ? TFT_WHITE : TFT_BLACK);
         }
@@ -1009,7 +1025,9 @@ class NetworkSettingsActivity final : public Activity {
 public:
     void on_create() override
     {
-        _mode = wifi_setting_get_network_mode();
+        _network_mode = wifi_setting_get_network_mode();
+        _power_mode = wifi_setting_get_power_mode();
+        _focus = _network_mode == WIFI_SETTING_NETWORK_WIFI ? 0 : 1;
         draw(true);
     }
 
@@ -1020,12 +1038,11 @@ public:
             return true;
         }
         if (event.type != TouchEventType::Tap) return false;
-        const int first_y = 210;
-        for (int i = 0; i < 2; ++i) {
-            const int top = first_y + i * 156;
+        for (int i = 0; i < 4; ++i) {
+            const int top = row_top(i);
             if (event.y >= top && event.y < top + 126) {
-                select(i == 0 ? WIFI_SETTING_NETWORK_WIFI
-                              : WIFI_SETTING_NETWORK_CELLULAR);
+                _focus = i;
+                select_focused();
                 return true;
             }
         }
@@ -1039,42 +1056,57 @@ public:
             return true;
         }
         if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
-            _mode = _mode == WIFI_SETTING_NETWORK_WIFI
-                        ? WIFI_SETTING_NETWORK_CELLULAR
-                        : WIFI_SETTING_NETWORK_WIFI;
+            _focus = (_focus + (key == APP_KEY_DOWN ? 1 : 3)) % 4;
             draw(false);
             return true;
         }
         if (key == APP_KEY_OK) {
-            select(_mode);
+            select_focused();
             return true;
         }
         return false;
     }
 
 private:
-    wifi_setting_network_mode_t _mode = WIFI_SETTING_NETWORK_WIFI;
+    wifi_setting_network_mode_t _network_mode = WIFI_SETTING_NETWORK_WIFI;
+    wifi_setting_power_mode_t _power_mode = WIFI_SETTING_POWER_ON_DEMAND;
+    int _focus = 0;
 
-    void select(wifi_setting_network_mode_t mode)
+    static int row_top(int index) { return index < 2 ? 210 + index * 156
+                                                      : 610 + (index - 2) * 156; }
+
+    void select_focused()
     {
-        esp_err_t ret = wifi_setting_set_network_mode(mode);
+        esp_err_t ret = ESP_OK;
+        if (_focus < 2) {
+            const wifi_setting_network_mode_t mode = _focus == 0
+                ? WIFI_SETTING_NETWORK_WIFI : WIFI_SETTING_NETWORK_CELLULAR;
+            ret = wifi_setting_set_network_mode(mode);
+            if (ret == ESP_OK) _network_mode = mode;
+        } else {
+            const wifi_setting_power_mode_t mode = _focus == 2
+                ? WIFI_SETTING_POWER_ALWAYS_ON : WIFI_SETTING_POWER_ON_DEMAND;
+            ret = wifi_setting_set_power_mode(mode);
+            _power_mode = wifi_setting_get_power_mode();
+        }
         if (ret != ESP_OK) {
-            ESP_LOGW(TAG, "save network preference failed: %s", esp_err_to_name(ret));
+            ESP_LOGW(TAG, "save network setting failed: %s", esp_err_to_name(ret));
             return;
         }
-        _mode = mode;
-        ActivityManager::instance().pop();
+        draw(false);
     }
 
-    void draw_option(int index, const char *title, const char *detail)
+    void draw_option(int index, const char *title, const char *detail, bool active)
     {
-        const int top = 210 + index * 156;
-        const bool active = (index == 0) == (_mode == WIFI_SETTING_NETWORK_WIFI);
+        const int top = row_top(index);
         M5.Display.drawFastHLine(PAD, top, M5.Display.width() - PAD * 2, TFT_BLACK);
+        if (_focus == index) {
+            M5.Display.fillRect(PAD + 2, top + 20, 5, 88, TFT_BLACK);
+        }
         system_font::draw_left(M5.Display, title, PAD + 18, top + 20, TFT_BLACK);
         system_font::draw_left(M5.Display, detail, PAD + 18, top + 68,
                                active ? TFT_BLACK : 0x8410);
-        system_font::draw_right(M5.Display, active ? "Selected" : "",
+        system_font::draw_right(M5.Display, active ? ui_locale::text(ui_locale::TextId::Selected) : "",
                                 M5.Display.width() - PAD - 18, top + 20, TFT_BLACK);
         M5.Display.drawFastHLine(PAD, top + 125, M5.Display.width() - PAD * 2, TFT_BLACK);
     }
@@ -1084,11 +1116,21 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("Network");
-        system_font::draw_center(M5.Display, "Choose the connection used for online services",
+        draw_header(ui_locale::text(ui_locale::TextId::Network));
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::NetworkChoiceHint),
                                  M5.Display.width() / 2, 130, 0x8410);
-        draw_option(0, "WiFi", "Use saved WiFi; 4G data is not selected");
-        draw_option(1, "4G", "Use ML307A cellular data; C6 WiFi powers off");
+        draw_option(0, "WiFi", ui_locale::text(ui_locale::TextId::WifiChoiceHint),
+                    _network_mode == WIFI_SETTING_NETWORK_WIFI);
+        draw_option(1, "4G", ui_locale::text(ui_locale::TextId::CellularChoiceHint),
+                    _network_mode == WIFI_SETTING_NETWORK_CELLULAR);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::WifiPowerMode),
+                                 M5.Display.width() / 2, 535, 0x8410);
+        draw_option(2, ui_locale::text(ui_locale::TextId::WifiAlwaysOn),
+                    ui_locale::text(ui_locale::TextId::WifiAlwaysOnHint),
+                    _power_mode == WIFI_SETTING_POWER_ALWAYS_ON);
+        draw_option(3, ui_locale::text(ui_locale::TextId::WifiOnDemand),
+                    ui_locale::text(ui_locale::TextId::WifiOnDemandHint),
+                    _power_mode == WIFI_SETTING_POWER_ON_DEMAND);
         M5.Display.display();
         M5.Display.endWrite();
     }
@@ -1177,8 +1219,8 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_text);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("Frontlight");
-        system_font::draw_center(M5.Display, "Brightness", width / 2, 250, TFT_BLACK);
+        draw_header(ui_locale::text(ui_locale::TextId::Frontlight));
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Brightness), width / 2, 250, TFT_BLACK);
         system_font::draw_center(M5.Display, std::to_string(frontlight_get_percent()) + "%",
                                  width / 2, 334, TFT_BLACK);
 
@@ -1196,9 +1238,9 @@ private:
             if (on) M5.Display.fillRoundRect(x, CONTROL_Y + 43, layout.bar_w, 46, 5, TFT_BLACK);
             else M5.Display.drawRoundRect(x, CONTROL_Y + 43, layout.bar_w, 46, 5, TFT_BLACK);
         }
-        system_font::draw_center(M5.Display, "Tap - / + to adjust by 5%",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::BrightnessStepHint),
                                  width / 2, 730, TFT_DARKGRAY);
-        system_font::draw_center(M5.Display, "0% turns the frontlight off",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::FrontlightOffHint),
                                  width / 2, 786, TFT_DARKGRAY);
         M5.Display.display();
         M5.Display.endWrite();
@@ -1211,7 +1253,8 @@ std::string time_basis_label()
     char label[32];
     std::snprintf(label, sizeof(label), "UTC%c%02d:%02d%s", offset < 0 ? '-' : '+',
                   std::abs(offset) / 60, std::abs(offset) % 60,
-                  offset == 480 ? "  Beijing" : "");
+                  offset == 480 ? "  " : "");
+    if (offset == 480) return std::string(label) + ui_locale::text(ui_locale::TextId::Beijing);
     return label;
 }
 
@@ -1279,8 +1322,8 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("Time Basis");
-        system_font::draw_center(M5.Display, "Time zone for phone and SMS",
+        draw_header(ui_locale::text(ui_locale::TextId::TimeBasis));
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::PhoneSmsTimezone),
                                  width / 2, 165, TFT_BLACK);
         system_font::draw_center(M5.Display, time_basis_label(), width / 2, 255,
                                  TFT_BLACK);
@@ -1291,22 +1334,98 @@ private:
                                  355, TFT_BLACK);
         system_font::draw_center(M5.Display, "+ 30 min", 80 + button_width + button_width / 2,
                                  355, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Default: Beijing (UTC+08:00)",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::BeijingDefaultHint),
                                  width / 2, 510, TFT_DARKGRAY);
-        system_font::draw_center(M5.Display, "Uses modem time; no RTC required",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ModemTimeHint),
                                  width / 2, 575, TFT_DARKGRAY);
         M5.Display.drawRect(40, 680, width - 80, 150, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Modem clock digits",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ModemClockDigits),
                                  width / 2, 700, TFT_BLACK);
         system_font::draw_center(M5.Display,
                                  time_basis_modem_clock_is_utc()
-                                     ? "UTC (ignore reported zone)"
-                                     : "Use reported time zone",
+                                     ? ui_locale::text(ui_locale::TextId::UtcIgnoreReportedZone)
+                                     : ui_locale::text(ui_locale::TextId::UseReportedZone),
                                  width / 2, 755, TFT_BLACK);
-        system_font::draw_center(M5.Display, "SMS receive time uses its own zone",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::SmsOwnZoneHint),
                                  width / 2, 880, TFT_DARKGRAY);
         if (!_error.empty()) system_font::draw_center(M5.Display, _error, width / 2,
                                                        950, TFT_BLACK);
+        M5.Display.display();
+        M5.Display.endWrite();
+    }
+};
+
+class LanguageSettingsActivity final : public Activity {
+public:
+    void on_create() override { draw(); }
+
+    bool on_touch(const TouchEvent &event) override
+    {
+        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+            ActivityManager::instance().pop();
+            return true;
+        }
+        if (event.type != TouchEventType::Tap) return false;
+        constexpr int row_y = 230;
+        constexpr int row_h = 170;
+        if (event.y < row_y || event.y >= row_y + row_h * 3) return false;
+        choose((event.y - row_y) / row_h);
+        return true;
+    }
+
+    bool on_key(int key) override
+    {
+        if (key == APP_KEY_BACK) {
+            ActivityManager::instance().pop();
+            return true;
+        }
+        if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
+            _focus = (_focus + (key == APP_KEY_DOWN ? 1 : 2)) % 3;
+            draw();
+            return true;
+        }
+        if (key == APP_KEY_OK) {
+            choose(_focus);
+            return true;
+        }
+        return false;
+    }
+
+private:
+    int _focus = static_cast<int>(ui_locale::get());
+
+    void choose(int index)
+    {
+        auto language = static_cast<ui_locale::Language>(index);
+        esp_err_t result = ui_locale::set(language);
+        if (result != ESP_OK) {
+            ESP_LOGW(TAG, "save UI language failed: %s", esp_err_to_name(result));
+            draw();
+            return;
+        }
+        ActivityManager::instance().pop();
+    }
+
+    void draw()
+    {
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        M5.Display.fillScreen(TFT_WHITE);
+        draw_header(ui_locale::text(ui_locale::TextId::SelectLanguage));
+        constexpr int row_y = 230;
+        constexpr int row_h = 170;
+        for (int i = 0; i < 3; ++i) {
+            int y = row_y + i * row_h;
+            const char *name = ui_locale::native_name(static_cast<ui_locale::Language>(i));
+            M5.Display.drawFastHLine(PAD, y + row_h - 1,
+                                    M5.Display.width() - PAD * 2, TFT_BLACK);
+            if (i == _focus) M5.Display.fillRect(PAD + 2, y + 35, 5, row_h - 70, TFT_BLACK);
+            system_font::draw_left(M5.Display, name, PAD + 25, y + 48, TFT_BLACK);
+            if (i == static_cast<int>(ui_locale::get())) {
+                system_font::draw_right(M5.Display, "*", M5.Display.width() - PAD - 20,
+                                        y + 48, TFT_BLACK);
+            }
+        }
         M5.Display.display();
         M5.Display.endWrite();
     }
@@ -1316,6 +1435,7 @@ class SettingActivity final : public Activity {
 public:
     void on_create() override
     {
+        _seen_generation = ui_locale::generation();
         draw(true);
     }
 
@@ -1325,7 +1445,9 @@ public:
             _seen_show = true;
             return;
         }
-        draw(false);
+        const bool changed = _seen_generation != ui_locale::generation();
+        _seen_generation = ui_locale::generation();
+        draw(changed);
     }
 
     bool on_touch(const TouchEvent &event) override
@@ -1335,14 +1457,29 @@ public:
             return true;
         }
         if (event.type == TouchEventType::Tap) {
-            for (int i = 0; i < SETTINGS_ITEM_COUNT; ++i) {
-                int top = SETTINGS_ROW_Y + i * (SETTINGS_ROW_H + SETTINGS_ROW_GAP);
+            for (int row = 0; row < SETTINGS_VISIBLE_ROWS; ++row) {
+                int i = _first_visible + row;
+                if (i >= SETTINGS_ITEM_COUNT) break;
+                int top = SETTINGS_ROW_Y + row * (SETTINGS_ROW_H + SETTINGS_ROW_GAP);
                 if (event.y >= top && event.y < top + SETTINGS_ROW_H) {
                     _focus = i;
                     open_focused();
                     return true;
                 }
             }
+        }
+        if (event.type == TouchEventType::SwipeUp &&
+            _first_visible < SETTINGS_ITEM_COUNT - SETTINGS_VISIBLE_ROWS) {
+            ++_first_visible;
+            _focus = std::max(_focus, _first_visible);
+            draw(false);
+            return true;
+        }
+        if (event.type == TouchEventType::SwipeDown && _first_visible > 0) {
+            --_first_visible;
+            _focus = std::min(_focus, _first_visible + SETTINGS_VISIBLE_ROWS - 1);
+            draw(false);
+            return true;
         }
         return false;
     }
@@ -1355,11 +1492,13 @@ public:
         }
         if (key == APP_KEY_UP) {
             _focus = (_focus + SETTINGS_ITEM_COUNT - 1) % SETTINGS_ITEM_COUNT;
+            ensure_focus_visible();
             draw(false);
             return true;
         }
         if (key == APP_KEY_DOWN) {
             _focus = (_focus + 1) % SETTINGS_ITEM_COUNT;
+            ensure_focus_visible();
             draw(false);
             return true;
         }
@@ -1373,18 +1512,29 @@ public:
 private:
     bool _seen_show = false;
     int _focus = 0;
+    int _first_visible = 0;
+    uint32_t _seen_generation = 0;
+
+    void ensure_focus_visible()
+    {
+        if (_focus < _first_visible) _first_visible = _focus;
+        if (_focus >= _first_visible + SETTINGS_VISIBLE_ROWS) {
+            _first_visible = _focus - SETTINGS_VISIBLE_ROWS + 1;
+        }
+    }
 
     void open_focused()
     {
-        if (_focus == 0) ActivityManager::instance().push(new NetworkSettingsActivity());
-        else if (_focus == 1) ActivityManager::instance().push(new WifiSettingsActivity());
-        else if (_focus == 2) ActivityManager::instance().push(new FrontlightSettingsActivity());
-        else if (_focus == 3) ActivityManager::instance().push(new DeepSeekSettingsActivity());
-        else if (_focus == 4) ActivityManager::instance().push(new ZhihuSettingsActivity());
-        else if (_focus == 5) ActivityManager::instance().push(new MapSettingsActivity());
-        else if (_focus == 6) launch_epd_diagnostics();
-        else if (_focus == 7) ActivityManager::instance().push(new RssCacheSettingsActivity());
-        else if (_focus == 8) ActivityManager::instance().push(new TimeBasisSettingsActivity());
+        if (_focus == 0) ActivityManager::instance().push(new LanguageSettingsActivity());
+        else if (_focus == 1) ActivityManager::instance().push(new NetworkSettingsActivity());
+        else if (_focus == 2) ActivityManager::instance().push(new WifiSettingsActivity());
+        else if (_focus == 3) ActivityManager::instance().push(new FrontlightSettingsActivity());
+        else if (_focus == 4) ActivityManager::instance().push(new DeepSeekSettingsActivity());
+        else if (_focus == 5) ActivityManager::instance().push(new ZhihuSettingsActivity());
+        else if (_focus == 6) ActivityManager::instance().push(new MapSettingsActivity());
+        else if (_focus == 7) launch_epd_diagnostics();
+        else if (_focus == 8) ActivityManager::instance().push(new RssCacheSettingsActivity());
+        else if (_focus == 9) ActivityManager::instance().push(new TimeBasisSettingsActivity());
         else {
             const bool enabled = !home_icon_frames_enabled();
             const esp_err_t result = home_set_icon_frames_enabled(enabled);
@@ -1400,9 +1550,10 @@ private:
                    bool navigable = true)
     {
         const int width = M5.Display.width();
-        const int top = SETTINGS_ROW_Y + index * (SETTINGS_ROW_H + SETTINGS_ROW_GAP);
+        if (index < _first_visible || index >= _first_visible + SETTINGS_VISIBLE_ROWS) return;
+        const int top = SETTINGS_ROW_Y + (index - _first_visible) * (SETTINGS_ROW_H + SETTINGS_ROW_GAP);
         const bool selected = index == _focus;
-        if (index == 0) {
+        if (index == _first_visible) {
             M5.Display.drawFastHLine(PAD, top, width - PAD * 2, TFT_BLACK);
         }
         M5.Display.drawFastHLine(PAD, top + SETTINGS_ROW_H - 1,
@@ -1431,39 +1582,44 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("Settings");
-        std::string detail = configured ? std::string("Default: ") + ssid
-                                        : "Not configured";
+        using ui_locale::TextId;
+        using ui_locale::text;
+        draw_header(text(TextId::Settings));
+        std::string detail = configured ? std::string(text(TextId::DefaultNetwork)) + ssid
+                                        : text(TextId::NotConfigured);
         const wifi_setting_network_mode_t network_mode = wifi_setting_get_network_mode();
-        draw_item(0, "Network", network_mode == WIFI_SETTING_NETWORK_CELLULAR
-                                      ? "4G cellular data"
-                                      : "WiFi");
-        draw_item(1, "WiFi", detail);
-        draw_item(2, "Frontlight", std::to_string(frontlight_get_percent()) + "%");
+        draw_item(0, text(TextId::Language), ui_locale::native_name(ui_locale::get()));
+        draw_item(1, text(TextId::Network), network_mode == WIFI_SETTING_NETWORK_CELLULAR
+                                      ? text(TextId::CellularData)
+                                      : std::string(text(TextId::Wifi)) + " / " +
+                                            text(wifi_setting_get_power_mode() == WIFI_SETTING_POWER_ALWAYS_ON
+                                                 ? TextId::WifiAlwaysOn : TextId::WifiOnDemand));
+        draw_item(2, text(TextId::Wifi), detail);
+        draw_item(3, text(TextId::Frontlight), std::to_string(frontlight_get_percent()) + "%");
         DeepSeekConfig deepseek;
         bool has_api_key = deepseek_config_load(&deepseek);
-        draw_item(3, "DeepSeek",
-                  has_api_key ? std::string("Configured, ") + deepseek_model_label(deepseek.default_model)
-                              : "API key not configured");
+        draw_item(4, text(TextId::DeepSeek),
+                  has_api_key ? std::string(text(TextId::ApiKeyConfigured)) + ", " + deepseek_model_label(deepseek.default_model)
+                              : text(TextId::ApiKeyNotConfigured));
         ZhihuConfig zhihu;
-        draw_item(4, "ZhiHu",
-                  zhihu_config_load(&zhihu) ? "Access Secret configured"
-                                            : "Access Secret not configured");
+        draw_item(5, text(TextId::Zhihu),
+                  zhihu_config_load(&zhihu) ? text(TextId::AccessSecretConfigured)
+                                            : text(TextId::AccessSecretNotConfigured));
         AmapConfig amap;
-        draw_item(5, "Map",
-                  amap_config_load(&amap) ? "AMap API key configured"
-                                          : "AMap API key not configured");
-        draw_item(6, "EPD Diagnostics",
-                  "Direction, grayscale, transitions and VCOM");
+        draw_item(6, text(TextId::Map),
+                  amap_config_load(&amap) ? text(TextId::ApiKeyConfigured)
+                                          : text(TextId::ApiKeyNotConfigured));
+        draw_item(7, text(TextId::EpdDiagnostics), text(TextId::EpdDiagnosticsDetail));
         RssCacheInfo rss_cache = rss_cache_info();
         char rss_detail[64] = {};
-        std::snprintf(rss_detail, sizeof(rss_detail), "%u files, %s",
+        std::snprintf(rss_detail, sizeof(rss_detail), "%u %s, %s",
                       static_cast<unsigned>(rss_cache.files),
+                      text(TextId::FilesUnit),
                       format_cache_bytes(rss_cache.bytes).c_str());
-        draw_item(7, "Clear RSS Cache", rss_detail);
-        draw_item(8, "Time Basis", time_basis_label());
-        draw_item(9, "Home Icon Frames",
-                  home_icon_frames_enabled() ? "On" : "Off", false);
+        draw_item(8, text(TextId::ClearRssCache), rss_detail);
+        draw_item(9, text(TextId::TimeBasis), time_basis_label());
+        draw_item(10, text(TextId::HomeIconFrames),
+                  home_icon_frames_enabled() ? text(TextId::On) : text(TextId::Off), false);
         M5.Display.display();
         M5.Display.endWrite();
     }
@@ -1477,12 +1633,12 @@ public:
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("WiFi Required");
-        system_font::draw_center(M5.Display, "WiFi is not configured",
+        draw_header(ui_locale::text(ui_locale::TextId::WifiRequired));
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::WifiNotConfigured),
                                  M5.Display.width() / 2, 350, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Open Setting > WiFi first",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::OpenWifiSettingsHint),
                                  M5.Display.width() / 2, 440, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Returning...",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Returning),
                                  M5.Display.width() / 2, 560, TFT_BLACK);
         M5.Display.display();
         M5.Display.endWrite();

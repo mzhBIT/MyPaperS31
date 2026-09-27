@@ -7,6 +7,7 @@
 #include "storage/app_paths.h"
 #include "storage/storage_sdcard.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include "wifi/wifi_setting.h"
 
 #include <M5Unified.h>
@@ -445,7 +446,7 @@ private:
 
         struct stat sd_st = {};
         if (stat("/sdcard", &sd_st) != 0 || !S_ISDIR(sd_st.st_mode)) {
-            _error_message = "SD card not mounted";
+            _error_message = ui_locale::text(ui_locale::TextId::SdCardNotMounted);
             ESP_LOGE(TAG, "sdcard mount point missing: errno=%d (%s)", errno, strerror(errno));
             return false;
         }
@@ -454,7 +455,7 @@ private:
             !ensure_dir_logged("/sdcard/images") ||
             !ensure_dir_logged("/sdcard/fonts") ||
             !ensure_dir_logged("/sdcard/music")) {
-            _error_message = "Create SD dirs failed";
+            _error_message = ui_locale::text(ui_locale::TextId::CreateSdDirsFailed);
             ESP_LOGE(TAG, "failed to create transfer dirs");
             return false;
         }
@@ -674,6 +675,12 @@ private:
             }
             _c6_powered = false;
         }
+        // AP-mode transfer temporarily owns the C6. Restore the persistent
+        // station connection after its server and radio have been released.
+        esp_err_t restore_ret = wifi_setting_start_always_on();
+        if (restore_ret != ESP_OK) {
+            ESP_LOGW(TAG, "restore always-on Wi-Fi failed: %s", esp_err_to_name(restore_ret));
+        }
     }
 
     void draw()
@@ -691,12 +698,12 @@ private:
             system_font::draw_left(M5.Display, system_font::ellipsize(text, M5.Display.width() - x * 2), x, y);
             y += line_h;
         };
-        system_font::draw_center(M5.Display, "WiFi Transfer", M5.Display.width() / 2, y);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::WifiTransfer), M5.Display.width() / 2, y);
         y += line_h + 10;
 
         if (_starting) {
-            draw_line("Starting WiFi...");
-            draw_line("Please wait.");
+            draw_line(ui_locale::text(ui_locale::TextId::StartingWifi));
+            draw_line(ui_locale::text(ui_locale::TextId::PleaseWait));
             M5.Display.display();
             M5.Display.endWrite();
             return;
@@ -704,37 +711,41 @@ private:
 
         if (_running) {
             if (_ap_mode) {
-                draw_line("Mode: AP hotspot");
-                draw_line("Connect WiFi:");
+                draw_line(ui_locale::text(ui_locale::TextId::ModeApHotspot));
+                draw_line(ui_locale::text(ui_locale::TextId::ConnectWifi));
                 draw_line(_network_name);
-                draw_line("Password: 12345678");
+                draw_line(ui_locale::text(ui_locale::TextId::ApPassword));
             } else {
-                draw_line("Mode: Router WiFi");
-                draw_line("Connected:");
+                draw_line(ui_locale::text(ui_locale::TextId::ModeRouterWifi));
+                draw_line(ui_locale::text(ui_locale::TextId::ConnectedLabel));
                 std::string show = _network_name;
                 if (show.size() > 20) show = show.substr(0, 17) + "...";
                 draw_line(show);
             }
             y += 8;
-            draw_line("Open browser:");
+            draw_line(ui_locale::text(ui_locale::TextId::OpenBrowser));
             std::string url = std::string("http://") + _ip;
             draw_line(url);
             y += 8;
-            draw_line("Web: smart upload + SD manager");
+            draw_line(ui_locale::text(ui_locale::TextId::WebUploadManager));
             y += 8;
-            draw_line(_last_ok ? "Last upload:" : "Upload error:");
+            draw_line(ui_locale::text(_last_ok ? ui_locale::TextId::LastUpload
+                                               : ui_locale::TextId::UploadError));
             std::string last = _last_name;
             if (last.size() > 20) last = last.substr(0, 17) + "...";
             draw_line(last);
             char bytes[48];
-            std::snprintf(bytes, sizeof(bytes), "%u bytes", (unsigned)_last_bytes);
+            std::snprintf(bytes, sizeof(bytes), ui_locale::text(ui_locale::TextId::ByteCountFormat),
+                          (unsigned)_last_bytes);
             draw_line(bytes);
-            system_font::draw_left(M5.Display, "BACK / OK: stop", x, M5.Display.height() - system_font::line_height() - 4);
+            system_font::draw_left(M5.Display, ui_locale::text(ui_locale::TextId::BackOkStop),
+                                   x, M5.Display.height() - system_font::line_height() - 4);
         } else {
-            draw_line(_error_message.empty() ? "Failed to start" : _error_message);
-            draw_line("WiFi server.");
+            draw_line(_error_message.empty() ? ui_locale::text(ui_locale::TextId::FailedToStart)
+                                             : _error_message);
+            draw_line(ui_locale::text(ui_locale::TextId::WifiServer));
             y += line_h + 10;
-            draw_line("BACK / OK: return");
+            draw_line(ui_locale::text(ui_locale::TextId::BackOkReturn));
         }
         M5.Display.display();
         M5.Display.endWrite();

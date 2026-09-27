@@ -9,6 +9,7 @@
 #include "deepseek/DeepSeekSessionStore.h"
 #include "ui/SystemFont.h"
 #include "ui/TextInputOverlay.h"
+#include "ui/UiLocale.h"
 #include "wifi/wifi_setting.h"
 
 #include <M5Unified.h>
@@ -42,6 +43,11 @@ std::string image_label(const std::string &path)
 {
     const size_t slash = path.find_last_of('/');
     return slash == std::string::npos ? path : path.substr(slash + 1);
+}
+
+std::string display_session_title(const std::string &title)
+{
+    return title == "New Chat" ? ui_locale::text(ui_locale::TextId::NewChat) : title;
 }
 
 void draw_header(const std::string &title)
@@ -212,11 +218,12 @@ public:
                 _streaming_active = false;
                 _status.clear();
             } else {
-                _status = "Reply received, but saving it failed";
+                _status = ui_locale::text(ui_locale::TextId::ReplySaveFailed);
             }
         } else {
             _streaming_active = false;
-            _status = event->result.canceled ? "Canceled" : event->result.error;
+            _status = event->result.canceled ? ui_locale::text(ui_locale::TextId::Canceled)
+                                              : event->result.error;
         }
         preserve_line_start(preserved_start);
         draw_chat(false);
@@ -323,7 +330,7 @@ private:
     {
         if (!_wifi_active && !wifi_setting_is_connected()) return;
         _wifi_active = false;
-        wifi_setting_deinit(true);
+        wifi_setting_release();
     }
 
     int visible_session_rows() const
@@ -350,7 +357,7 @@ private:
         M5.Display.setDither(false);
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("DeepSeek");
+        draw_header(ui_locale::text(ui_locale::TextId::DeepSeek));
         for (int row = 0; row < rows; ++row) {
             int index = _session_scroll + row;
             if (index >= session_row_count()) break;
@@ -360,11 +367,13 @@ private:
             uint16_t fg = selected ? TFT_WHITE : TFT_BLACK;
             M5.Display.fillRect(PAD, y, width - PAD * 2, SESSION_ROW_H - 4, bg);
             if (index == 0) {
-                system_font::draw_left(M5.Display, "+  New Chat", PAD + 16, y + 24, fg);
+                system_font::draw_left(M5.Display,
+                                       std::string("+  ") + ui_locale::text(ui_locale::TextId::NewChat),
+                                       PAD + 16, y + 24, fg);
             } else {
                 const auto &session = _sessions[index - 1];
                 system_font::draw_left(M5.Display,
-                                       system_font::ellipsize(session.title, width - 230),
+                                       system_font::ellipsize(display_session_title(session.title), width - 230),
                                        PAD + 16, y + 8, fg);
                 system_font::draw_left(M5.Display, deepseek_model_label(session.model),
                                        PAD + 16, y + 53, fg);
@@ -468,7 +477,8 @@ private:
         _delete_choice = 0;
         _delete_index = -1;
         _delete_title.clear();
-        _session_notice = removed ? std::string() : "Failed to delete conversation";
+        _session_notice = removed ? std::string()
+                                  : ui_locale::text(ui_locale::TextId::DeleteConversationFailed);
         load_sessions();
         draw_sessions(false);
     }
@@ -483,10 +493,10 @@ private:
         const int y = (height - box_height) / 2;
         M5.Display.fillRoundRect(x, y, box_width, box_height, 8, TFT_WHITE);
         M5.Display.drawRoundRect(x, y, box_width, box_height, 8, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Delete conversation?", width / 2,
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::DeleteConversation), width / 2,
                                  y + 20, TFT_BLACK);
         system_font::draw_center(M5.Display,
-                                 system_font::ellipsize(_delete_title, box_width - 48),
+                                 system_font::ellipsize(display_session_title(_delete_title), box_width - 48),
                                  width / 2, y + 82, TFT_BLACK);
 
         const int gap = 18;
@@ -501,10 +511,10 @@ private:
         M5.Display.fillRoundRect(right_x, button_y, button_width, button_height, 6,
                                  _delete_choice == 1 ? TFT_BLACK : TFT_WHITE);
         M5.Display.drawRoundRect(right_x, button_y, button_width, button_height, 6, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Cancel", left_x + button_width / 2,
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Cancel), left_x + button_width / 2,
                                  button_y + 12,
                                  _delete_choice == 0 ? TFT_WHITE : TFT_BLACK);
-        system_font::draw_center(M5.Display, "Delete", right_x + button_width / 2,
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Delete), right_x + button_width / 2,
                                  button_y + 12,
                                  _delete_choice == 1 ? TFT_WHITE : TFT_BLACK);
     }
@@ -547,7 +557,7 @@ private:
         } else if (index <= static_cast<int>(_sessions.size())) {
             _session = _sessions[index - 1];
             if (!_store.load_messages(_session.id, &_messages)) {
-                _status = "Failed to load conversation history";
+                _status = ui_locale::text(ui_locale::TextId::ConversationLoadFailed);
                 return;
             }
         } else {
@@ -586,20 +596,22 @@ private:
         int max_width = M5.Display.width() - PAD * 2 - 12;
         for (const auto &message : _messages) {
             const bool user = message.role == "user";
-            lines.push_back({user ? "You" : "DeepSeek", user});
+            lines.push_back({ui_locale::text(user ? ui_locale::TextId::You
+                                                  : ui_locale::TextId::DeepSeek), user});
             if (!message.image_path.empty()) {
-                lines.push_back({"Image: " + image_label(message.image_path), user});
+                lines.push_back({std::string(ui_locale::text(ui_locale::TextId::ImagePrefix)) +
+                                     image_label(message.image_path), user});
             }
             append_wrapped_lines(&lines, message.content, max_width, user);
             lines.push_back({});
         }
         if (_streaming_active || !_streaming_reply.empty()) {
-            lines.push_back({"DeepSeek", false});
+            lines.push_back({ui_locale::text(ui_locale::TextId::DeepSeek), false});
             append_wrapped_lines(&lines, _streaming_reply, max_width, false);
             lines.push_back({});
         }
         if (!_status.empty() && !_busy) {
-            lines.push_back({"Status", false});
+            lines.push_back({ui_locale::text(ui_locale::TextId::Status), false});
             append_wrapped_lines(&lines, _status, max_width, false);
         }
         return lines;
@@ -672,14 +684,15 @@ private:
         M5.Display.setDither(false);
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header(_session.title);
+        draw_header(display_session_title(_session.title));
 
         constexpr int toolbar_gap = 8;
         int toolbar_width = (width - PAD * 2 - toolbar_gap * 2) / 3;
         const char *toolbar_labels[] = {
-            "New",
+            ui_locale::text(ui_locale::TextId::NewChatShort),
             deepseek_model_label(_session.model),
-            _session.thinking ? "Think" : "No Think",
+            ui_locale::text(_session.thinking ? ui_locale::TextId::Think
+                                              : ui_locale::TextId::NoThink),
         };
         for (int i = 0; i < 3; ++i) {
             int x = PAD + i * (toolbar_width + toolbar_gap);
@@ -717,12 +730,14 @@ private:
         M5.Display.drawFastVLine(image_x, input_y + 6, CHAT_INPUT_H - 12, TFT_BLACK);
         M5.Display.drawFastVLine(voice_x, input_y + 6, CHAT_INPUT_H - 12, TFT_BLACK);
 
-        const std::string ready_label = _voice_input_mode ? "Hold to talk"
-            : _pending_image_path.empty() ? "Ask DeepSeek"
-                                          : "Image attached - type a message";
+        const std::string ready_label = ui_locale::text(
+            _voice_input_mode ? ui_locale::TextId::HoldToTalk
+            : _pending_image_path.empty() ? ui_locale::TextId::AskDeepSeek
+                                          : ui_locale::TextId::ImageAttachedTypeMessage);
         const char *input_label = !_busy ? ready_label.c_str()
-                                  : _session.thinking ? "Thinking deeply... (Back to cancel)"
-                                                      : "Thinking... (Back to cancel)";
+                                  : ui_locale::text(_session.thinking
+                                        ? ui_locale::TextId::ThinkingDeeplyCancel
+                                        : ui_locale::TextId::ThinkingCancel);
         const int label_width = std::max(1, image_x - input_x - 22);
         system_font::draw_left(M5.Display,
                                system_font::ellipsize(input_label, label_width),
@@ -813,7 +828,7 @@ private:
             _session.model = model;
             draw_chat(false);
         } else if (!_store.set_model(&_session, model)) {
-            _status = "Failed to save the model selection";
+            _status = ui_locale::text(ui_locale::TextId::ModelSaveFailed);
             draw_chat(false);
         } else {
             draw_chat(false);
@@ -827,7 +842,7 @@ private:
             _session.thinking = enabled;
             draw_chat(false);
         } else if (!_store.set_thinking(&_session, enabled)) {
-            _status = "Failed to save the thinking mode";
+            _status = ui_locale::text(ui_locale::TextId::ThinkingModeSaveFailed);
             draw_chat(false);
         } else {
             draw_chat(false);
@@ -837,8 +852,9 @@ private:
     void open_input()
     {
         TextInputOptions options;
-        options.title = std::string("Ask ") + deepseek_model_label(_session.model);
-        options.submit_label = "Send";
+        options.title = std::string(ui_locale::text(ui_locale::TextId::AskModelPrefix)) +
+                        deepseek_model_label(_session.model);
+        options.submit_label = ui_locale::text(ui_locale::TextId::Send);
         options.max_bytes = 2048;
         options.start_in_chinese = true;
         _text_input.open(options, [this](const std::string &value) {
@@ -858,7 +874,7 @@ private:
     void choose_image()
     {
         if (_session.model != DeepSeekModel::Flash) {
-            _status = "Image understanding requires V4 Flash";
+            _status = ui_locale::text(ui_locale::TextId::ImageRequiresFlash);
             draw_chat(false);
             return;
         }
@@ -866,7 +882,8 @@ private:
         launch_deepseek_image_picker([this](const std::string &path) {
             _pending_image_path = path;
             _open_input_after_image = true;
-            _status = "Image attached: " + image_label(path);
+            _status = std::string(ui_locale::text(ui_locale::TextId::ImageAttachedPrefix)) +
+                      image_label(path);
         });
     }
 
@@ -879,19 +896,20 @@ private:
         const std::string prompt = question.empty() ? "Describe this image." : question;
         if (_session.id.empty() &&
             !_store.create(_session.model, _session.thinking, &_session)) {
-            _status = "Failed to create a session on the SD card";
+            _status = ui_locale::text(ui_locale::TextId::SessionCreateFailed);
             draw_chat(false);
             return;
         }
         if (!_store.append_message(&_session, "user", prompt, image_path)) {
-            _status = "Failed to save the question";
+            _status = ui_locale::text(ui_locale::TextId::QuestionSaveFailed);
             draw_chat(false);
             return;
         }
         _messages.push_back({"user", prompt, image_path});
         _streaming_reply.clear();
         _streaming_active = true;
-        _status = _session.thinking ? "Thinking deeply..." : "Thinking...";
+        _status = ui_locale::text(_session.thinking ? ui_locale::TextId::ThinkingDeeply
+                                                    : ui_locale::TextId::Thinking);
         _busy = true;
         _cancel_requested = false;
         _exit_when_done = false;
@@ -902,7 +920,7 @@ private:
         if (!ensure_wifi()) {
             _busy = false;
             _streaming_active = false;
-            _status = "WiFi connection failed";
+            _status = ui_locale::text(ui_locale::TextId::WifiConnectionFailed);
             draw_chat(false);
             return;
         }
@@ -928,7 +946,7 @@ private:
             delete job;
             _busy = false;
             _streaming_active = false;
-            _status = "Failed to start the network task";
+            _status = ui_locale::text(ui_locale::TextId::NetworkTaskStartFailed);
             draw_chat(false);
         }
     }
@@ -957,12 +975,12 @@ public:
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("DeepSeek Setup Required");
-        system_font::draw_center(M5.Display, "DeepSeek API key is not configured",
+        draw_header(ui_locale::text(ui_locale::TextId::DeepSeekSetupRequired));
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::DeepSeekKeyNotConfigured),
                                  M5.Display.width() / 2, 350, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Open Settings > DeepSeek first",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::OpenDeepSeekSettingsHint),
                                  M5.Display.width() / 2, 440, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Tap to return",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::TapToReturn),
                                  M5.Display.width() / 2, 560, TFT_BLACK);
         M5.Display.display();
         M5.Display.endWrite();

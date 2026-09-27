@@ -4,6 +4,7 @@
 #include "ime/PinyinEngine.h"
 #include "ui/NineKeyKeyboard.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include "ui/Utf8Text.h"
 #include "ui/VirtualKeyboard.h"
 
@@ -142,7 +143,7 @@ struct TextInputOverlay::Impl {
     void append_committed(const std::string &text)
     {
         if (!utf8::append(&committed, text, committed_limit())) {
-            message = "Text is too long";
+            message = ui_locale::text(ui_locale::TextId::TextTooLong);
         }
     }
 
@@ -318,7 +319,7 @@ struct TextInputOverlay::Impl {
                 } else if (action.digit == '0' && nine_engine.digits().empty()) {
                     append_direct_text("0");
                 } else if (!nine_engine.append_digit(action.digit)) {
-                    message = "Pinyin is too long";
+                    message = ui_locale::text(ui_locale::TextId::PinyinTooLong);
                 }
                 break;
             case NineKeyActionType::Text:
@@ -444,7 +445,7 @@ struct TextInputOverlay::Impl {
                                 SECRET_TOGGLE_W + 5, editor_h() - 2, TFT_WHITE);
             M5.Display.drawFastVLine(toggle_x - 6, editor_y() + 8,
                                      editor_h() - 16, TFT_BLACK);
-            system_font::draw_center(M5.Display, secret_visible ? "Hide" : "Show",
+            system_font::draw_center(M5.Display, ui_locale::text(secret_visible ? ui_locale::TextId::Hide : ui_locale::TextId::Show),
                                      toggle_x + SECRET_TOGGLE_W / 2,
                                      editor_y() +
                                          std::max(0, (editor_h() - system_font::line_height()) / 2),
@@ -459,7 +460,7 @@ struct TextInputOverlay::Impl {
                                  6, TFT_BLACK);
         M5.Display.fillRoundRect(right_x, buttons_y(), button_w, buttons_h(),
                                  6, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Cancel",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Cancel),
                                  left_x + button_w / 2, buttons_y() + 8,
                                  TFT_BLACK);
         system_font::draw_center(M5.Display, options.submit_label,

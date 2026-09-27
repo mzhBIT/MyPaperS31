@@ -3,6 +3,7 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include "ui/reader_background.h"
 #include "ui/reader_book_cover.h"
 
@@ -187,8 +188,8 @@ private:
                                               : reader_background_clear();
             if (cleared) ActivityManager::instance().pop();
             else {
-                m_notice = m_book_cover ? "Failed to disable book cover"
-                                        : "Failed to disable background";
+                m_notice = ui_locale::text(m_book_cover ? ui_locale::TextId::DisableBookCoverFailed
+                                                      : ui_locale::TextId::DisableBackgroundFailed);
                 redraw();
             }
             return;
@@ -223,7 +224,8 @@ private:
         M5.Display.fillScreen(TFT_WHITE);
         system_font::draw_left(M5.Display, "<", 16, 7, TFT_BLACK);
         system_font::draw_center(M5.Display,
-                                 m_book_cover ? "Lock-screen Book Cover" : "Reading Background",
+                                 ui_locale::text(m_book_cover ? ui_locale::TextId::LockScreenBookCover
+                                                              : ui_locale::TextId::ReadingBackground),
                                  width / 2, 7, TFT_BLACK);
         M5.Display.drawFastHLine(0, TOP_H - 1, width, TFT_BLACK);
 
@@ -238,7 +240,8 @@ private:
             M5.Display.fillRect(PAD, y, width - PAD * 2, ROW_H - 2, bg);
             M5.Display.drawFastHLine(PAD, y + ROW_H - 2, width - PAD * 2, TFT_BLACK);
             std::string label;
-            if (index == 0) label = m_book_cover ? "Off" : "Off (white background)";
+            if (index == 0) label = ui_locale::text(m_book_cover ? ui_locale::TextId::Off
+                                                                  : ui_locale::TextId::OffWhiteBackground);
             else {
                 const Entry &entry = m_entries[(size_t)index - 1];
                 label = entry.name + (entry.directory ? "/" : "");

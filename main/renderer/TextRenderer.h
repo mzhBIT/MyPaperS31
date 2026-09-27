@@ -42,6 +42,18 @@ public:
     int measureUtf8(const std::string &text);
     std::vector<text_layout::Line> layoutUtf8Paragraph(const std::string &text, int max_width,
                                                         int first_line_indent = 0);
+    std::vector<text_layout::Line> layoutUtf8VerticalParagraph(const std::string &text,
+                                                               int max_height,
+                                                               int first_column_indent = 0);
+    int verticalCellAdvance() const;
+    int verticalRubyLaneWidth() const;
+    int measureUtf8Vertical(const std::string &text) const;
+    void drawStyledUtf8VerticalColumn(lgfx::LGFXBase &gfx, const std::string &text,
+                                      const std::vector<inline_style::Span> &styles,
+                                      int x, int y, int column_width, uint16_t color);
+    bool drawUtf8VerticalRuby(lgfx::LGFXBase &gfx, const std::string &text,
+                              int x, int y, int base_height, int lane_width,
+                              uint16_t color);
     std::vector<std::string> wrapUtf8Line(const std::string &line, int max_width);
     bool preparePage(const std::string &text);
     void drawUtf8Line(lgfx::LGFXBase &gfx, const std::string &text, int x, int y,
@@ -124,6 +136,8 @@ private:
     std::string codepointToUtf8(uint32_t codepoint) const;
     void drawGlyph(lgfx::LGFXBase &gfx, const Glyph &glyph, int x, int baseline_y,
                    uint16_t color);
+    void drawGlyphScaled(lgfx::LGFXBase &gfx, const Glyph &glyph,
+                         int x, int baseline_y, int scale_percent, uint16_t color);
     void drawGlyphRuns(lgfx::LGFXBase &gfx, const Glyph &glyph, int x, int baseline_y, uint16_t color);
     void drawGlyphStyled(lgfx::LGFXBase &gfx, const Glyph &glyph, int x, int baseline_y,
                          uint16_t color, uint8_t style_flags);

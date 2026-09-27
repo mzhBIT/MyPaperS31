@@ -1,4 +1,5 @@
 #include "ui/reader_book_cover.h"
+#include "ui/UiLocale.h"
 
 #include <algorithm>
 #include <cctype>
@@ -81,19 +82,19 @@ bool reader_book_cover_set(const char *path, std::string *message)
     ensure_initialized();
     const std::string selected = path ? path : "";
     if (!supported_image(selected)) {
-        if (message) *message = "Only JPG, PNG and BMP are supported";
+        if (message) *message = ui_locale::text(ui_locale::TextId::ImageFormatsHint);
         return false;
     }
     if (!regular_file(selected)) {
-        if (message) *message = "Cannot open selected image";
+        if (message) *message = ui_locale::text(ui_locale::TextId::ImageOpenFailed);
         return false;
     }
     if (!save_path(selected)) {
-        if (message) *message = "Failed to save book cover setting";
+        if (message) *message = ui_locale::text(ui_locale::TextId::BookCoverSaveFailed);
         return false;
     }
     selected_path = selected;
-    if (message) *message = "Book cover image selected";
+    if (message) *message = ui_locale::text(ui_locale::TextId::BookCoverSet);
     return true;
 }
 

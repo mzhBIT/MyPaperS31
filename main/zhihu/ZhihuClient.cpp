@@ -30,7 +30,7 @@ constexpr size_t MAX_WEB_RESPONSE_BYTES = 2 * 1024 * 1024;
 
 class WifiShutdownGuard {
 public:
-    ~WifiShutdownGuard() { wifi_setting_deinit(true); }
+    ~WifiShutdownGuard() { wifi_setting_release(); }
 };
 
 bool ensure_request_time(std::string *error)

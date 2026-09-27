@@ -1206,6 +1206,22 @@ bool MobiBook::read_text_range(uint64_t start, uint64_t end, std::string *out) c
     return !out->empty();
 }
 
+bool MobiBook::read_kf8_flow(uint32_t flow_index, std::string *out) const
+{
+    if (!out || !_is_kf8 || _fdst_record_index == 0xffffffffu ||
+        flow_index >= _fdst_flow_count) return false;
+    std::vector<uint8_t> fdst;
+    if (!read_record(_fdst_record_index, &fdst) || fdst.size() < 20 ||
+        std::memcmp(fdst.data(), "FDST", 4) != 0) return false;
+    const uint32_t count = read_be32(fdst.data() + 8);
+    if (flow_index >= count || 12ULL + static_cast<uint64_t>(count) * 8ULL > fdst.size()) return false;
+    const size_t entry = 12 + static_cast<size_t>(flow_index) * 8;
+    const uint32_t start = read_be32(fdst.data() + entry);
+    const uint32_t end = read_be32(fdst.data() + entry + 4);
+    if (start >= end || end > _decoded_text_length || end - start > 128 * 1024) return false;
+    return read_text_range(start, end, out);
+}
+
 bool MobiBook::read_section_to_string(const std::string &href, std::string *out) const
 {
     const MobiSectionItem *section = nullptr;

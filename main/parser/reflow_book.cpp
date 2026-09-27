@@ -232,6 +232,11 @@ void ReflowBook::close()
     _weread_active_chapter = -1;
 }
 
+bool ReflowBook::read_kf8_flow(uint32_t flow_index, std::string *out) const
+{
+    return _format == Format::Mobi && _mobi.read_kf8_flow(flow_index, out);
+}
+
 bool ReflowBook::read_item_to_string(const std::string &href, std::string *out)
 {
     if (_format == Format::Mobi) return _mobi.read_section_to_string(href, out);

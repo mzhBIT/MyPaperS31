@@ -1,6 +1,7 @@
 #include "ui/VirtualKeyboard.h"
 
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include "ui/Utf8Text.h"
 
 #include <algorithm>
@@ -12,6 +13,8 @@ namespace ui {
 VirtualKeyboard::VirtualKeyboard(size_t max_length, const VirtualKeyboardLayout &layout)
     : _layout(layout), _max_length(max_length)
 {
+    _placeholder = ui_locale::text(ui_locale::TextId::Text);
+    _submit_label = ui_locale::text(ui_locale::TextId::Done);
 }
 
 void VirtualKeyboard::reset()
@@ -106,7 +109,7 @@ void VirtualKeyboard::draw_input(M5GFX &display) const
                                0, (_layout.input_height - system_font::line_height()) / 2),
                            TFT_BLACK);
     if (_secret) {
-        system_font::draw_right(display, _show_secret ? "Hide" : "Show",
+        system_font::draw_right(display, ui_locale::text(_show_secret ? ui_locale::TextId::Hide : ui_locale::TextId::Show),
                                 width - pad - 14,
                                 _layout.input_y + std::max(
                                     0, (_layout.input_height - system_font::line_height()) / 2),
@@ -150,8 +153,10 @@ void VirtualKeyboard::draw(M5GFX &display) const
 
     const int special_widths[] = {110, 110, 210, 160};
     const char *special_labels[] = {
-        _language_toggle ? _language_label.c_str() : (_upper ? "SHIFT" : "Shift"),
-        _symbols ? "ABC" : "123", "Space", "Back",
+        _language_toggle ? _language_label.c_str()
+                         : ui_locale::text(_upper ? ui_locale::TextId::ShiftActive : ui_locale::TextId::Shift),
+        _symbols ? "ABC" : "123", ui_locale::text(ui_locale::TextId::Space),
+        ui_locale::text(ui_locale::TextId::Backspace),
     };
     int total = special_widths[0] + special_widths[1] + special_widths[2] +
                 special_widths[3] + _layout.key_gap * 3;

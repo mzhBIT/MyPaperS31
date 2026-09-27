@@ -10,6 +10,7 @@
 #include "renderer/TextRenderer.h"
 #include "storage/app_paths.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include "ui/reader_background.h"
 #include "utils/CooperativeYield.h"
 #include "wifi/wifi_setting.h"
@@ -1069,14 +1070,14 @@ public:
             return;
         }
         load_feeds();
-        draw_status("RSS", "Loading WiFi...");
+        draw_status("RSS", ui_locale::text(ui_locale::TextId::LoadingWifi));
         // Do not start a Wi-Fi/RNDIS handshake while the EPD high-voltage rails
         // are powering up.  On the cellular module this overlap can produce a
         // supply-current peak large enough to reboot it into the 2ECC:3004 ROM
         // boot port before it returns as the normal 2ECC:3012 device.
         M5.Display.waitDisplay();
         _wifi_ok = connect_wifi();
-        if (!_wifi_ok) g_status = "Configure WiFi in Settings";
+        if (!_wifi_ok) g_status = ui_locale::text(ui_locale::TextId::ConfigureWifiHint);
         _view = View::Feeds;
         draw_feeds();
     }
@@ -1309,7 +1310,7 @@ private:
     void stop_wifi()
     {
         // RSS does not need background connectivity after the activity exits.
-        wifi_setting_deinit(true);
+        wifi_setting_release();
     }
 
     bool fetch_url_once(const std::string &url, std::string *body)
@@ -1955,7 +1956,8 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_topbar(_view == View::Feeds ? "RSS Feeds" : "RSS News");
+        draw_topbar(ui_locale::text(_view == View::Feeds ? ui_locale::TextId::RssFeeds
+                                                    : ui_locale::TextId::RssNews));
         int w = M5.Display.width();
         int y0 = TOP_H + 6;
         int rh = row_height();
@@ -2005,14 +2007,15 @@ private:
         _feed_focus = g_focus;
         _feed_scroll = g_scroll;
         if (!_wifi_ok) {
-            draw_status("RSS WiFi", "Configure WiFi in Settings");
+            draw_status(ui_locale::text(ui_locale::TextId::RssWifi),
+                        ui_locale::text(ui_locale::TextId::ConfigureWifiHint));
             vTaskDelay(pdMS_TO_TICKS(1200));
             redraw_list();
             return;
         }
         RssFeed feed = g_feeds[g_focus];
         _current_feed_is_bing = feed.url == "https://rsshub.app/bing";
-        draw_status(feed.title.c_str(), "Fetching...");
+        draw_status(feed.title.c_str(), ui_locale::text(ui_locale::TextId::Fetching));
         // The status frame must be physically complete before DNS/HTTP starts.
         // RNDIS data activity and an EPD full refresh otherwise overlap on the
         // board supply and have been observed to reset the ML307A.
@@ -2031,7 +2034,7 @@ private:
             ok = fetch_url(feed.url, &xml) && parse_rss_items(xml, &g_items);
         }
         if (!ok) {
-            g_status = "Fetch or parse failed";
+            g_status = ui_locale::text(ui_locale::TextId::FetchParseFailed);
         } else {
             g_status.clear();
         }
@@ -2258,7 +2261,8 @@ private:
             M5.Display.fillScreen(TFT_WHITE);
             M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
             system_font::draw_center(M5.Display,
-                                     image.progressive ? "Progressive JPEG unsupported" : "Image decode failed",
+                                     ui_locale::text(image.progressive ? ui_locale::TextId::ProgressiveJpegUnsupported
+                                                                       : ui_locale::TextId::ImageDecodeFailed),
                                      screen_w / 2,
                                      screen_h / 2 - 18);
         }
@@ -2285,19 +2289,19 @@ private:
 
         M5.Display.fillRoundRect(x, y, box_w, box_h, 6, TFT_WHITE);
         M5.Display.drawRoundRect(x, y, box_w, box_h, 6, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Save wallpaper?", screen_w / 2, y + 18, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Save to /sdcard/images", screen_w / 2, y + 72, TFT_BLACK);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::SaveWallpaper), screen_w / 2, y + 18, TFT_BLACK);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::SaveToImagesHint), screen_w / 2, y + 72, TFT_BLACK);
 
         M5.Display.fillRoundRect(bx0, by, btn_w, btn_h, 6,
                                  _wallpaper_save_choice == 0 ? TFT_BLACK : TFT_WHITE);
         M5.Display.drawRoundRect(bx0, by, btn_w, btn_h, 6, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Cancel", bx0 + btn_w / 2, by + 9,
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Cancel), bx0 + btn_w / 2, by + 9,
                                  _wallpaper_save_choice == 0 ? TFT_WHITE : TFT_BLACK);
 
         M5.Display.fillRoundRect(bx1, by, btn_w, btn_h, 6,
                                  _wallpaper_save_choice == 1 ? TFT_BLACK : TFT_WHITE);
         M5.Display.drawRoundRect(bx1, by, btn_w, btn_h, 6, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Save", bx1 + btn_w / 2, by + 9,
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Save), bx1 + btn_w / 2, by + 9,
                                  _wallpaper_save_choice == 1 ? TFT_WHITE : TFT_BLACK);
     }
 
@@ -2409,7 +2413,8 @@ private:
         std::string dst = bing_wallpaper_save_path(image);
         bool ok = copy_file(image.path, dst);
         ESP_LOGI(TAG, "save bing wallpaper src=%s dst=%s ok=%d", image.path.c_str(), dst.c_str(), ok ? 1 : 0);
-        draw_status("Bing Wallpaper", ok ? "Saved to /sdcard/images" : "Save failed");
+        draw_status("Bing Wallpaper", ui_locale::text(ok ? ui_locale::TextId::WallpaperSaved
+                                                          : ui_locale::TextId::WallpaperSaveFailed));
         vTaskDelay(pdMS_TO_TICKS(900));
         draw_article();
     }
@@ -2592,7 +2597,8 @@ private:
                         M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
                         system_font::draw_center(
                             M5.Display,
-                            image->progressive ? "Progressive JPEG unsupported" : "Image decode failed",
+                            ui_locale::text(image->progressive ? ui_locale::TextId::ProgressiveJpegUnsupported
+                                                                : ui_locale::TextId::ImageDecodeFailed),
                             M5.Display.width() / 2,
                             y + std::max(0, draw_h / 2 - 18));
                     }
@@ -2606,7 +2612,7 @@ private:
         M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
         system_font::draw_right(M5.Display, pct, M5.Display.width() - 10, M5.Display.height() - 50);
         if (g_page + 1 >= pages) {
-            system_font::draw_center(M5.Display, "Last page", M5.Display.width() / 2, M5.Display.height() - 50);
+            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::LastPage), M5.Display.width() / 2, M5.Display.height() - 50);
         }
         if (_reader_overlay.visible()) _reader_overlay.draw();
         M5.Display.display();

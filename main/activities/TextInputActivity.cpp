@@ -4,6 +4,7 @@
 #include "activities/ActivityManager.h"
 #include "ime/PinyinEngine.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include "ui/Utf8Text.h"
 #include "ui/VirtualKeyboard.h"
 
@@ -89,7 +90,7 @@ public:
                 submit();
                 return true;
             case ui::VirtualKeyboardAction::LimitReached:
-                _message = "Text is too long";
+                _message = ui_locale::text(ui_locale::TextId::TextTooLong);
                 redraw();
                 return true;
             case ui::VirtualKeyboardAction::None:
@@ -187,7 +188,7 @@ private:
 
     void append_committed(const std::string &text)
     {
-        if (!ui::utf8::append(&_committed, text, committed_limit())) _message = "Text is too long";
+        if (!ui::utf8::append(&_committed, text, committed_limit())) _message = ui_locale::text(ui_locale::TextId::TextTooLong);
     }
 
     void commit_candidate(size_t slot)
@@ -327,7 +328,7 @@ private:
             M5.Display.fillRect(toggle_x - 6, EDIT_Y + 1, SECRET_TOGGLE_W + 5,
                                 EDIT_H - 2, TFT_WHITE);
             M5.Display.drawFastVLine(toggle_x - 6, EDIT_Y + 8, EDIT_H - 16, TFT_BLACK);
-            system_font::draw_center(M5.Display, _secret_visible ? "Hide" : "Show",
+            system_font::draw_center(M5.Display, ui_locale::text(_secret_visible ? ui_locale::TextId::Hide : ui_locale::TextId::Show),
                                      toggle_x + SECRET_TOGGLE_W / 2,
                                      EDIT_Y + std::max(0, (EDIT_H - system_font::line_height()) / 2),
                                      TFT_BLACK);

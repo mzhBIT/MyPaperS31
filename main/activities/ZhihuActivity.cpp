@@ -5,6 +5,7 @@
 #include "activities/RssReaderActivity.h"
 #include "activities/SettingActivity.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include "zhihu/ZhihuClient.h"
 #include "zhihu/ZhihuConfig.h"
 
@@ -57,8 +58,8 @@ void draw_header()
     const int width = M5.Display.width();
     M5.Display.fillRect(0, 0, width, HEADER_H, TFT_WHITE);
     system_font::draw_left(M5.Display, "<", 18, 12, TFT_BLACK);
-    system_font::draw_center(M5.Display, "ZhiHu Hot List", width / 2, 12, TFT_BLACK);
-    system_font::draw_right(M5.Display, "Refresh", width - 16, 12, TFT_BLACK);
+    system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ZhihuHotList), width / 2, 12, TFT_BLACK);
+    system_font::draw_right(M5.Display, ui_locale::text(ui_locale::TextId::RefreshAction), width - 16, 12, TFT_BLACK);
     M5.Display.drawFastHLine(0, HEADER_H - 1, width, TFT_BLACK);
 }
 
@@ -171,8 +172,8 @@ private:
 
     void reload(bool force_network)
     {
-        draw_status(force_network ? "Refreshing Zhihu hot list..." :
-                                    "Loading Zhihu hot list...");
+        draw_status(ui_locale::text(force_network ? ui_locale::TextId::RefreshZhihuHotList
+                                                  : ui_locale::TextId::LoadingZhihuHotList));
         M5.Display.waitDisplay();
         ZhihuConfig config;
         zhihu_config_load(&config);
@@ -194,7 +195,7 @@ private:
     {
         const ZhihuHotItem &item = _result.items[index];
         if (item.summary.empty()) {
-            _content_error = "No readable summary is available for this item";
+            _content_error = ui_locale::text(ui_locale::TextId::NoReadableSummary);
             _content_error_visible = true;
             draw_content_error();
             return;
@@ -226,7 +227,7 @@ private:
                                  system_font::ellipsize(_content_error,
                                                         M5.Display.width() - 50),
                                  M5.Display.width() / 2, 390, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Tap to return to hot list",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ReturnToHotList),
                                  M5.Display.width() / 2, 485, TFT_BLACK);
         M5.Display.display();
         M5.Display.endWrite();
@@ -270,12 +271,12 @@ private:
         M5.Display.fillScreen(TFT_WHITE);
         draw_header();
         if (!_result.success) {
-            const std::string message = _result.error.empty() ? "Failed to load hot list"
+            const std::string message = _result.error.empty() ? ui_locale::text(ui_locale::TextId::HotListLoadFailed)
                                                                : _result.error;
             system_font::draw_center(M5.Display,
                                      system_font::ellipsize(message, M5.Display.width() - 50),
                                      M5.Display.width() / 2, 390, TFT_BLACK);
-            system_font::draw_center(M5.Display, "Tap to retry",
+            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::TapToRetry),
                                      M5.Display.width() / 2, 485, TFT_BLACK);
         } else {
             const int first = _page * PAGE_SIZE;
@@ -301,11 +302,11 @@ public:
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
         draw_header();
-        system_font::draw_center(M5.Display, "Zhihu Access Secret is not configured",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ZhihuSecretNotConfigured),
                                  M5.Display.width() / 2, 360, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Open Setting > ZhiHu first",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::OpenZhihuSettingsHint),
                                  M5.Display.width() / 2, 450, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Tap to return",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::TapToReturn),
                                  M5.Display.width() / 2, 550, TFT_BLACK);
         M5.Display.display();
         M5.Display.endWrite();

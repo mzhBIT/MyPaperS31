@@ -3,6 +3,7 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include "waveforms/my_waveform.h"
 
 #include <M5Unified.h>
@@ -26,20 +27,20 @@ constexpr int MENU_COUNT = 13;
 
 const char *TAG = "EPD_DIAG";
 
-const char *MENU_LABELS[MENU_COUNT] = {
-    "Direction & pixel order",
-    "16-level grayscale",
-    "White -> 16 gray",
-    "Black -> 16 gray",
-    "16 x 16 transitions",
-    "Quality black -> white",
-    "Text / DU4 four-gray",
-    "Fastest / A2 binary",
-    "Quality timing A/B (20 / 16 us)",
-    "Quality GC16 A/B (48 / 36 phases)",
-    "Quality black hold (white -> black -> black)",
-    "DU4 neutral-mask partial",
-    "VCOM measurement",
+const ui_locale::TextId MENU_LABELS[MENU_COUNT] = {
+    ui_locale::TextId::DirectionPixelOrder,
+    ui_locale::TextId::Grayscale16,
+    ui_locale::TextId::WhiteToGray16,
+    ui_locale::TextId::BlackToGray16,
+    ui_locale::TextId::Transitions16x16,
+    ui_locale::TextId::QualityBlackToWhite,
+    ui_locale::TextId::TextDu4FourGray,
+    ui_locale::TextId::FastestA2Binary,
+    ui_locale::TextId::QualityTimingAb,
+    ui_locale::TextId::QualityGc16Ab,
+    ui_locale::TextId::QualityBlackHold,
+    ui_locale::TextId::Du4NeutralMaskPartial,
+    ui_locale::TextId::VcomMeasurement,
 };
 
 void draw_header(const char *title)
@@ -298,7 +299,7 @@ private:
         _view = View::Menu;
         begin_draw(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("EPD Diagnostics");
+        draw_header(ui_locale::text(ui_locale::TextId::EpdDiagnostics));
 
         const int width = M5.Display.width();
         for (int i = 0; i < MENU_COUNT; ++i) {
@@ -310,7 +311,7 @@ private:
                                      MENU_ROW_H, 8, background);
             M5.Display.drawRoundRect(PAD, top, width - PAD * 2,
                                      MENU_ROW_H, 8, TFT_BLACK);
-            system_font::draw_left(M5.Display, MENU_LABELS[i], PAD + 18,
+            system_font::draw_left(M5.Display, ui_locale::text(MENU_LABELS[i]), PAD + 18,
                                    top + std::max(0, (MENU_ROW_H - system_font::line_height()) / 2),
                                    foreground);
             system_font::draw_right(M5.Display, ">", width - PAD - 20,
@@ -318,7 +319,7 @@ private:
                                     foreground);
         }
 
-        draw_center_fit("Quality / GC16, Text / DU4 and Fastest / A2",
+        draw_center_fit(ui_locale::text(ui_locale::TextId::EpdDiagModesHint),
                         M5.Display.height() - 100);
         finish_draw();
     }
@@ -327,9 +328,9 @@ private:
     {
         switch (_focus) {
             case 0: draw_direction_pattern(); break;
-            case 1: draw_grayscale_pattern("Direct 16-level / tap to return"); break;
-            case 2: draw_grayscale_from(15, "WHITE -> 16 gray / tap to return"); break;
-            case 3: draw_grayscale_from(0, "BLACK -> 16 gray / tap to return"); break;
+            case 1: draw_grayscale_pattern(ui_locale::text(ui_locale::TextId::DirectGray16Caption)); break;
+            case 2: draw_grayscale_from(15, ui_locale::text(ui_locale::TextId::WhiteGray16Caption)); break;
+            case 3: draw_grayscale_from(0, ui_locale::text(ui_locale::TextId::BlackGray16Caption)); break;
             case 4: draw_matrix_old(); break;
             case 5: draw_ghost_source(); break;
             case 6: draw_text_four_gray_base(); break;
@@ -362,10 +363,10 @@ private:
         const int width = M5.Display.width();
         const int height = M5.Display.height();
         const TestRect r = neutral_mask_rect();
-        draw_header("DU4 Neutral-Mask Partial");
-        system_font::draw_center(M5.Display, "OUTER PATTERN MUST NOT FADE",
+        draw_header(ui_locale::text(ui_locale::TextId::Du4NeutralMaskPartial));
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::OuterPatternMustNotFade),
                                  width / 2, 102, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Tap to toggle only the center",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::TapToggleCenter),
                                  width / 2, height - 74, TFT_BLACK);
 
         // These high-contrast marks are deliberately outside the requested
@@ -394,9 +395,9 @@ private:
         M5.Display.fillScreen(TFT_WHITE);
         draw_neutral_mask_outer_pattern();
         M5.Display.fillRect(r.x, r.y, r.w, r.h, TFT_BLACK);
-        system_font::draw_center(M5.Display, "CENTER: BLACK", r.x + r.w / 2,
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::CenterBlack), r.x + r.w / 2,
                                  r.y + r.h / 2 - 24, TFT_WHITE);
-        system_font::draw_center(M5.Display, "TAP FOR DU4 PARTIAL", r.x + r.w / 2,
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::TapForDu4Partial), r.x + r.w / 2,
                                  r.y + r.h / 2 + 22, TFT_WHITE);
         finish_draw();
         ESP_LOGI(TAG, "neutral-mask: reference complete; tap for partial DU4");
@@ -422,9 +423,10 @@ private:
                              _neutral_mask_dark ? TFT_WHITE : TFT_BLACK);
         const uint16_t text_color = _neutral_mask_dark ? TFT_WHITE : TFT_BLACK;
         system_font::draw_center(M5.Display,
-                                 _neutral_mask_dark ? "CENTER: BLACK" : "CENTER: WHITE",
+                                 ui_locale::text(_neutral_mask_dark ? ui_locale::TextId::CenterBlack
+                                                                     : ui_locale::TextId::CenterWhite),
                                  r.x + r.w / 2, r.y + r.h / 2 - 24, text_color);
-        system_font::draw_center(M5.Display, "TAP TO TOGGLE", r.x + r.w / 2,
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::TapToToggle), r.x + r.w / 2,
                                  r.y + r.h / 2 + 22, text_color);
         finish_draw_area(r.x, r.y, r.w, r.h);
         ESP_LOGI(TAG, "neutral-mask: partial DU4 complete; inspect outer reference");
@@ -448,10 +450,10 @@ private:
         M5.Display.fillScreen(TFT_WHITE);
         M5.Display.fillRect(0, pattern_top, width, split_y - pattern_top,
                             TFT_BLACK);
-        system_font::draw_left(M5.Display, "Quality base: top BLACK", 12, 18,
+        system_font::draw_left(M5.Display, ui_locale::text(ui_locale::TextId::QualityBaseTopBlack), 12, 18,
                                TFT_BLACK);
-        draw_center_fit("Inspect both halves before DU4", pattern_bottom + 16);
-        draw_center_fit("Tap or OK to show four gray levels", pattern_bottom + 58);
+        draw_center_fit(ui_locale::text(ui_locale::TextId::InspectHalvesBeforeDu4), pattern_bottom + 16);
+        draw_center_fit(ui_locale::text(ui_locale::TextId::TapShowFourGray), pattern_bottom + 58);
         finish_draw();
         ESP_LOGI(TAG, "text four-gray: Quality base complete; waiting for DU4 tap");
     }
@@ -482,11 +484,11 @@ private:
             system_font::draw_center(M5.Display, label, (x0 + x1) / 2,
                                      pattern_top + 18, label_color);
         }
-        system_font::draw_left(M5.Display, "0 BLACK", 12, 18, TFT_BLACK);
-        system_font::draw_right(M5.Display, "15 WHITE", width - 12, 18,
+        system_font::draw_left(M5.Display, ui_locale::text(ui_locale::TextId::Gray0Black), 12, 18, TFT_BLACK);
+        system_font::draw_right(M5.Display, ui_locale::text(ui_locale::TextId::Gray15White), width - 12, 18,
                                 TFT_BLACK);
-        draw_center_fit("Text / DU4: four columns should be uniform", pattern_bottom + 16);
-        draw_center_fit("Top starts black; bottom starts white", pattern_bottom + 58);
+        draw_center_fit(ui_locale::text(ui_locale::TextId::Du4ColumnsUniform), pattern_bottom + 16);
+        draw_center_fit(ui_locale::text(ui_locale::TextId::TopBlackBottomWhite), pattern_bottom + 58);
         ESP_LOGI(TAG, "text four-gray: epd_text refresh begin");
         finish_draw();
         ESP_LOGI(TAG, "text four-gray: complete");
@@ -524,12 +526,12 @@ private:
                                     pattern_h, TFT_BLACK);
             }
         }
-        system_font::draw_left(M5.Display, "BLACK", 12, 18, TFT_BLACK);
-        system_font::draw_right(M5.Display, "WHITE", width - 12, 18,
+        system_font::draw_left(M5.Display, ui_locale::text(ui_locale::TextId::BlackLabel), 12, 18, TFT_BLACK);
+        system_font::draw_right(M5.Display, ui_locale::text(ui_locale::TextId::WhiteLabel), width - 12, 18,
                                 TFT_BLACK);
-        draw_center_fit("Fastest / A2: alternating black and white columns",
+        draw_center_fit(ui_locale::text(ui_locale::TextId::A2AlternatingColumns),
                         pattern_bottom + 16);
-        draw_center_fit("No seam between white-start and black-start halves",
+        draw_center_fit(ui_locale::text(ui_locale::TextId::NoSeamBetweenHalves),
                         pattern_bottom + 58);
         ESP_LOGI(TAG, "A2 binary: epd_fastest refresh begin");
         finish_draw();
@@ -573,7 +575,7 @@ private:
         begin_draw(epd_mode_t::epd_quality);
         M5.Display.fillScreen(TFT_WHITE);
         char title[64] = {};
-        snprintf(title, sizeof(title), "Quality Timing: %lu us / line",
+        snprintf(title, sizeof(title), ui_locale::text(ui_locale::TextId::QualityTimingFormat),
                  (unsigned long)actual);
         draw_header(title);
         for (int level = 0; level < 16; ++level) {
@@ -588,12 +590,11 @@ private:
         }
         M5.Display.fillRect(0, bottom, width, bottom_margin, TFT_WHITE);
         M5.Display.drawFastHLine(0, bottom, width, TFT_BLACK);
-        draw_center_fit(actual == 20
-                            ? "A: 20 us / line (~73 Hz) - tap for B"
-                            : "B: 16 us / line (~91 Hz) - tap for A",
+        draw_center_fit(ui_locale::text(actual == 20 ? ui_locale::TextId::Timing20Hint
+                                                   : ui_locale::TextId::Timing16Hint),
                         bottom + 18);
-        draw_center_fit("Top started white; bottom started black", bottom + 54);
-        draw_center_fit("Compare gray match, ghosting and scan stability", bottom + 86);
+        draw_center_fit(ui_locale::text(ui_locale::TextId::TopWhiteBottomBlack), bottom + 54);
+        draw_center_fit(ui_locale::text(ui_locale::TextId::CompareGrayGhostScan), bottom + 86);
         finish_draw();
         ESP_LOGI(TAG, "timing A/B: complete line=%lu us", (unsigned long)actual);
 
@@ -653,11 +654,11 @@ private:
                                      level < 7 ? TFT_WHITE : TFT_BLACK);
         }
         char title[48] = {};
-        snprintf(title, sizeof(title), "Quality GC16: %d phases", phases);
+        snprintf(title, sizeof(title), ui_locale::text(ui_locale::TextId::QualityGc16Format), phases);
         draw_header(title);
-        draw_center_fit("BLACK / 16 grays / WHITE: inspect old stripes",
+        draw_center_fit(ui_locale::text(ui_locale::TextId::InspectOldStripes),
                         bottom + 16);
-        draw_center_fit("Tap for the other waveform", bottom + 58);
+        draw_center_fit(ui_locale::text(ui_locale::TextId::TapOtherWaveform), bottom + 58);
         finish_draw();
         panel->waveform(original);
         ESP_LOGI(TAG, "GC16 A/B: target complete phases=%d", phases);
@@ -678,10 +679,10 @@ private:
         ESP_LOGI(TAG, "black hold: Quality white baseline begin");
         begin_draw(epd_mode_t::epd_quality);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("Quality black hold: WHITE baseline");
+        draw_header(ui_locale::text(ui_locale::TextId::QualityBlackHoldWhiteBaseline));
         M5.Display.drawFastHLine(0, bottom, width, TFT_BLACK);
-        draw_center_fit("Inspect WHITE field; tap for first BLACK", bottom + 16);
-        draw_center_fit("Then tap repeatedly without changing BLACK", bottom + 58);
+        draw_center_fit(ui_locale::text(ui_locale::TextId::InspectWhiteTapBlack), bottom + 16);
+        draw_center_fit(ui_locale::text(ui_locale::TextId::TapRepeatBlack), bottom + 58);
         finish_draw();
         ESP_LOGI(TAG, "black hold: Quality white baseline complete; waiting for tap");
     }
@@ -703,14 +704,14 @@ private:
         begin_draw(epd_mode_t::epd_quality);
         M5.Display.fillScreen(TFT_WHITE);
         M5.Display.fillRect(0, top, width, bottom - top, TFT_BLACK);
-        draw_header("Quality black hold: BLACK target");
+        draw_header(ui_locale::text(ui_locale::TextId::QualityBlackHoldBlackTarget));
         M5.Display.drawFastHLine(0, bottom, width, TFT_BLACK);
         char caption[80] = {};
-        snprintf(caption, sizeof(caption), "BLACK refresh #%u: %s",
+        snprintf(caption, sizeof(caption), ui_locale::text(ui_locale::TextId::BlackRefreshFormat),
                  _black_hold_refreshes,
-                 first_black ? "from WHITE" : "from BLACK");
+                 ui_locale::text(first_black ? ui_locale::TextId::FromWhite : ui_locale::TextId::FromBlack));
         draw_center_fit(caption, bottom + 16);
-        draw_center_fit("Compare darkness; tap to repeat BLACK", bottom + 58);
+        draw_center_fit(ui_locale::text(ui_locale::TextId::CompareDarknessRepeat), bottom + 58);
         finish_draw();
         ESP_LOGI(TAG, "black hold: Quality %s complete refresh=%u",
                  first_black ? "white->black" : "black->black",
@@ -748,7 +749,7 @@ private:
             const int y = first_y + i * 124;
             draw_vertical_stripes(box_x, y, box_w, box_h, stripes[i]);
             char label[24] = {};
-            snprintf(label, sizeof(label), "%d px vertical", stripes[i]);
+            snprintf(label, sizeof(label), ui_locale::text(ui_locale::TextId::PixelVerticalFormat), stripes[i]);
             system_font::draw_left(M5.Display, label, box_x + 8, y + box_h + 5, TFT_BLACK);
         }
 
@@ -758,7 +759,7 @@ private:
         draw_horizontal_stripes(box_x + cell_w + 16, horizontal_y, cell_w, 150, 2);
         draw_horizontal_stripes(box_x + (cell_w + 16) * 2, horizontal_y, cell_w, 150, 4);
 
-        system_font::draw_center(M5.Display, "Tap to return", width / 2,
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::TapToReturn), width / 2,
                                  height - 165, TFT_BLACK);
         ESP_LOGI(TAG, "direction pattern: Quality refresh begin");
         finish_draw();
@@ -781,8 +782,8 @@ private:
             M5.Display.fillRect(x0, top, x1 - x0, bottom - top,
                                 gray_color(level));
         }
-        system_font::draw_left(M5.Display, "0 BLACK", 12, 18, TFT_BLACK);
-        system_font::draw_right(M5.Display, "15 WHITE", width - 12, 18, TFT_BLACK);
+        system_font::draw_left(M5.Display, ui_locale::text(ui_locale::TextId::Gray0Black), 12, 18, TFT_BLACK);
+        system_font::draw_right(M5.Display, ui_locale::text(ui_locale::TextId::Gray15White), width - 12, 18, TFT_BLACK);
         draw_center_fit(caption, height - 70);
         ESP_LOGI(TAG, "grayscale pattern: Quality refresh begin");
         finish_draw();
@@ -819,9 +820,9 @@ private:
         }
         M5.Display.fillRect(0, height - footer_h, width, footer_h, TFT_WHITE);
         M5.Display.drawFastHLine(0, height - footer_h, width, TFT_BLACK);
-        system_font::draw_center(M5.Display, "OLD gray = columns 0..15",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::OldGrayColumns),
                                  width / 2, height - footer_h + 10, TFT_BLACK);
-        draw_center_fit("Tap OK for NEW gray rows", height - footer_h + 54);
+        draw_center_fit(ui_locale::text(ui_locale::TextId::TapNewGrayRows), height - footer_h + 54);
         ESP_LOGI(TAG, "transition matrix step 1: old columns Quality begin");
         finish_draw();
         ESP_LOGI(TAG, "transition matrix step 1 complete; waiting for confirmation");
@@ -844,9 +845,9 @@ private:
         }
         M5.Display.fillRect(0, pattern_h, width, footer_h, TFT_WHITE);
         M5.Display.drawFastHLine(0, pattern_h, width, TFT_BLACK);
-        system_font::draw_center(M5.Display, "NEW gray = rows 0..15",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::NewGrayRows),
                                  width / 2, pattern_h + 10, TFT_BLACK);
-        draw_center_fit("Each row should be uniform / tap to return", pattern_h + 54);
+        draw_center_fit(ui_locale::text(ui_locale::TextId::EachRowUniform), pattern_h + 54);
         ESP_LOGI(TAG, "transition matrix step 2: target rows Quality begin");
         finish_draw();
         ESP_LOGI(TAG, "transition matrix complete");
@@ -856,10 +857,10 @@ private:
     {
         const int width = M5.Display.width();
         const int height = M5.Display.height();
-        draw_header("Quality Black -> White");
+        draw_header(ui_locale::text(ui_locale::TextId::QualityBlackToWhite));
         M5.Display.drawFastHLine(24, 112, width - 48, TFT_BLACK);
         M5.Display.drawFastHLine(24, height - 112, width - 48, TFT_BLACK);
-        draw_center_fit("Tap / OK to continue", height - 82);
+        draw_center_fit(ui_locale::text(ui_locale::TextId::TapOkContinue), height - 82);
     }
 
     void draw_ghost_source()
@@ -897,7 +898,7 @@ private:
             M5.Display.drawFastVLine(x, field_top + field_h / 2 - 55,
                                      110, TFT_BLACK);
         }
-        system_font::draw_center(M5.Display, "BLACK SOURCE PATTERN",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::BlackSourcePattern),
                                  width / 2, field_top + field_h / 2 + 88,
                                  TFT_BLACK);
         ESP_LOGI(TAG, "ghost test step 1: black source Quality begin");
@@ -925,8 +926,8 @@ private:
 
         begin_draw(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("VCOM Measurement");
-        system_font::draw_center(M5.Display, "Measuring TPS65185 kick-back...",
+        draw_header(ui_locale::text(ui_locale::TextId::VcomMeasurement));
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::MeasuringKickback),
                                  width / 2, height / 2 - 40, TFT_BLACK);
         finish_draw();
 
@@ -942,25 +943,25 @@ private:
 
         begin_draw(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("VCOM Measurement");
+        draw_header(ui_locale::text(ui_locale::TextId::VcomMeasurement));
         char configured[64] = {};
-        snprintf(configured, sizeof(configured), "Configured: -%u.%03u V",
+        snprintf(configured, sizeof(configured), ui_locale::text(ui_locale::TextId::ConfiguredVoltageFormat),
                  (unsigned)(MYPAPER_EPD_VCOM_MV / 1000),
                  (unsigned)(MYPAPER_EPD_VCOM_MV % 1000));
         system_font::draw_center(M5.Display, configured, width / 2, 300, TFT_BLACK);
 
         char result[72] = {};
         if (measured) {
-            snprintf(result, sizeof(result), "Kick-back: -%lu.%03lu V",
+            snprintf(result, sizeof(result), ui_locale::text(ui_locale::TextId::KickbackVoltageFormat),
                      (unsigned long)(measured_mV / 1000),
                      (unsigned long)(measured_mV % 1000));
         } else {
-            snprintf(result, sizeof(result), "Kick-back measurement failed");
+            snprintf(result, sizeof(result), "%s", ui_locale::text(ui_locale::TextId::KickbackMeasurementFailed));
         }
         system_font::draw_center(M5.Display, result, width / 2, 390, TFT_BLACK);
-        draw_center_fit("Compare with panel label / official specification", 500);
-        draw_center_fit("Measurement does not change VCOM", 555);
-        system_font::draw_center(M5.Display, "Tap to return",
+        draw_center_fit(ui_locale::text(ui_locale::TextId::ComparePanelSpec), 500);
+        draw_center_fit(ui_locale::text(ui_locale::TextId::MeasurementDoesNotChangeVcom), 555);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::TapToReturn),
                                  width / 2, height - 110, TFT_BLACK);
         finish_draw();
     }

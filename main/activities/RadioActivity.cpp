@@ -4,6 +4,7 @@
 #include "activities/SettingActivity.h"
 #include "audio/audio_radio.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include "ui/icon_bitmap_1bpp.h"
 #include "ui/music_icons_1bpp.h"
 #include "wifi/wifi_setting.h"
@@ -142,8 +143,8 @@ public:
             return;
         }
         audio_radio_deinit();
-        // Network features are on-demand; power down the C6 when leaving.
-        wifi_setting_deinit(true);
+        // Keep the connection only when the user selected Always On.
+        wifi_setting_release();
         restore_ui_priority();
     }
 
@@ -158,10 +159,10 @@ public:
             vTaskPrioritySet(_ui_task, RADIO_UI_TASK_PRIORITY);
         }
         _play_results = xQueueCreate(2, sizeof(RadioPlayResult));
-        draw_message("Connecting WiFi...");
+        draw_message(ui_locale::text(ui_locale::TextId::LoadingWifi));
         _wifi_ok = connect_wifi();
         if (!_wifi_ok) {
-            _status = "Configure WiFi in Settings";
+            _status = ui_locale::text(ui_locale::TextId::ConfigureWifiHint);
         }
         draw_all();
     }
@@ -186,8 +187,9 @@ public:
             if (state == AUDIO_PLAYBACK_ERROR) {
                 _switching = false;
                 _error_drawn = true;
-                if (_status == "Switching station..." || _status == "Starting station...") {
-                    _status = "Radio playback failed";
+                if (_status == ui_locale::text(ui_locale::TextId::SwitchingStation) ||
+                    _status == ui_locale::text(ui_locale::TextId::StartingStation)) {
+                    _status = ui_locale::text(ui_locale::TextId::PlaybackFailed);
                 }
                 draw_all(epd_mode_t::epd_fast);
                 return;
@@ -203,7 +205,7 @@ public:
         }
         if (state == AUDIO_PLAYBACK_ERROR && !_error_drawn) {
             _error_drawn = true;
-            _status = "Radio playback failed";
+            _status = ui_locale::text(ui_locale::TextId::PlaybackFailed);
             draw_all();
         } else if (state != AUDIO_PLAYBACK_ERROR) {
             _error_drawn = false;
@@ -416,11 +418,12 @@ private:
     {
         if (!_status.empty()) return _status.c_str();
         switch (audio_radio_get_state()) {
-            case AUDIO_PLAYBACK_PLAYING: return "Playing";
-            case AUDIO_PLAYBACK_PAUSED: return "Paused";
-            case AUDIO_PLAYBACK_ERROR: return "Playback failed";
-            case AUDIO_PLAYBACK_STOPPED: return "Stopped";
-            default: return _wifi_ok ? "Select a station" : "WiFi unavailable";
+            case AUDIO_PLAYBACK_PLAYING: return ui_locale::text(ui_locale::TextId::Playing);
+            case AUDIO_PLAYBACK_PAUSED: return ui_locale::text(ui_locale::TextId::Paused);
+            case AUDIO_PLAYBACK_ERROR: return ui_locale::text(ui_locale::TextId::PlaybackFailed);
+            case AUDIO_PLAYBACK_STOPPED: return ui_locale::text(ui_locale::TextId::Stopped);
+            default: return ui_locale::text(_wifi_ok ? ui_locale::TextId::SelectStation
+                                                      : ui_locale::TextId::WifiUnavailable);
         }
     }
 
@@ -432,7 +435,8 @@ private:
         ensure_focus_visible();
         _switching = true;
         _switch_target = index;
-        _status = _current >= 0 ? "Switching station..." : "Starting station...";
+        _status = ui_locale::text(_current >= 0 ? ui_locale::TextId::SwitchingStation
+                                                 : ui_locale::TextId::StartingStation);
         draw_switching_hint(index);
         if (_play_task != nullptr) {
             // Only the newest queued selection matters. The active worker owns
@@ -448,7 +452,7 @@ private:
     void start_play_worker(int index, uint32_t request_id)
     {
         if (_play_results == nullptr) {
-            _status = "Radio worker unavailable";
+            _status = ui_locale::text(ui_locale::TextId::RadioWorkerUnavailable);
             _switching = false;
             return;
         }
@@ -460,7 +464,7 @@ private:
                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
             delete job;
             _play_task = nullptr;
-            _status = "Radio worker unavailable";
+            _status = ui_locale::text(ui_locale::TextId::RadioWorkerUnavailable);
             _switching = false;
             draw_all();
             return;
@@ -489,7 +493,8 @@ private:
                      STATION_COUNT, STATIONS[result.index].name);
         } else if (!superseded) {
             char message[96] = {};
-            snprintf(message, sizeof(message), "Play failed: %s",
+            snprintf(message, sizeof(message), "%s%s",
+                     ui_locale::text(ui_locale::TextId::PlayFailedPrefix),
                      esp_err_to_name(result.result));
             _status = message;
             _switching = false;
@@ -524,7 +529,7 @@ private:
         _leave_pending = true;
         _queued_station = -1;
         _queued_request_id = 0;
-        _status = "Finishing audio startup...";
+        _status = ui_locale::text(ui_locale::TextId::FinishingAudioStartup);
         draw_station_status_card(_switch_target >= 0 ? _switch_target : _focus,
                                  _status.c_str());
     }
@@ -558,7 +563,8 @@ private:
         system_font::draw_center(M5.Display, status,
                                  center_x, design_y(PANEL_Y + PANEL_H / 2), TFT_BLACK);
         char details[64] = {};
-        snprintf(details, sizeof(details), "Volume %d%%", audio_radio_get_volume());
+        snprintf(details, sizeof(details), ui_locale::text(ui_locale::TextId::VolumeFormat),
+                 audio_radio_get_volume());
         system_font::draw_center(M5.Display, details, center_x,
                                  design_y(PANEL_Y + PANEL_H / 2 + 70), TFT_BLACK);
         M5.Display.display();
@@ -613,7 +619,8 @@ private:
             _status.clear();
         } else {
             char message[96] = {};
-            snprintf(message, sizeof(message), "Control failed: %s", esp_err_to_name(ret));
+            snprintf(message, sizeof(message), "%s%s",
+                     ui_locale::text(ui_locale::TextId::ControlFailedPrefix), esp_err_to_name(ret));
             _status = message;
         }
         draw_all();
@@ -629,7 +636,8 @@ private:
             _status.clear();
         } else {
             char message[64] = {};
-            snprintf(message, sizeof(message), "Volume failed: %s", esp_err_to_name(ret));
+            snprintf(message, sizeof(message), "%s%s",
+                     ui_locale::text(ui_locale::TextId::VolumeFailedPrefix), esp_err_to_name(ret));
             _status = message;
         }
         draw_all();
@@ -642,7 +650,7 @@ private:
         // waveform to clear remnants from whichever activity was visible.
         M5.Display.setEpdMode(epd_mode_t::epd_quality);
         M5.Display.fillScreen(TFT_WHITE);
-        system_font::draw_left(M5.Display, "Network Radio",
+        system_font::draw_left(M5.Display, ui_locale::text(ui_locale::TextId::NetworkRadio),
                                design_x(TITLE_X), design_y(TITLE_Y), TFT_BLACK);
         system_font::draw_center(M5.Display, message, M5.Display.width() / 2,
                                  M5.Display.height() / 2 - 20, TFT_BLACK);
@@ -715,7 +723,8 @@ private:
         }
 
         int center_x = design_x(PANEL_X + PANEL_W / 2);
-        const char *station = _current >= 0 ? STATIONS[_current].name : "No station selected";
+        const char *station = _current >= 0 ? STATIONS[_current].name
+                                            : ui_locale::text(ui_locale::TextId::NoStationSelected);
         system_font::draw_center(M5.Display,
                                  system_font::ellipsize(station, design_x(PANEL_W - 60)),
                                  center_x, design_y(PANEL_Y + PANEL_H / 2 - 70), TFT_BLACK);
@@ -725,9 +734,11 @@ private:
 
         char details[64] = {};
         if (_current >= 0) {
-            snprintf(details, sizeof(details), "Volume %d%%", audio_radio_get_volume());
+            snprintf(details, sizeof(details), ui_locale::text(ui_locale::TextId::VolumeFormat),
+                     audio_radio_get_volume());
         } else {
-            snprintf(details, sizeof(details), "%d stations", STATION_COUNT);
+            snprintf(details, sizeof(details), ui_locale::text(ui_locale::TextId::StationCountFormat),
+                     STATION_COUNT);
         }
         system_font::draw_center(M5.Display, details, center_x,
                                  design_y(PANEL_Y + PANEL_H / 2 + 70), TFT_BLACK);
@@ -816,7 +827,7 @@ private:
                                               : AUDIO_OUTPUT_SPEAKER);
         esp_err_t ret = audio_radio_set_output_mode(next);
         if (ret != ESP_OK) {
-            _status = "USB headset unavailable";
+            _status = ui_locale::text(ui_locale::TextId::UsbHeadsetUnavailable);
             ESP_LOGW(TAG, "Audio output switch failed: %s", esp_err_to_name(ret));
         } else {
             _status.clear();
@@ -832,9 +843,9 @@ private:
         M5.Display.fillScreen(TFT_WHITE);
 
         std::string title;
-        if (_show_list) title = "Radio Stations";
+        if (_show_list) title = ui_locale::text(ui_locale::TextId::RadioStations);
         else if (_current >= 0) title = STATIONS[_current].name;
-        else title = "Network Radio";
+        else title = ui_locale::text(ui_locale::TextId::NetworkRadio);
         system_font::draw_left(M5.Display,
                                system_font::ellipsize(title, design_x(455)),
                                design_x(TITLE_X), design_y(TITLE_Y), TFT_BLACK);

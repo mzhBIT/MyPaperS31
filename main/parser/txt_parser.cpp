@@ -233,6 +233,7 @@ uint32_t TxtBook::layout_signature() const
              (unsigned long)_file_size);
     sig += buf;
     sig += ";script=" + std::to_string(static_cast<int>(_script_mode));
+    sig += ";writing=" + std::to_string(static_cast<int>(_writing_mode));
     if (_script_mode != script_conversion::Mode::Original) {
         sig += ";dict=" + std::to_string(script_conversion::dictionary_signature());
     }
@@ -277,6 +278,7 @@ bool TxtBook::open(const char *path)
     fclose(fp);
 
     _script_mode = script_conversion::book_mode(path);
+    _writing_mode = reader_writing_mode::book_mode(path);
     if (!script_conversion::prepare(_script_mode)) _script_mode = script_conversion::Mode::Original;
     refresh_layout_settings();
     _layout_sig = layout_signature();
@@ -319,11 +321,13 @@ void TxtBook::close()
     _layout_sig = 0;
     _enc = 0;
     _script_mode = script_conversion::Mode::Original;
+    _writing_mode = reader_writing_mode::Mode::Auto;
 }
 
 TxtPage TxtBook::read_page(uint32_t offset)
 {
     TxtPage page;
+    page.vertical = _writing_mode == reader_writing_mode::Mode::VerticalRl;
     page.start_offset = offset;
     page.next_offset = offset;
     page.eof = true;
@@ -349,13 +353,19 @@ TxtPage TxtBook::read_page(uint32_t offset)
     fseek(fp, offset, SEEK_SET);
 
     ReaderStyle style = reader_style_get();
-    const int max_w = std::max(100, display_width());
+    const int max_w = page.vertical
+        ? std::max(100, (int)M5.Display.height() -
+            (style.hide_header ? 0 : 50) - style.margin_top - style.margin_bottom)
+        : std::max(100, display_width());
     int line_h = reader_text_renderer().lineHeight();
     if (line_h <= 0) line_h = 48;
     const int header_h = style.hide_header ? 0 : 50;
-    const int max_height = std::max(line_h,
-        (int)M5.Display.height() - header_h - style.margin_top - style.margin_bottom);
-    int fullwidth_advance = reader_text_renderer().measureFullwidthCellForLayout();
+    const int max_height = std::max(line_h, page.vertical
+        ? (int)M5.Display.width() - style.margin_left - style.margin_right
+        : (int)M5.Display.height() - header_h - style.margin_top - style.margin_bottom);
+    int fullwidth_advance = page.vertical
+        ? reader_text_renderer().verticalCellAdvance()
+        : reader_text_renderer().measureFullwidthCellForLayout();
     const int indent_width = std::min(max_w - 1,
                                       fullwidth_advance * style.first_line_indent);
     const int paragraph_gap = line_h * style.paragraph_spacing / 10;
@@ -465,8 +475,9 @@ TxtPage TxtBook::read_page(uint32_t offset)
         }
 
         const int paragraph_indent = first_line_of_paragraph ? indent_width : 0;
-        std::vector<text_layout::Line> wrapped =
-            reader_text_renderer().layoutUtf8Paragraph(paragraph, max_w, paragraph_indent);
+        std::vector<text_layout::Line> wrapped = page.vertical
+            ? reader_text_renderer().layoutUtf8VerticalParagraph(paragraph, max_w, paragraph_indent)
+            : reader_text_renderer().layoutUtf8Paragraph(paragraph, max_w, paragraph_indent);
         for (size_t i = 0; i < wrapped.size(); ++i) {
             if (!page.lines.empty() && used_height + line_h > max_height) {
                 page.next_offset = source_offset_for(wrapped[i].byte_start);

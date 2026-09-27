@@ -8,6 +8,7 @@
 #include "modem/ml307_voice.h"
 #include "time/time_basis.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 
 #include <M5Unified.h>
 #include <algorithm>
@@ -85,15 +86,27 @@ void phone_worker(void *argument)
 
 const char *call_status(ml307_call_state_t state)
 {
+    using ui_locale::TextId;
+    using ui_locale::text;
     switch (state) {
-        case ML307_CALL_DIALING: return "Dialing...";
-        case ML307_CALL_ALERTING: return "Ringing...";
-        case ML307_CALL_INCOMING: return "Incoming call";
-        case ML307_CALL_ACTIVE: return "Connected";
-        case ML307_CALL_HELD: return "On hold";
-        case ML307_CALL_WAITING: return "Call waiting";
-        default: return "Ready to call";
+        case ML307_CALL_DIALING: return text(TextId::Dialing);
+        case ML307_CALL_ALERTING: return text(TextId::Ringing);
+        case ML307_CALL_INCOMING: return text(TextId::IncomingCall);
+        case ML307_CALL_ACTIVE: return text(TextId::Connected);
+        case ML307_CALL_HELD: return text(TextId::OnHold);
+        case ML307_CALL_WAITING: return text(TextId::CallWaiting);
+        default: return text(TextId::ReadyToCall);
     }
+}
+
+const char *display_call_kind(const std::string &kind)
+{
+    using ui_locale::TextId;
+    if (kind == "Received") return ui_locale::text(TextId::ReceivedCall);
+    if (kind == "Missed") return ui_locale::text(TextId::MissedCall);
+    if (kind == "Outgoing") return ui_locale::text(TextId::OutgoingCall);
+    if (kind == "No answer") return ui_locale::text(TextId::NoAnswer);
+    return kind.c_str();
 }
 
 struct CallRecord {
@@ -121,7 +134,8 @@ std::string display_call_time(const std::string &stored)
     char formatted[32] = {};
     return utc_seconds && time_basis_format_utc(utc_seconds, formatted,
                                                  sizeof(formatted), nullptr)
-        ? formatted : stored;
+        ? formatted : (stored == "Time unknown"
+                           ? ui_locale::text(ui_locale::TextId::TimeUnknown) : stored);
 }
 
 std::string safe_log_field(std::string value)
@@ -251,7 +265,7 @@ public:
                 } else if (result.operation == Operation::Dial) {
                     _state = ML307_CALL_DIALING;
                     begin_call(false, result.utc_seconds);
-                    _status = "Calling...";
+                    _status = ui_locale::text(ui_locale::TextId::Calling);
                 } else if (result.operation == Operation::Answer) {
                     phone_ringtone_stop();
                     _ringing = false;
@@ -260,7 +274,7 @@ public:
                     if (_connected_us == 0) _connected_us = esp_timer_get_time();
                     _was_connected = true;
                     _keypad_visible = false;
-                    _status = "Answered";
+                    _status = ui_locale::text(ui_locale::TextId::Answered);
                 } else if (result.operation == Operation::Hangup) {
                     phone_ringtone_stop();
                     _ringing = false;
@@ -269,13 +283,14 @@ public:
                     _keypad_visible = false;
                     _pending_tones.clear();
                     _tones.clear();
-                    _status = "Call ended";
+                    _status = ui_locale::text(ui_locale::TextId::CallEnded);
                 } else {
-                    _status = std::string("Sent tone ") + result.tone;
+                    _status = std::string(ui_locale::text(ui_locale::TextId::SentTonePrefix)) + result.tone;
                 }
             } else {
-                _status = std::string(result.operation == Operation::Tone
-                    ? "Tone failed: " : "Modem: ") + esp_err_to_name(result.error);
+                _status = std::string(ui_locale::text(result.operation == Operation::Tone
+                    ? ui_locale::TextId::ToneFailedPrefix : ui_locale::TextId::ModemErrorPrefix)) +
+                    esp_err_to_name(result.error);
                 ESP_LOGW(TAG, "operation=%d failed: %s",
                          static_cast<int>(result.operation), esp_err_to_name(result.error));
             }
@@ -355,12 +370,12 @@ public:
             const char digit = keys[row][col];
             if (_state == ML307_CALL_ACTIVE) {
                 if (_pending_tones.size() >= 16) {
-                    _status = "Tone queue full";
+                    _status = ui_locale::text(ui_locale::TextId::ToneQueueFull);
                 } else {
                     _pending_tones.push_back(digit);
                     _tones.push_back(digit);
                     if (_tones.size() > 24) _tones.erase(0, _tones.size() - 24);
-                    _status = std::string("Tone ") + digit;
+                    _status = std::string(ui_locale::text(ui_locale::TextId::TonePrefix)) + digit;
                 }
             } else if (_number.size() < 32) {
                 _number.push_back(digit);
@@ -377,15 +392,15 @@ public:
             if (_busy) return true; // Finish the current AT command first.
             if (_state == ML307_CALL_INCOMING || _state == ML307_CALL_WAITING) {
                 phone_ringtone_stop(); _ringing = false;
-                if (event.x < w / 2) { _status = "Answering..."; start(Operation::Answer); }
-                else { _status = "Rejecting..."; start(Operation::Hangup); }
+                if (event.x < w / 2) { _status = ui_locale::text(ui_locale::TextId::Answering); start(Operation::Answer); }
+                else { _status = ui_locale::text(ui_locale::TextId::Rejecting); start(Operation::Hangup); }
             } else if (_state != ML307_CALL_IDLE) {
-                _status = "Hanging up...";
+                _status = ui_locale::text(ui_locale::TextId::HangingUp);
                 start(Operation::Hangup);
             } else if (event.x < w / 3) {
                 if (!_number.empty()) _number.pop_back();
             } else if (event.x < w * 2 / 3) {
-                if (!_number.empty()) { _status = "Dialing..."; start(Operation::Dial); }
+                if (!_number.empty()) { _status = ui_locale::text(ui_locale::TextId::Dialing); start(Operation::Dial); }
             } else if (_number.empty() || _number[0] != '+') {
                 _number.insert(_number.begin(), '+');
             }
@@ -396,13 +411,13 @@ public:
             if (event.x >= w * 3 / 4) {
                 const esp_err_t ret = phone_ringtone_set_path("");
                 if (ret == ESP_OK) _ringtone_path.clear();
-                else _status = std::string("Ringtone: ") + esp_err_to_name(ret);
+                else _status = std::string(ui_locale::text(ui_locale::TextId::RingtonePrefix)) + esp_err_to_name(ret);
                 draw();
             } else {
                 launch_phone_ringtone_picker([this](const std::string &path) {
                     const esp_err_t ret = phone_ringtone_set_path(path.c_str());
-                    if (ret == ESP_OK) { _ringtone_path = path; _status = "Ringtone saved"; }
-                    else _status = std::string("Ringtone: ") + esp_err_to_name(ret);
+                    if (ret == ESP_OK) { _ringtone_path = path; _status = ui_locale::text(ui_locale::TextId::RingtoneSaved); }
+                    else _status = std::string(ui_locale::text(ui_locale::TextId::RingtonePrefix)) + esp_err_to_name(ret);
                 });
             }
             return true;
@@ -524,7 +539,7 @@ private:
     {
         if (_busy || !_queue) return;
         if (!ml307_sms_is_ready()) {
-            _status = "ML307A AT port not ready";
+            _status = ui_locale::text(ui_locale::TextId::PhoneAtNotReady);
             _next_query_us = esp_timer_get_time() + 1500000;
             return;
         }
@@ -542,12 +557,14 @@ private:
                                     nullptr, 0) != pdPASS) {
             delete job;
             _busy = false;
-            _status = "Phone task unavailable";
+            _status = ui_locale::text(ui_locale::TextId::PhoneTaskUnavailable);
         }
     }
 
     void draw()
     {
+        using ui_locale::TextId;
+        using ui_locale::text;
         const int w = M5.Display.width();
         const int h = M5.Display.height();
         const int pad = 20;
@@ -557,11 +574,11 @@ private:
         M5.Display.setEpdMode(epd_mode_t::epd_text);
         M5.Display.fillScreen(TFT_WHITE);
         system_font::draw_left(M5.Display, "<", pad, 14, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Phone", w / 2, 14, TFT_BLACK);
+        system_font::draw_center(M5.Display, text(TextId::Phone), w / 2, 14, TFT_BLACK);
         M5.Display.drawFastHLine(pad, HEADER_H - 1, w - pad * 2, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Dial", w / 4, HEADER_H + 14,
+        system_font::draw_center(M5.Display, text(TextId::Dial), w / 4, HEADER_H + 14,
                                  _show_history ? TFT_DARKGRAY : TFT_BLACK);
-        system_font::draw_center(M5.Display, "Call history", w * 3 / 4,
+        system_font::draw_center(M5.Display, text(TextId::CallHistory), w * 3 / 4,
                                  HEADER_H + 14,
                                  _show_history ? TFT_BLACK : TFT_DARKGRAY);
         M5.Display.drawFastHLine(_show_history ? w / 2 : pad, TAB_BOTTOM - 2,
@@ -574,14 +591,17 @@ private:
                 const CallRecord &entry = _records[index];
                 const int y = TAB_BOTTOM + row * 115;
                 system_font::draw_left(M5.Display,
-                    system_font::ellipsize(entry.number, w - 2 * pad), pad, y + 6,
+                    system_font::ellipsize(entry.number == "Unknown caller"
+                                               ? text(TextId::UnknownCaller) : entry.number,
+                                           w - 2 * pad), pad, y + 6,
                     TFT_BLACK);
                 char duration[20];
                 std::snprintf(duration, sizeof(duration), "%02lu:%02lu:%02lu",
                     static_cast<unsigned long>(entry.duration_s / 3600),
                     static_cast<unsigned long>((entry.duration_s / 60) % 60),
                     static_cast<unsigned long>(entry.duration_s % 60));
-                const std::string detail = entry.kind + "  " + display_call_time(entry.timestamp) +
+                const std::string detail = std::string(display_call_kind(entry.kind)) + "  " +
+                                           display_call_time(entry.timestamp) +
                                            "  " + duration;
                 system_font::draw_left(M5.Display,
                     system_font::ellipsize(detail, w - 2 * pad), pad, y + 53,
@@ -589,7 +609,7 @@ private:
                 M5.Display.drawFastHLine(pad, y + 113, w - pad * 2, TFT_DARKGRAY);
             }
             if (_records.empty()) system_font::draw_center(M5.Display,
-                "No call history", w / 2, TAB_BOTTOM + 100, TFT_DARKGRAY);
+                text(TextId::NoCallHistory), w / 2, TAB_BOTTOM + 100, TFT_DARKGRAY);
             M5.Display.display();
             M5.Display.endWrite();
             return;
@@ -597,7 +617,7 @@ private:
         system_font::draw_center(M5.Display, call_status(_state), w / 2, 164, TFT_BLACK);
         system_font::draw_center(M5.Display,
             system_font::ellipsize(_number.empty()
-                ? (_state == ML307_CALL_IDLE ? "Enter a number" : "Unknown caller")
+                ? (_state == ML307_CALL_IDLE ? text(TextId::EnterNumber) : text(TextId::UnknownCaller))
                 : _number, w - 50),
             w / 2, 220, _number.empty() ? TFT_DARKGRAY : TFT_BLACK);
         if (!_status.empty()) system_font::draw_center(M5.Display,
@@ -613,16 +633,17 @@ private:
             _last_drawn_duration_s = seconds;
         }
         if (_state == ML307_CALL_IDLE) {
-            std::string ringtone = _ringtone_path.empty() ? "Ringtone: Off" :
-                "Ringtone: " + _ringtone_path.substr(_ringtone_path.find_last_of('/') + 1);
+            std::string ringtone = _ringtone_path.empty() ? text(TextId::NoRingtone) :
+                std::string(text(TextId::RingtonePrefix)) +
+                    _ringtone_path.substr(_ringtone_path.find_last_of('/') + 1);
             system_font::draw_left(M5.Display,
                 system_font::ellipsize(ringtone, w * 3 / 4 - pad * 2), pad, 324,
                 TFT_BLACK);
-            system_font::draw_center(M5.Display, "Off", w * 7 / 8, 324, TFT_BLACK);
+            system_font::draw_center(M5.Display, text(TextId::Off), w * 7 / 8, 324, TFT_BLACK);
             M5.Display.drawFastHLine(pad, KEYPAD_TOP - 10, w - pad * 2, TFT_DARKGRAY);
         } else if (_state == ML307_CALL_ACTIVE && _keypad_visible) {
             system_font::draw_center(M5.Display,
-                system_font::ellipsize(_tones.empty() ? "Select a service option" : _tones,
+                system_font::ellipsize(_tones.empty() ? text(TextId::ServiceOptionHint) : _tones,
                                        w - pad * 2), w / 2, 324, TFT_BLACK);
             M5.Display.drawFastHLine(pad, KEYPAD_TOP - 10, w - pad * 2, TFT_DARKGRAY);
         }
@@ -648,19 +669,19 @@ private:
         const int footer_y = h - KEYPAD_BOTTOM_MARGIN;
         M5.Display.drawFastHLine(pad, footer_y, w - pad * 2, TFT_BLACK);
         if (_state == ML307_CALL_INCOMING || _state == ML307_CALL_WAITING) {
-            system_font::draw_center(M5.Display, "Answer", w / 4, footer_y + 30, TFT_BLACK);
-            system_font::draw_center(M5.Display, "Reject", w * 3 / 4, footer_y + 30, TFT_BLACK);
+            system_font::draw_center(M5.Display, text(TextId::Answer), w / 4, footer_y + 30, TFT_BLACK);
+            system_font::draw_center(M5.Display, text(TextId::Reject), w * 3 / 4, footer_y + 30, TFT_BLACK);
         } else if (_state == ML307_CALL_ACTIVE) {
             system_font::draw_center(M5.Display,
-                _keypad_visible ? "Hide keypad" : "Keypad", w / 4,
+                _keypad_visible ? text(TextId::HideKeypad) : text(TextId::Keypad), w / 4,
                 footer_y + 30, TFT_BLACK);
-            system_font::draw_center(M5.Display, "Hang up", w * 3 / 4,
+            system_font::draw_center(M5.Display, text(TextId::HangUp), w * 3 / 4,
                 footer_y + 30, TFT_BLACK);
         } else if (_state != ML307_CALL_IDLE) {
-            system_font::draw_center(M5.Display, "Hang up", w / 2, footer_y + 30, TFT_BLACK);
+            system_font::draw_center(M5.Display, text(TextId::HangUp), w / 2, footer_y + 30, TFT_BLACK);
         } else {
-            system_font::draw_center(M5.Display, "Delete", w / 6, footer_y + 30, TFT_BLACK);
-            system_font::draw_center(M5.Display, "Call", w / 2, footer_y + 30, TFT_BLACK);
+            system_font::draw_center(M5.Display, text(TextId::Delete), w / 6, footer_y + 30, TFT_BLACK);
+            system_font::draw_center(M5.Display, text(TextId::Call), w / 2, footer_y + 30, TFT_BLACK);
             system_font::draw_center(M5.Display, "+", w * 5 / 6, footer_y + 30, TFT_BLACK);
         }
         M5.Display.display();

@@ -20,6 +20,7 @@
 #include "usb/usb_transfer_boot.h"
 #include "reader_font.h"
 #include "reader_style.h"
+#include "ui/UiLocale.h"
 #include "frontlight/frontlight.h"
 #include "wifi/wifi_setting.h"
 
@@ -45,6 +46,12 @@ static void init_nvs()
 extern "C" void app_main(void)
 {
     init_nvs();
+
+    esp_err_t locale_ret = ui_locale::init();
+    if (locale_ret != ESP_OK) {
+        ESP_LOGW(TAG, "UI language preload failed; using English: %s",
+                 esp_err_to_name(locale_ret));
+    }
 
     // Cache the persisted network choice while the boot task still uses an
     // internal-RAM stack. Runtime network workers can live in PSRAM, but they
@@ -184,6 +191,13 @@ extern "C" void app_main(void)
 
     touch_input_init();
     launch_home();
+
+    // In Always On mode connect without blocking touch/UI startup. The
+    // on-demand default still leaves the C6 powered off until an app needs it.
+    esp_err_t always_on_ret = wifi_setting_start_always_on();
+    if (always_on_ret != ESP_OK) {
+        ESP_LOGW(TAG, "Always-on Wi-Fi startup failed: %s", esp_err_to_name(always_on_ret));
+    }
 
     while (true) {
         touch_input_update();

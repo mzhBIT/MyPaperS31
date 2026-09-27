@@ -110,6 +110,41 @@ static void draw_content(int w, int h) {
         ESP_LOGW(TAG, "TTF preparePage reported missing glyphs or render errors");
     }
     int64_t t_prepare = esp_timer_get_time();
+    if (g_page.vertical) {
+        int right = w - style.margin_right;
+        const std::vector<inline_style::Span> no_styles;
+        int columns = 0;
+        for (const auto &page_line : g_page.lines) {
+            if (right <= style.margin_left) break;
+            const size_t start = page_line.text_offset;
+            const size_t length = page_line.text_length;
+            if (start > text.size() || length > text.size() - start) break;
+            const std::string column = text.substr(start, length);
+            if (!column.empty()) {
+                const int column_x = right - line_h;
+                const int column_y = y + page_line.x_offset;
+                renderer.drawStyledUtf8VerticalColumn(M5.Display, column, no_styles,
+                                                       column_x, column_y, line_h, TFT_BLACK);
+                if (style.underline_type > 0) {
+                    const int length_px = renderer.measureUtf8Vertical(column);
+                    if (style.underline_type == 1) {
+                        M5.Display.drawFastVLine(column_x - 2, column_y, length_px, TFT_BLACK);
+                    } else {
+                        for (int dy = 0; dy < length_px; dy += 20) {
+                            M5.Display.drawFastVLine(column_x - 2, column_y + dy,
+                                std::min(12, length_px - dy), TFT_BLACK);
+                        }
+                    }
+                }
+            }
+            right -= page_line.height > 0 ? page_line.height : line_h;
+            ++columns;
+        }
+        ESP_LOGI(TAG, "vertical draw: columns=%d prepare=%lld draw=%lld ms",
+                 columns, (t_prepare - t0) / 1000,
+                 (esp_timer_get_time() - t_prepare) / 1000);
+        return;
+    }
     int line_count = 0;
     int char_count = 0;
     CooperativeYield cooperative_yield;
@@ -430,6 +465,7 @@ private:
         m_overlay.close();
         if (apply_layout) {
             g_book.set_script_mode(m_overlay.script_mode());
+            g_book.set_writing_mode(m_overlay.writing_mode());
             g_book.refresh_layout_settings();
             g_page = g_book.read_page(g_page.start_offset);
             m_overlay.clear_settings_dirty();

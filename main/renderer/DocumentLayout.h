@@ -10,7 +10,7 @@
 
 namespace document_layout {
 
-static constexpr uint32_t ALGORITHM_VERSION = 6;
+static constexpr uint32_t ALGORITHM_VERSION = 8;
 
 enum class BlockType {
     Paragraph,
@@ -36,10 +36,12 @@ struct Block {
     bool allow_first_line_indent = false;
     bool paragraph_spacing_after = false;
     struct FootnoteRef {
+        enum class Kind : uint8_t { LinkedFootnote, RubyText, InlineSup, WereadComment };
         size_t byte_start = 0;
         size_t byte_end = 0;
         std::string target;
         std::string content;
+        Kind kind = Kind::LinkedFootnote;
     };
     std::vector<FootnoteRef> footnotes;
     std::vector<inline_style::Span> styles;
@@ -69,11 +71,15 @@ struct PageItem {
     bool justify = false;
     int x_offset = 0;
     bool centered = false;
+    bool vertical = false;
+    bool vertical_ruby_lane = false;
     struct FootnoteRef {
+        using Kind = Block::FootnoteRef::Kind;
         size_t byte_start = 0;
         size_t byte_end = 0;
         std::string target;
         std::string content;
+        Kind kind = Kind::LinkedFootnote;
     };
     std::vector<FootnoteRef> footnotes;
     std::vector<inline_style::Span> styles;
@@ -112,6 +118,7 @@ struct Options {
     // Legacy MOBI markup may contain dimensions expressed in old device or
     // non-pixel units. Ignore a tiny declared box for a large page image.
     bool ignore_tiny_declared_image_size = false;
+    bool vertical = false;
     const char *image_fallback_text = "[image]";
 
     LayoutParagraphFn layout_paragraph = nullptr;

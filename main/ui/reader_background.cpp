@@ -1,4 +1,5 @@
 #include "ui/reader_background.h"
+#include "ui/UiLocale.h"
 
 #include "storage/app_paths.h"
 
@@ -436,14 +437,14 @@ ReaderBackgroundResult reader_background_set(const char *path,
     std::string selected = path ? path : "";
     std::string ext = image_extension(selected);
     if (ext.empty()) {
-        if (message) *message = "Only JPG, PNG and BMP are supported";
+        if (message) *message = ui_locale::text(ui_locale::TextId::ImageFormatsHint);
         return ReaderBackgroundResult::Unsupported;
     }
     int width = 0;
     int height = 0;
     bool progressive = false;
     if (!probe_image(selected, ext, &width, &height, &progressive)) {
-        if (message) *message = "Cannot read image dimensions";
+        if (message) *message = ui_locale::text(ui_locale::TextId::ImageDimensionsFailed);
         return ReaderBackgroundResult::InvalidImage;
     }
 
@@ -454,20 +455,21 @@ ReaderBackgroundResult reader_background_set(const char *path,
     if (image_long < screen_long || image_short < screen_short) {
         if (message) {
             char text[112];
-            std::snprintf(text, sizeof(text), "Image must be at least %d x %d (%d x %d selected)",
+            std::snprintf(text, sizeof(text), "%s %d x %d (%d x %d)",
+                          ui_locale::text(ui_locale::TextId::ImageTooSmall),
                           screen_long, screen_short, image_long, image_short);
             *message = text;
         }
         return ReaderBackgroundResult::TooSmall;
     }
     if (!generate_cache(selected, ext, width, height, screen_width, screen_height)) {
-        if (message) *message = "Failed to create reading background cache";
+        if (message) *message = ui_locale::text(ui_locale::TextId::BackgroundCacheFailed);
         return ReaderBackgroundResult::CacheFailed;
     }
     if (!save_path(selected)) {
         release_cache();
         unlink(CACHE_PATH);
-        if (message) *message = "Failed to save background setting";
+        if (message) *message = ui_locale::text(ui_locale::TextId::BackgroundSaveFailed);
         return ReaderBackgroundResult::SaveFailed;
     }
     background_path = selected;
@@ -475,7 +477,7 @@ ReaderBackgroundResult reader_background_set(const char *path,
     background_width = width;
     background_height = height;
     background_progressive = progressive;
-    if (message) *message = "Reading background set";
+    if (message) *message = ui_locale::text(ui_locale::TextId::BackgroundSet);
     return ReaderBackgroundResult::Ok;
 }
 

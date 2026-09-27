@@ -2,6 +2,7 @@
 #include "activities/ActivityManager.h"
 #include "renderer/TurboJpegDecoder.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 
 #include <M5Unified.h>
 #include <algorithm>
@@ -278,7 +279,7 @@ private:
         bool progressive = false;
         if (!probe_image(_path, _ext, &iw, &ih, &progressive)) {
             draw_topbar();
-            draw_message("Unsupported image");
+            draw_message(ui_locale::text(ui_locale::TextId::UnsupportedImage));
         } else {
             bool exact_screen = iw == w && ih == h;
             bool full_screen = exact_screen || matches_screen_aspect(iw, ih, w, h);
@@ -330,7 +331,7 @@ private:
                      software_stats.decode_ms,
                      software_stats.push_ms,
                      (unsigned)software_stats.memory_budget);
-            if (!ok) draw_message("Image decode failed");
+            if (!ok) draw_message(ui_locale::text(ui_locale::TextId::ImageDecodeFailed));
         }
 
         M5.Display.display();

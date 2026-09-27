@@ -4,6 +4,7 @@
 #include "activities/ActivityManager.h"
 #include "audio/audio_file_formats.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 
 #include <M5Unified.h>
 #include <algorithm>
@@ -125,7 +126,7 @@ private:
         M5.Display.setEpdMode(epd_mode_t::epd_text);
         M5.Display.fillScreen(TFT_WHITE);
         system_font::draw_left(M5.Display, "<", PAD, 12, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Choose Ringtone", width / 2, 12, TFT_BLACK);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ChooseRingtone), width / 2, 12, TFT_BLACK);
         M5.Display.drawFastHLine(PAD, HEADER_H - 1, width - PAD * 2, TFT_BLACK);
         for (int row = 0; row < rows(); ++row) {
             const int index = _scroll + row;
@@ -139,7 +140,7 @@ private:
             M5.Display.drawFastHLine(PAD, y + ROW_H - 3, width - PAD * 2, TFT_DARKGRAY);
         }
         if (_entries.empty()) system_font::draw_center(M5.Display,
-            "No supported audio files", width / 2, 180, TFT_BLACK);
+            ui_locale::text(ui_locale::TextId::NoAudioFiles), width / 2, 180, TFT_BLACK);
         M5.Display.display();
         M5.Display.endWrite();
     }

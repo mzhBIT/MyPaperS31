@@ -7,6 +7,7 @@
 #include "time/time_basis.h"
 #include "ui/SystemFont.h"
 #include "ui/TextInputOverlay.h"
+#include "ui/UiLocale.h"
 
 #include <M5Unified.h>
 #include <algorithm>
@@ -368,7 +369,7 @@ public:
 
     void on_create() override
     {
-        draw_page("Loading messages...");
+        draw_page(ui_locale::text(ui_locale::TextId::LoadingMessages));
         start_work(WorkKind::List);
     }
 
@@ -388,7 +389,7 @@ public:
             std::free(result);
         }
         if (!_busy && !_input.visible() && ml307_sms_take_new_message_hint()) {
-            _status = "New message - refreshing...";
+            _status = ui_locale::text(ui_locale::TextId::NewMessageRefreshing);
             draw_page(_status);
             start_work(WorkKind::List);
         }
@@ -406,7 +407,7 @@ public:
             } else if (!_busy) {
                 ActivityManager::instance().pop();
             } else {
-                _status = "Please wait for the modem";
+                _status = ui_locale::text(ui_locale::TextId::WaitForModem);
                 draw_page(_status);
             }
             return true;
@@ -432,7 +433,7 @@ public:
                     open_message_input(conversation.address);
                 }
             } else if (event.x < M5.Display.width() / 2) {
-                _status = "Refreshing...";
+                _status = ui_locale::text(ui_locale::TextId::Refreshing);
                 draw_page(_status);
                 start_work(WorkKind::List);
             } else {
@@ -513,8 +514,9 @@ private:
     {
         if (result.error != ESP_OK) {
             _status = ml307_sms_is_ready()
-                ? std::string("SMS operation failed: ") + esp_err_to_name(result.error)
-                : "ML307A SMS channel is not ready";
+                ? std::string(ui_locale::text(ui_locale::TextId::SmsOperationFailedPrefix)) +
+                    esp_err_to_name(result.error)
+                : ui_locale::text(ui_locale::TextId::SmsChannelNotReady);
             draw_page(_status);
             return;
         }
@@ -543,11 +545,11 @@ private:
             const int pages = std::max(1, static_cast<int>(
                 (_conversations.size() + ROW_COUNT - 1) / ROW_COUNT));
             _page = std::min(_page, pages - 1);
-            _status = _conversations.empty() ? "No messages" : "";
+            _status = _conversations.empty() ? ui_locale::text(ui_locale::TextId::NoMessages) : "";
         } else if (result.kind == WorkKind::Send) {
-            _status = "Message sent";
+            _status = ui_locale::text(ui_locale::TextId::MessageSent);
         } else {
-            _status = "Message deleted";
+            _status = ui_locale::text(ui_locale::TextId::MessageDeleted);
             _selected_message = -1;
         }
         draw_page(_status);
@@ -641,7 +643,7 @@ private:
             delete job;
             _task = nullptr;
             _busy = false;
-            _status = "Failed to start SMS task";
+            _status = ui_locale::text(ui_locale::TextId::SmsTaskStartFailed);
             draw_page(_status);
         }
     }
@@ -651,7 +653,7 @@ private:
         if (_detail < 0 || _detail >= static_cast<int>(_conversations.size())) return;
         if (_selected_message < 0 ||
             _selected_message >= static_cast<int>(_bubbles.size())) {
-            _status = "Tap a message to select it";
+            _status = ui_locale::text(ui_locale::TextId::TapMessageToSelect);
             draw_page(_status);
             return;
         }
@@ -659,11 +661,11 @@ private:
             _bubbles[static_cast<size_t>(_selected_message)].message_index];
         if ((message.outgoing && message.index > -2) ||
             (!message.outgoing && message.index < 0)) {
-            _status = "Cannot locate this message";
+            _status = ui_locale::text(ui_locale::TextId::CannotLocateMessage);
             draw_page(_status);
             return;
         }
-        _status = "Deleting...";
+        _status = ui_locale::text(ui_locale::TextId::Deleting);
         draw_page(_status);
         start_work(WorkKind::Delete, message.index, message.address, message.text);
     }
@@ -671,8 +673,8 @@ private:
     void open_address_input()
     {
         TextInputOptions options;
-        options.title = "Recipient phone number";
-        options.submit_label = "Next";
+        options.title = ui_locale::text(ui_locale::TextId::RecipientPhoneNumber);
+        options.submit_label = ui_locale::text(ui_locale::TextId::Next);
         options.max_bytes = ML307_SMS_ADDRESS_SIZE - 1;
         options.start_in_chinese = false;
         _input.open(options, [this](const std::string &address) {
@@ -685,12 +687,12 @@ private:
     {
         _compose_address = address;
         TextInputOptions options;
-        options.title = std::string("Message to ") + address;
-        options.submit_label = "Send";
+        options.title = std::string(ui_locale::text(ui_locale::TextId::MessageToPrefix)) + address;
+        options.submit_label = ui_locale::text(ui_locale::TextId::Send);
         options.max_bytes = ML307_SMS_TEXT_SIZE - 1;
         options.start_in_chinese = true;
         _input.open(options, [this](const std::string &text) {
-            _status = "Sending...";
+            _status = ui_locale::text(ui_locale::TextId::Sending);
             draw_page(_status);
             start_work(WorkKind::Send, -1, _compose_address, text);
         }, [this]() { draw_page(_status); });
@@ -735,6 +737,8 @@ private:
 
     void draw_list()
     {
+        using ui_locale::TextId;
+        using ui_locale::text;
         const int height = M5.Display.height();
         const int row_h = (height - HEADER_H - FOOTER_H) / ROW_COUNT;
         const int begin = _page * ROW_COUNT;
@@ -745,17 +749,20 @@ private:
             if (index < static_cast<int>(_conversations.size())) {
                 const auto &conversation = _conversations[static_cast<size_t>(index)];
                 const auto &message = _messages[conversation.messages.back()];
-                const std::string &address = conversation.address;
-                const std::string preview = message.text[0] ? message.text : "(Empty message)";
+                const std::string address = conversation.address == "Unknown sender"
+                    ? text(TextId::UnknownSender) : conversation.address;
+                const std::string preview = message.text[0] ? message.text : text(TextId::EmptyMessage);
                 if (conversation.unread) M5.Display.fillCircle(SIDE_PAD + 6, y + 28, 6, TFT_BLACK);
                 system_font::draw_left(M5.Display,
                     system_font::ellipsize(address, M5.Display.width() - 250),
                     SIDE_PAD + 24, y + 12, TFT_BLACK);
                 const std::string list_time = std::strlen(message.timestamp) == 16
-                    ? std::string(message.timestamp + 5) : std::string(message.timestamp);
+                    ? std::string(message.timestamp + 5)
+                    : (std::strcmp(message.timestamp, "Time unknown") == 0
+                           ? text(TextId::TimeUnknown) : message.timestamp);
                 system_font::draw_right(M5.Display, list_time,
                     M5.Display.width() - SIDE_PAD, y + 12, TFT_DARKGRAY);
-                const std::string direction = message.outgoing ? "Me: " : "";
+                const std::string direction = message.outgoing ? text(TextId::MePrefix) : "";
                 system_font::draw_left(M5.Display,
                     system_font::ellipsize(direction + preview,
                         M5.Display.width() - SIDE_PAD * 2 - 90),
@@ -772,17 +779,21 @@ private:
         const int pages = std::max(1, static_cast<int>(
             (_conversations.size() + ROW_COUNT - 1) / ROW_COUNT));
         char title[64];
-        std::snprintf(title, sizeof(title), "Messages  %d/%d", _page + 1, pages);
+        std::snprintf(title, sizeof(title), "%s  %d/%d", text(TextId::Messages), _page + 1, pages);
         draw_header(title);
-        draw_footer("Refresh", "Compose");
+        draw_footer(text(TextId::RefreshAction), text(TextId::Compose));
     }
 
     void draw_detail()
     {
+        using ui_locale::TextId;
+        using ui_locale::text;
         if (_detail < 0 || _detail >= static_cast<int>(_conversations.size())) return;
         const auto &conversation = _conversations[static_cast<size_t>(_detail)];
         char title[96];
-        std::snprintf(title, sizeof(title), "%s  (%u)", conversation.address.c_str(),
+        std::snprintf(title, sizeof(title), "%s  (%u)",
+            conversation.address == "Unknown sender" ? text(TextId::UnknownSender)
+                                                     : conversation.address.c_str(),
             static_cast<unsigned>(conversation.messages.size()));
         draw_header(title);
         const int view_bottom = M5.Display.height() - FOOTER_H;
@@ -807,7 +818,8 @@ private:
                     bubble.x + BUBBLE_PAD_X, text_y, TFT_BLACK);
                 text_y += line_step;
             }
-            const std::string stamp = message.timestamp;
+            const std::string stamp = std::strcmp(message.timestamp, "Time unknown") == 0
+                ? text(TextId::TimeUnknown) : message.timestamp;
             const size_t split = stamp.find(' ');
             const bool dated = split == 10 && stamp.size() == 16;
             const std::string date = dated ? stamp.substr(5, 5) : stamp;
@@ -825,7 +837,7 @@ private:
             }
         }
         M5.Display.clearClipRect();
-        draw_footer("Delete", "Reply");
+        draw_footer(text(TextId::Delete), text(TextId::Reply));
     }
 
     void draw_page(const std::string &status)

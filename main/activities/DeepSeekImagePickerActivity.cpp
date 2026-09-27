@@ -3,6 +3,7 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 
 #include <M5Unified.h>
 
@@ -135,7 +136,7 @@ private:
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
         system_font::draw_left(M5.Display, "<", 18, 12, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Choose Image", width / 2, 12, TFT_BLACK);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ChooseImage), width / 2, 12, TFT_BLACK);
         M5.Display.drawFastHLine(0, HEADER_H - 1, width, TFT_BLACK);
         for (int row = 0; row < rows; ++row) {
             const int index = _scroll + row;
@@ -153,7 +154,7 @@ private:
             M5.Display.drawFastHLine(PAD, y + ROW_H - 3, width - PAD * 2, TFT_BLACK);
         }
         if (_entries.empty()) {
-            system_font::draw_center(M5.Display, "No JPEG / PNG / GIF / WebP images", width / 2,
+            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::NoDeepSeekImages), width / 2,
                                      180, TFT_BLACK);
         }
         M5.Display.display();

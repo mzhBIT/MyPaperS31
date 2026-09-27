@@ -33,6 +33,8 @@
 #define WIFI_SETTING_NVS_SSID_KEY      "ssid"
 #define WIFI_SETTING_NVS_PASSWORD_KEY  "password"
 #define WIFI_SETTING_NVS_NETWORK_KEY   "network"
+#define WIFI_SETTING_NVS_POWER_KEY     "power_mode"
+#define WIFI_SETTING_ALWAYS_ON_TIMEOUT_MS 12000
 
 static const char *TAG = "wifi_setting";
 
@@ -48,6 +50,8 @@ static bool s_connected;
 // because an NVS flash read temporarily disables the external-memory cache.
 // Keep the frequently queried preference in internal .data instead.
 static volatile wifi_setting_network_mode_t s_network_mode = WIFI_SETTING_NETWORK_WIFI;
+static volatile wifi_setting_power_mode_t s_power_mode = WIFI_SETTING_POWER_ON_DEMAND;
+static volatile TaskHandle_t s_always_on_task;
 static int s_retry_num;
 static char s_connected_ssid[33];
 static esp_netif_t *s_sta_netif;
@@ -122,6 +126,7 @@ static esp_err_t wifi_setting_init_nvs(void)
 esp_err_t wifi_setting_load_network_mode(void)
 {
     uint8_t stored = WIFI_SETTING_NETWORK_WIFI;
+    uint8_t stored_power = WIFI_SETTING_POWER_ON_DEMAND;
     ESP_RETURN_ON_ERROR(wifi_setting_init_nvs(), TAG,
                         "Failed to initialize NVS for network preference");
 
@@ -129,11 +134,18 @@ esp_err_t wifi_setting_load_network_mode(void)
     esp_err_t ret = nvs_open(WIFI_SETTING_NVS_NAMESPACE, NVS_READONLY, &handle);
     if (ret == ESP_OK) {
         ret = nvs_get_u8(handle, WIFI_SETTING_NVS_NETWORK_KEY, &stored);
-        nvs_close(handle);
         if (ret == ESP_ERR_NVS_NOT_FOUND) {
             ret = ESP_OK;
             stored = WIFI_SETTING_NETWORK_WIFI;
         }
+        if (ret == ESP_OK) {
+            ret = nvs_get_u8(handle, WIFI_SETTING_NVS_POWER_KEY, &stored_power);
+            if (ret == ESP_ERR_NVS_NOT_FOUND) {
+                ret = ESP_OK;
+                stored_power = WIFI_SETTING_POWER_ON_DEMAND;
+            }
+        }
+        nvs_close(handle);
     } else if (ret == ESP_ERR_NVS_NOT_FOUND) {
         ret = ESP_OK;
         stored = WIFI_SETTING_NETWORK_WIFI;
@@ -143,9 +155,98 @@ esp_err_t wifi_setting_load_network_mode(void)
     s_network_mode = stored == WIFI_SETTING_NETWORK_CELLULAR
                          ? WIFI_SETTING_NETWORK_CELLULAR
                          : WIFI_SETTING_NETWORK_WIFI;
-    ESP_LOGI(TAG, "Network preference loaded: %s",
-             s_network_mode == WIFI_SETTING_NETWORK_CELLULAR ? "4G" : "Wi-Fi");
+    s_power_mode = stored_power == WIFI_SETTING_POWER_ALWAYS_ON
+                       ? WIFI_SETTING_POWER_ALWAYS_ON
+                       : WIFI_SETTING_POWER_ON_DEMAND;
+    ESP_LOGI(TAG, "Network preference loaded: %s, Wi-Fi power: %s",
+             s_network_mode == WIFI_SETTING_NETWORK_CELLULAR ? "4G" : "Wi-Fi",
+             s_power_mode == WIFI_SETTING_POWER_ALWAYS_ON ? "always on" : "on demand");
     return ESP_OK;
+}
+
+wifi_setting_power_mode_t wifi_setting_get_power_mode(void)
+{
+    return s_power_mode;
+}
+
+static void wifi_setting_wait_for_always_on_task(void)
+{
+    // A settings scan or transport switch must not race boot-time connect.
+    while (s_always_on_task != NULL &&
+           s_always_on_task != xTaskGetCurrentTaskHandle()) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+static void wifi_setting_always_on_worker(void *arg)
+{
+    (void)arg;
+    // Let the creator publish the task handle before accessing shared state.
+    vTaskDelay(pdMS_TO_TICKS(100));
+    if (s_network_mode == WIFI_SETTING_NETWORK_WIFI &&
+        s_power_mode == WIFI_SETTING_POWER_ALWAYS_ON) {
+        esp_err_t ret = wifi_setting_connect_saved(WIFI_SETTING_ALWAYS_ON_TIMEOUT_MS);
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Always-on Wi-Fi connect failed: %s", esp_err_to_name(ret));
+        }
+    }
+    s_always_on_task = NULL;
+    vTaskDelete(NULL);
+}
+
+esp_err_t wifi_setting_start_always_on(void)
+{
+    if (s_network_mode != WIFI_SETTING_NETWORK_WIFI ||
+        s_power_mode != WIFI_SETTING_POWER_ALWAYS_ON ||
+        s_always_on_task != NULL || wifi_setting_is_connected()) {
+        return ESP_OK;
+    }
+    char ssid[WIFI_SETTING_SSID_MAX_LEN + 1] = {0};
+    char password[WIFI_SETTING_PASSWORD_MAX_LEN + 1] = {0};
+    if (!wifi_setting_load_credentials(ssid, sizeof(ssid), password, sizeof(password))) {
+        ESP_LOGI(TAG, "Always-on Wi-Fi waiting for saved credentials");
+        return ESP_OK;
+    }
+    BaseType_t created = xTaskCreate(wifi_setting_always_on_worker, "wifi_always_on",
+                                     4096, NULL, 4, (TaskHandle_t *)&s_always_on_task);
+    return created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
+esp_err_t wifi_setting_set_power_mode(wifi_setting_power_mode_t mode)
+{
+    ESP_RETURN_ON_FALSE(mode == WIFI_SETTING_POWER_ON_DEMAND ||
+                            mode == WIFI_SETTING_POWER_ALWAYS_ON,
+                        ESP_ERR_INVALID_ARG, TAG, "Invalid Wi-Fi power mode");
+    ESP_RETURN_ON_ERROR(wifi_setting_init_nvs(), TAG, "Failed to initialize NVS");
+    nvs_handle_t handle = 0;
+    ESP_RETURN_ON_ERROR(nvs_open(WIFI_SETTING_NVS_NAMESPACE, NVS_READWRITE, &handle),
+                        TAG, "Failed to open Wi-Fi preference NVS");
+    esp_err_t ret = nvs_set_u8(handle, WIFI_SETTING_NVS_POWER_KEY, (uint8_t)mode);
+    if (ret == ESP_OK) ret = nvs_commit(handle);
+    nvs_close(handle);
+    if (ret != ESP_OK) return ret;
+    s_power_mode = mode;
+    ESP_LOGI(TAG, "Wi-Fi power mode saved: %s",
+             mode == WIFI_SETTING_POWER_ALWAYS_ON ? "always on" : "on demand");
+    if (s_network_mode != WIFI_SETTING_NETWORK_WIFI) return ESP_OK;
+    if (mode == WIFI_SETTING_POWER_ALWAYS_ON) {
+        esp_err_t start_ret = wifi_setting_start_always_on();
+        if (start_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Always-on Wi-Fi startup deferred: %s", esp_err_to_name(start_ret));
+        }
+        return ESP_OK;
+    }
+    wifi_setting_wait_for_always_on_task();
+    return wifi_setting_deinit(true);
+}
+
+esp_err_t wifi_setting_release(void)
+{
+    if (s_network_mode == WIFI_SETTING_NETWORK_WIFI &&
+        s_power_mode == WIFI_SETTING_POWER_ALWAYS_ON) {
+        return ESP_OK;
+    }
+    return wifi_setting_deinit(true);
 }
 
 wifi_setting_network_mode_t wifi_setting_get_network_mode(void)
@@ -158,6 +259,7 @@ esp_err_t wifi_setting_set_network_mode(wifi_setting_network_mode_t mode)
     ESP_RETURN_ON_FALSE(mode == WIFI_SETTING_NETWORK_WIFI ||
                             mode == WIFI_SETTING_NETWORK_CELLULAR,
                         ESP_ERR_INVALID_ARG, TAG, "Invalid network mode");
+    wifi_setting_wait_for_always_on_task();
     ESP_RETURN_ON_ERROR(wifi_setting_init_nvs(), TAG, "Failed to initialize NVS");
     nvs_handle_t handle = 0;
     ESP_RETURN_ON_ERROR(nvs_open(WIFI_SETTING_NVS_NAMESPACE, NVS_READWRITE, &handle),
@@ -179,6 +281,11 @@ esp_err_t wifi_setting_set_network_mode(wifi_setting_network_mode_t mode)
         }
     } else if (s_connected && s_sta_netif != NULL) {
         (void)esp_netif_set_default_netif(s_sta_netif);
+    } else {
+        esp_err_t start_ret = wifi_setting_start_always_on();
+        if (start_ret != ESP_OK) {
+            ESP_LOGW(TAG, "Always-on Wi-Fi startup deferred: %s", esp_err_to_name(start_ret));
+        }
     }
     return ESP_OK;
 }
@@ -327,6 +434,7 @@ esp_err_t wifi_setting_scan(wifi_setting_ap_t *records,
                             size_t capacity,
                             size_t *out_count)
 {
+    wifi_setting_wait_for_always_on_task();
     ESP_RETURN_ON_FALSE(out_count != NULL, ESP_ERR_INVALID_ARG, TAG, "Missing scan count output");
     ESP_RETURN_ON_FALSE(capacity == 0 || records != NULL, ESP_ERR_INVALID_ARG,
                         TAG, "Missing scan record buffer");
@@ -380,6 +488,7 @@ esp_err_t wifi_setting_scan(wifi_setting_ap_t *records,
 
 esp_err_t wifi_setting_connect(const char *ssid, const char *password, int timeout_ms)
 {
+    wifi_setting_wait_for_always_on_task();
     ESP_RETURN_ON_FALSE(ssid != NULL && ssid[0] != '\0', ESP_ERR_INVALID_ARG, TAG, "Wi-Fi SSID is empty");
     ESP_RETURN_ON_FALSE(strlen(ssid) <= WIFI_SETTING_SSID_MAX_LEN, ESP_ERR_INVALID_ARG,
                         TAG, "Wi-Fi SSID is too long");
@@ -548,6 +657,7 @@ esp_err_t wifi_setting_connect_saved(int timeout_ms)
 
 esp_err_t wifi_setting_deinit(bool power_down_c6)
 {
+    wifi_setting_wait_for_always_on_task();
     wifi_setting_log_heap("before-deinit");
     esp_err_t first_error = ESP_OK;
     s_stopping = true;

@@ -57,6 +57,7 @@ public:
     }
 
     bool read_item_to_string(const std::string &href, std::string *out);
+    bool read_kf8_flow(uint32_t flow_index, std::string *out) const;
     bool read_resource_prefix(const std::string &href, std::vector<uint8_t> *out,
                               size_t max_bytes = 64 * 1024);
     bool read_resource_to_memory(const std::string &href, std::vector<uint8_t> *out,

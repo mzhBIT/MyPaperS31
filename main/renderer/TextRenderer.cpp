@@ -1926,6 +1926,141 @@ std::vector<text_layout::Line> TextRenderer::layoutUtf8Paragraph(const std::stri
     return text_layout::break_utf8(text, options, measure, this, measure_kerning);
 }
 
+int TextRenderer::verticalCellAdvance() const
+{
+    return std::max(1, _style.font_size + _style.letter_spacing);
+}
+
+int TextRenderer::verticalRubyLaneWidth() const
+{
+    // Ruby reuses the normal-size cached glyph and is reduced only at draw time.
+    return std::max(4, (verticalCellAdvance() + 1) / 2 + 4);
+}
+
+int TextRenderer::measureUtf8Vertical(const std::string &text) const
+{
+    int cells = 0;
+    for (size_t pos = 0; pos < text.size();) {
+        uint32_t cp = 0;
+        pos = nextUtf8(text, pos, cp);
+        if (cp != '\r' && cp != '\n') ++cells;
+    }
+    return cells * verticalCellAdvance();
+}
+
+std::vector<text_layout::Line> TextRenderer::layoutUtf8VerticalParagraph(
+    const std::string &text, int max_height, int first_column_indent)
+{
+    text_layout::Options options;
+    options.max_width = max_height;
+    options.first_line_indent = first_column_indent;
+    options.prefer_word_break = false;
+    options.apply_cjk_kinsoku = true;
+    options.optimize_western_lines = false;
+    options.hyphenate_english = false;
+    auto measure = [](void *context, uint32_t) -> int {
+        return static_cast<TextRenderer *>(context)->verticalCellAdvance();
+    };
+    return text_layout::break_utf8(text, options, measure, this);
+}
+
+void TextRenderer::drawStyledUtf8VerticalColumn(
+    lgfx::LGFXBase &gfx, const std::string &text,
+    const std::vector<inline_style::Span> &styles,
+    int x, int y, int column_width, uint16_t color)
+{
+    const int cell = verticalCellAdvance();
+    size_t style_index = 0;
+    for (size_t pos = 0; pos < text.size();) {
+        const size_t byte_pos = pos;
+        uint32_t cp = 0;
+        pos = nextUtf8(text, pos, cp);
+        if (cp == '\r' || cp == '\n') continue;
+        while (style_index < styles.size() && styles[style_index].byte_end <= byte_pos)
+            ++style_index;
+        uint8_t flags = inline_style::None;
+        for (size_t si = style_index; si < styles.size(); ++si) {
+            if (styles[si].byte_start > byte_pos) break;
+            if (byte_pos < styles[si].byte_end) flags |= styles[si].flags;
+        }
+        if (_lv_ready && _lv_font) {
+            const std::string glyph_text = codepointToUtf8(cp);
+            gfx.setTextSize(1);
+            gfx.setTextDatum(textdatum_t::top_left);
+            gfx.setTextColor(color, color);
+            gfx.drawString(glyph_text.c_str(), x, y, _lv_font);
+        } else {
+            // Unicode vertical presentation forms keep punctuation in the
+            // correct corner without rotating the entire framebuffer. If a
+            // font lacks one, retain its ordinary glyph rather than a box.
+            uint32_t vertical_cp = 0;
+            switch (cp) {
+            case 0xff0c: vertical_cp = 0xfe10; break; // ，
+            case 0x3001: vertical_cp = 0xfe11; break; // 、
+            case 0x3002: vertical_cp = 0xfe12; break; // 。
+            case 0xff1a: vertical_cp = 0xfe13; break; // ：
+            case 0xff1b: vertical_cp = 0xfe14; break; // ；
+            case 0xff01: vertical_cp = 0xfe15; break; // ！
+            case 0xff1f: vertical_cp = 0xfe16; break; // ？
+            case 0xff08: vertical_cp = 0xfe35; break; // （
+            case 0xff09: vertical_cp = 0xfe36; break; // ）
+            case 0x300a: vertical_cp = 0xfe3d; break; // 《
+            case 0x300b: vertical_cp = 0xfe3e; break; // 》
+            case 0x300c: vertical_cp = 0xfe41; break; // 「
+            case 0x300d: vertical_cp = 0xfe42; break; // 」
+            case 0x2026: vertical_cp = 0xfe19; break; // …
+            default: break;
+            }
+            const Glyph *glyph = vertical_cp ? getGlyph(vertical_cp) : nullptr;
+            if (!glyph) glyph = getGlyph(cp);
+            if (glyph) {
+            const int glyph_x = x + std::max(0, (column_width - glyph->advance) / 2);
+            drawGlyphStyled(gfx, *glyph, glyph_x, y + baseline(), color, flags);
+            } else {
+                gfx.drawRect(x, y, std::min(column_width, cell), cell, color);
+            }
+        }
+        y += cell;
+    }
+}
+
+bool TextRenderer::drawUtf8VerticalRuby(lgfx::LGFXBase &gfx, const std::string &text,
+                                        int x, int y, int base_height, int lane_width,
+                                        uint16_t color)
+{
+    if ((!_ft_ready && !_bin_ready) || text.empty() || base_height <= 0 || lane_width <= 0)
+        return false;
+    int count = 0;
+    for (size_t pos = 0; pos < text.size();) {
+        uint32_t cp = 0;
+        pos = nextUtf8(text, pos, cp);
+        if (cp != '\r' && cp != '\n') ++count;
+    }
+    if (count == 0) return false;
+    const int cell = verticalCellAdvance();
+    const int scale = std::min(50, base_height * 100 / std::max(1, count * cell));
+    // Exceptionally long readings remain available through the popup instead
+    // of colliding with the following base character's ruby.
+    if (scale < 30) return false;
+    const int small_cell = std::max(1, (cell * scale + 99) / 100);
+    const int total_height = count * small_cell;
+    int cursor_y = y + std::max(0, (base_height - total_height) / 2);
+    for (size_t pos = 0; pos < text.size();) {
+        uint32_t cp = 0;
+        pos = nextUtf8(text, pos, cp);
+        if (cp == '\r' || cp == '\n') continue;
+        const Glyph *glyph = getGlyph(cp);
+        if (!glyph) return false;
+        const int advance = std::max(1, (glyph->advance * scale + 50) / 100);
+        const int glyph_x = x + std::max(0, (lane_width - advance) / 2);
+        const int small_baseline = (baseline() * scale + 50) / 100;
+        drawGlyphScaled(gfx, *glyph, glyph_x, cursor_y + small_baseline,
+                        scale, color);
+        cursor_y += small_cell;
+    }
+    return true;
+}
+
 std::vector<std::string> TextRenderer::wrapUtf8Line(const std::string &line, int max_width)
 {
     std::vector<text_layout::Line> layout = layoutUtf8Paragraph(line, max_width);
@@ -1956,6 +2091,59 @@ void TextRenderer::drawGlyph(lgfx::LGFXBase &gfx, const Glyph &glyph,
                            lgfx::color_depth_t::grayscale_4bit,
                            0x000000,
                            0xFFFFFF);
+}
+
+void TextRenderer::drawGlyphScaled(lgfx::LGFXBase &gfx, const Glyph &glyph,
+                                   int x, int baseline_y, int scale_percent, uint16_t color)
+{
+    if (glyph.data_size == 0 || glyph.width <= 0 || glyph.height <= 0 ||
+        glyph.data_offset + glyph.data_size > _glyph_pool_used) return;
+    const int dst_w = std::max(1, (glyph.width * scale_percent + 50) / 100);
+    const int dst_h = std::max(1, (glyph.height * scale_percent + 50) / 100);
+    const int gx = x + (glyph.bitmap_left * scale_percent + 50) / 100;
+    const int gy = baseline_y - (glyph.bitmap_top * scale_percent + 50) / 100;
+    const uint8_t *bitmap = _glyph_pool + glyph.data_offset;
+    for (int row = 0; row < dst_h; ++row) {
+        const int sy0 = row * glyph.height / dst_h;
+        const int sy1 = std::max(sy0 + 1, (row + 1) * glyph.height / dst_h);
+        int run_start = -1;
+        uint8_t run_level = 0;
+        auto flush = [&](int end) {
+            if (run_start < 0) return;
+            const uint8_t gray = color == TFT_WHITE ? run_level * 17
+                : static_cast<uint8_t>(255 - run_level * 17);
+            const uint16_t draw_color = (color == TFT_BLACK || color == TFT_WHITE)
+                ? gray565(gray) : color;
+            gfx.writeFastHLine(gx + run_start, gy + row, end - run_start, draw_color);
+            run_start = -1;
+        };
+        for (int col = 0; col < dst_w; ++col) {
+            const int sx0 = col * glyph.width / dst_w;
+            const int sx1 = std::max(sx0 + 1, (col + 1) * glyph.width / dst_w);
+            int sum = 0;
+            int samples = 0;
+            for (int sy = sy0; sy < sy1; ++sy) {
+                const uint8_t *src = bitmap + sy * glyph.pitch;
+                for (int sx = sx0; sx < sx1; ++sx) {
+                    const uint8_t packed = src[sx >> 1];
+                    sum += (sx & 1) ? packed & 0x0f : packed >> 4;
+                    ++samples;
+                }
+            }
+            const uint8_t level = static_cast<uint8_t>((sum + samples / 2) / samples);
+            if (level == 0) {
+                flush(col);
+            } else if (run_start < 0) {
+                run_start = col;
+                run_level = level;
+            } else if (level != run_level) {
+                flush(col);
+                run_start = col;
+                run_level = level;
+            }
+        }
+        flush(dst_w);
+    }
 }
 
 void TextRenderer::drawGlyphRuns(lgfx::LGFXBase &gfx, const Glyph &glyph, int x, int baseline_y, uint16_t color)

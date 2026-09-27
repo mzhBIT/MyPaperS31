@@ -4,6 +4,7 @@
 #include "activities/ActivityManager.h"
 #include "activities/WifiTransferActivity.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include "usb/usb_transfer_boot.h"
 
 #include <M5Unified.h>
@@ -125,28 +126,30 @@ private:
         M5.Display.setDither(false);
         M5.Display.setEpdMode(epd_mode_t::epd_text);
         M5.Display.fillScreen(TFT_WHITE);
-        system_font::draw_center(M5.Display, _confirm_usb ? "Enter USB Transfer" : "Transfer",
+        system_font::draw_center(M5.Display, ui_locale::text(_confirm_usb ? ui_locale::TextId::EnterUsbTransfer
+                                                                          : ui_locale::TextId::Transfer),
                                  w / 2, 18, TFT_BLACK);
         M5.Display.drawFastHLine(0, HEADER_H - 1, w, TFT_BLACK);
 
         if (!_confirm_usb) {
-            draw_row(FIRST_ROW_Y, "USB Transfer", "Connect as an SD card", _focus == 0);
-            draw_row(FIRST_ROW_Y + ROW_H + ROW_GAP, "Wi-Fi Transfer",
-                     "Upload and manage in a browser", _focus == 1);
+            draw_row(FIRST_ROW_Y, ui_locale::text(ui_locale::TextId::UsbTransfer),
+                     ui_locale::text(ui_locale::TextId::ConnectAsSdCard), _focus == 0);
+            draw_row(FIRST_ROW_Y + ROW_H + ROW_GAP, ui_locale::text(ui_locale::TextId::WifiTransfer),
+                     ui_locale::text(ui_locale::TextId::UploadManageBrowser), _focus == 1);
         } else {
-            system_font::draw_center(M5.Display, "The device cannot read the SD card", w / 2,
+            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::UsbTransferSdUnavailable), w / 2,
                                      220, TFT_BLACK);
-            system_font::draw_center(M5.Display, "while it is connected to the computer.", w / 2,
+            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::UsbTransferWhileConnected), w / 2,
                                      220 + line_h + 8, TFT_BLACK);
-            system_font::draw_center(M5.Display, "USB headphones will be disconnected.", w / 2,
+            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::UsbHeadphonesDisconnected), w / 2,
                                      360, TFT_BLACK);
             const int button_y = h - 130;
             M5.Display.drawRect(PAD, button_y, (w - PAD * 3) / 2, 90, TFT_BLACK);
             M5.Display.drawRect(PAD * 2 + (w - PAD * 3) / 2, button_y,
                                 (w - PAD * 3) / 2, 90, TFT_BLACK);
-            system_font::draw_center(M5.Display, "Cancel", PAD + (w - PAD * 3) / 4,
+            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Cancel), PAD + (w - PAD * 3) / 4,
                                      button_y + 24, TFT_BLACK);
-            system_font::draw_center(M5.Display, "Restart & Enter",
+            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::RestartAndEnter),
                                      PAD * 2 + (w - PAD * 3) / 2 +
                                          (w - PAD * 3) / 4,
                                      button_y + 24, TFT_BLACK);

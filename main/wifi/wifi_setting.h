@@ -26,6 +26,11 @@ typedef enum {
     WIFI_SETTING_NETWORK_CELLULAR = 1,
 } wifi_setting_network_mode_t;
 
+typedef enum {
+    WIFI_SETTING_POWER_ON_DEMAND = 0,
+    WIFI_SETTING_POWER_ALWAYS_ON = 1,
+} wifi_setting_power_mode_t;
+
 esp_err_t wifi_setting_c6_power_on(void);
 esp_err_t wifi_setting_c6_power_off(void);
 // Initializes the process-wide esp-netif/default event-loop services.  USB
@@ -35,6 +40,13 @@ esp_err_t wifi_setting_network_stack_init(void);
 // Loads the persisted Wi-Fi/4G preference into internal RAM. Call once from
 // the boot task before any worker with a PSRAM-backed stack can query it.
 esp_err_t wifi_setting_load_network_mode(void);
+wifi_setting_power_mode_t wifi_setting_get_power_mode(void);
+esp_err_t wifi_setting_set_power_mode(wifi_setting_power_mode_t mode);
+// Starts the saved Wi-Fi connection in a background task when Always On is
+// selected. Safe to call at boot and after a temporary AP-mode transfer.
+esp_err_t wifi_setting_start_always_on(void);
+// Releases an app's network use. In Always On mode the Wi-Fi connection stays.
+esp_err_t wifi_setting_release(void);
 esp_err_t wifi_setting_init(void);
 esp_err_t wifi_setting_scan(wifi_setting_ap_t *records,
                             size_t capacity,

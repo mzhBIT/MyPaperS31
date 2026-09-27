@@ -18,6 +18,7 @@
 #include "renderer/TurboJpegDecoder.h"
 #include "ui/home_icons_1bpp.h"
 #include "ui/home_preferences.h"
+#include "ui/UiLocale.h"
 #include "ui/SystemFont.h"
 #include <M5Unified.h>
 #include <algorithm>
@@ -49,7 +50,7 @@ static const int HOME_PAGE_CNT = 2;
 static const int HOME_DESIGN_W = 684;
 static const int HOME_DESIGN_H = 1216;
 
-struct MenuItem { const char *label; void (*action)(); };
+struct MenuItem { ui_locale::TextId text_id; void (*action)(); };
 static void go_browse()  { launch_file_browser("/sdcard"); }
 static void go_bookshelf();
 static void go_radio()   { launch_radio(); }
@@ -68,24 +69,28 @@ static void go_phone()   { launch_phone(); }
 
 static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
     {
-        {"Clock",    go_clock},
-        {"Transfer", go_transfer},
-        {"Images",   go_images},
-        {"Files",    go_browse},
-        {"Book",     go_bookshelf},
-        {"News",     go_rss},
-        {"Music",    go_music},
-        {"Radio",    go_radio},
-        {"Setting",  go_settings},
-        {"Map",      go_map},
-        {"DeepSeek", go_deepseek},
-        {"WeRead",   go_weread},
+        {ui_locale::TextId::Clock, go_clock},
+        {ui_locale::TextId::Transfer, go_transfer},
+        {ui_locale::TextId::Images, go_images},
+        {ui_locale::TextId::Files, go_browse},
+        {ui_locale::TextId::Book, go_bookshelf},
+        {ui_locale::TextId::News, go_rss},
+        {ui_locale::TextId::Music, go_music},
+        {ui_locale::TextId::Radio, go_radio},
+        {ui_locale::TextId::Settings, go_settings},
+        {ui_locale::TextId::Map, go_map},
+        {ui_locale::TextId::DeepSeek, go_deepseek},
+        {ui_locale::TextId::WeRead, go_weread},
     },
     {
-        {"ZhiHu", go_zhihu}, {"Messages", go_sms}, {"Phone", go_phone},
-        {nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
-        {nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
-        {nullptr, nullptr}, {nullptr, nullptr}, {nullptr, nullptr},
+        {ui_locale::TextId::Zhihu, go_zhihu},
+        {ui_locale::TextId::Messages, go_sms},
+        {ui_locale::TextId::Phone, go_phone},
+        {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
+        {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
+        {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
+        {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
+        {ui_locale::TextId::Count, nullptr},
     },
 };
 static int g_page = 0;
@@ -430,7 +435,7 @@ private:
     {
         int w = M5.Display.width();
         M5.Display.fillRect(0, 0, w, RECENT_HEADER_H, TFT_WHITE);
-        system_font::draw_center(M5.Display, "Bookshelf", w / 2, 12, TFT_BLACK);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Bookshelf), w / 2, 12, TFT_BLACK);
         if (!m_books.empty()) {
             char count[24];
             std::snprintf(count, sizeof(count), "%d / %d", current_page() + 1, page_count());
@@ -536,9 +541,9 @@ private:
 
         if (m_books.empty()) {
             int cy = M5.Display.height() / 2;
-            system_font::draw_center(M5.Display, "Bookshelf is empty", M5.Display.width() / 2,
+            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::BookshelfEmpty), M5.Display.width() / 2,
                                      cy - system_font::line_height(), TFT_BLACK);
-            system_font::draw_center(M5.Display, "Open a TXT, EPUB, MOBI or Markdown file from Files",
+            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::BookshelfEmptyHint),
                                      M5.Display.width() / 2, cy + 12, TFT_BLACK);
         } else {
             int first = current_page() * RECENT_PAGE_SIZE;
@@ -563,7 +568,7 @@ static void draw_header() {
     M5.Display.fillRect(0, 0, w, HEADER_H, TFT_WHITE);
     M5.Display.drawLine(0, HEADER_H - 2, w, HEADER_H - 2, TFT_BLACK);
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-    system_font::draw_center(M5.Display, "E-Book Reader", w / 2, 18);
+    system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::HomeTitle), w / 2, 18);
 
     // Time from RTC
     auto dt = M5.Rtc.getDateTime();
@@ -577,8 +582,8 @@ static void draw_header() {
     int w = M5.Display.width() - SIDE_PAD * 2;
     RecentBook recent;
     bool has_recent = recent_book_load(&recent);
-    std::string title = has_recent ? ellipsize_bytes(recent.title, 38) : "No Recent Book";
-    std::string subtitle = has_recent ? ellipsize_bytes(recent_book_base_name(recent.path.c_str()), 52) : "Browse files to start reading";
+    std::string title = has_recent ? ellipsize_bytes(recent.title, 38) : ui_locale::text(ui_locale::TextId::NoRecentBook);
+    std::string subtitle = has_recent ? ellipsize_bytes(recent_book_base_name(recent.path.c_str()), 52) : ui_locale::text(ui_locale::TextId::BrowseToStartReading);
 
     // Cover card background (dark)
     M5.Display.fillRoundRect(SIDE_PAD, y, w, COVER_H, 10, TFT_BLACK);
@@ -598,10 +603,10 @@ static void draw_header() {
         int text_x = SIDE_PAD + 190;
         int text_w = w - 210;
         system_font::draw_center(M5.Display, system_font::ellipsize(subtitle, text_w), text_x + text_w / 2, y + 132, TFT_WHITE);
-        system_font::draw_center(M5.Display, "Tap to continue >", text_x + text_w / 2, y + COVER_H - 54, TFT_WHITE);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::TapToContinue), text_x + text_w / 2, y + COVER_H - 54, TFT_WHITE);
     } else {
         system_font::draw_center(M5.Display, system_font::ellipsize(subtitle, w - 40), M5.Display.width() / 2, y + 132, TFT_WHITE);
-        system_font::draw_center(M5.Display, has_recent ? "Tap to continue >" : "No reading history", M5.Display.width() / 2, y + COVER_H - 54, TFT_WHITE);
+        system_font::draw_center(M5.Display, has_recent ? ui_locale::text(ui_locale::TextId::TapToContinue) : ui_locale::text(ui_locale::TextId::NoReadingHistory), M5.Display.width() / 2, y + COVER_H - 54, TFT_WHITE);
     }
 }
 
@@ -675,7 +680,7 @@ static void draw_tile_icon(HomeIconId icon, int x, int y, int size,
 static void draw_menu_tile(int index, bool show_frame) {
     if (index < 0 || index >= MENU_CNT) return;
     HomeTile tile = tile_at(index);
-    if (!tile.item->label) return;
+    if (!tile.item->action) return;
     bool focused = index == g_focus[g_page];
     uint16_t bg = focused ? TFT_BLACK : TFT_WHITE;
     uint16_t fg = focused ? TFT_WHITE : TFT_BLACK;
@@ -687,7 +692,7 @@ static void draw_menu_tile(int index, bool show_frame) {
     draw_tile_icon(tile.icon, tile.x, tile.y, tile.size, fg, bg, show_frame);
     M5.Display.fillRect(tile.x - 8, label_y - 2,
                         tile.size + 16, label_h, bg);
-    draw_label_center(tile.item->label, tile.x + tile.size / 2,
+    draw_label_center(ui_locale::text(tile.item->text_id), tile.x + tile.size / 2,
                       label_y, tile.size + 28, fg, bg);
 }
 
@@ -723,7 +728,7 @@ static void draw_home_page() {
 static int hit_menu(int tx, int ty) {
     for (int i = 0; i < MENU_CNT; i++) {
         HomeTile tile = tile_at(i);
-        if (!tile.item->label) continue;
+        if (!tile.item->action) continue;
         int label_bottom = tile.y + tile.size + sy(20) + system_font::line_height() + 8;
         if (tx >= tile.x - 8 && tx <= tile.x + tile.size + 8 &&
             ty >= tile.y - 8 && ty <= label_bottom) return i;
@@ -798,7 +803,7 @@ public:
         }
         if (idx >= 0) {
             const MenuItem &item = g_menu[g_page][idx];
-            ESP_LOGI(TAG, "page %d menu %d: %s", g_page, idx, item.label);
+            ESP_LOGI(TAG, "page %d menu %d: %s", g_page, idx, ui_locale::text(item.text_id));
             if (item.action) item.action();
             return true;
         }
@@ -827,7 +832,7 @@ public:
         }
         if (key == APP_KEY_OK) {
             const MenuItem &item = g_menu[g_page][focus];
-            ESP_LOGI(TAG, "page %d menu %d: %s", g_page, focus, item.label);
+            ESP_LOGI(TAG, "page %d menu %d: %s", g_page, focus, ui_locale::text(item.text_id));
             if (item.action) item.action();
             return true;
         }
@@ -837,7 +842,7 @@ public:
 private:
     static int menu_count(int page) {
         int count = 0;
-        while (count < MENU_CNT && g_menu[page][count].label) ++count;
+        while (count < MENU_CNT && g_menu[page][count].action) ++count;
         return count;
     }
 

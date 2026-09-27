@@ -3,6 +3,7 @@
 #include "reader_font.h"
 #include "reader_style.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 
 #include <M5Unified.h>
 #include <algorithm>
@@ -106,11 +107,11 @@ class FontPickerActivity : public Activity {
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header("Fonts");
+        draw_header(ui_locale::text(ui_locale::TextId::Fonts));
 
         if (m_fonts.empty()) {
             M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-            system_font::draw_center(M5.Display, "No fonts in /sdcard/fonts", w / 2, y0 + 80);
+            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::NoFontsHint), w / 2, y0 + 80);
         }
 
         for (int i = 0; i < rows; ++i) {

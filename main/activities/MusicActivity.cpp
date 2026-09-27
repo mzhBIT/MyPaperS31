@@ -9,6 +9,7 @@
 #include "renderer/CoverThumbnail.h"
 #include "renderer/P4JpegDecoder.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include "ui/music_icons_1bpp.h"
 
 #include <M5Unified.h>
@@ -191,7 +192,7 @@ public:
 
     void on_create() override
     {
-        draw_message("正在扫描音频文件...");
+        draw_message(ui_locale::text(ui_locale::TextId::ScanningAudioFiles));
         scan_music_dir(MUSIC_ROOT, 0, _tracks);
         std::sort(_tracks.begin(), _tracks.end(), [](const Track &a, const Track &b) {
             int cmp = strcasecmp(a.label.c_str(), b.label.c_str());
@@ -215,7 +216,7 @@ public:
                      _initial_path.c_str());
             _initial_path.clear();
         }
-        if (_tracks.empty()) _status = "SD卡中没有可播放的音频文件";
+        if (_tracks.empty()) _status = ui_locale::text(ui_locale::TextId::NoPlayableAudioOnSd);
         draw_all();
     }
 
@@ -229,7 +230,7 @@ public:
             return;
         } else if (state == AUDIO_PLAYBACK_ERROR && !_terminal_handled) {
             _terminal_handled = true;
-            _status = "播放失败";
+            _status = ui_locale::text(ui_locale::TextId::PlaybackFailed);
             draw_all();
             return;
         }
@@ -506,7 +507,7 @@ private:
         _last_lyric_index = -2;
         _lyrics.clear();
         _cover_thumbnail_path.clear();
-        _status = "正在打开...";
+        _status = ui_locale::text(ui_locale::TextId::OpeningAudio);
 
         audio_playback_state_t previous_state = audio_radio_get_state();
         if (previous_state == AUDIO_PLAYBACK_PLAYING ||
@@ -539,7 +540,8 @@ private:
             _cover_thumbnail_path.clear();
             _terminal_handled = true;
             char message[64] = {};
-            snprintf(message, sizeof(message), "播放失败: %s", esp_err_to_name(ret));
+            snprintf(message, sizeof(message), "%s%s",
+                     ui_locale::text(ui_locale::TextId::PlayFailedPrefix), esp_err_to_name(ret));
             _status = message;
             ESP_LOGE(TAG, "Failed to play %s: %s", _tracks[index].path.c_str(),
                      esp_err_to_name(ret));
@@ -588,7 +590,7 @@ private:
         esp_err_t ret = audio_radio_play_file(_tracks[_current].path.c_str());
         if (ret != ESP_OK) {
             _terminal_handled = true;
-            _status = "单曲循环失败";
+            _status = ui_locale::text(ui_locale::TextId::RepeatOneFailed);
             draw_all();
             return;
         }
@@ -657,7 +659,8 @@ private:
         }
         if (ret != ESP_OK) {
             char message[64] = {};
-            snprintf(message, sizeof(message), "控制失败: %s", esp_err_to_name(ret));
+            snprintf(message, sizeof(message), "%s%s",
+                     ui_locale::text(ui_locale::TextId::ControlFailedPrefix), esp_err_to_name(ret));
             _status = message;
         } else {
             _status.clear();
@@ -676,7 +679,8 @@ private:
             update_volume_toast();
         } else {
             char message[64] = {};
-            snprintf(message, sizeof(message), "音量调节失败: %s", esp_err_to_name(ret));
+            snprintf(message, sizeof(message), "%s%s",
+                     ui_locale::text(ui_locale::TextId::VolumeFailedPrefix), esp_err_to_name(ret));
             _status = message;
             draw_all();
         }
@@ -727,12 +731,13 @@ private:
     {
         if (!_status.empty()) return _status.c_str();
         switch (audio_radio_get_state()) {
-            case AUDIO_PLAYBACK_PLAYING: return "播放中";
-            case AUDIO_PLAYBACK_PAUSED: return "已暂停";
-            case AUDIO_PLAYBACK_FINISHED: return "播放完成";
-            case AUDIO_PLAYBACK_ERROR: return "播放失败";
-            case AUDIO_PLAYBACK_STOPPED: return "已停止";
-            default: return _tracks.empty() ? "没有可播放的歌曲" : "请选择歌曲";
+            case AUDIO_PLAYBACK_PLAYING: return ui_locale::text(ui_locale::TextId::Playing);
+            case AUDIO_PLAYBACK_PAUSED: return ui_locale::text(ui_locale::TextId::Paused);
+            case AUDIO_PLAYBACK_FINISHED: return ui_locale::text(ui_locale::TextId::PlaybackFinished);
+            case AUDIO_PLAYBACK_ERROR: return ui_locale::text(ui_locale::TextId::PlaybackFailed);
+            case AUDIO_PLAYBACK_STOPPED: return ui_locale::text(ui_locale::TextId::Stopped);
+            default: return ui_locale::text(_tracks.empty() ? ui_locale::TextId::NoPlayableSongs
+                                                             : ui_locale::TextId::SelectSong);
         }
     }
 
@@ -835,7 +840,7 @@ private:
             }
         }
         if (!drew_cover) {
-            system_font::draw_center(M5.Display, "暂无封面", x + width / 2,
+            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::NoCover), x + width / 2,
                                      y + std::max(0, (height - system_font::line_height()) / 2),
                                      TFT_BLACK);
         }
@@ -964,7 +969,8 @@ private:
         // waveform to clear remnants from whichever activity was visible.
         M5.Display.setEpdMode(epd_mode_t::epd_quality);
         M5.Display.fillScreen(TFT_WHITE);
-        system_font::draw_left(M5.Display, "Music", design_x(TITLE_X), design_y(TITLE_Y), TFT_BLACK);
+        system_font::draw_left(M5.Display, ui_locale::text(ui_locale::TextId::Music),
+                               design_x(TITLE_X), design_y(TITLE_Y), TFT_BLACK);
         system_font::draw_center(M5.Display, message, M5.Display.width() / 2,
                                  M5.Display.height() / 2 - 20, TFT_BLACK);
         M5.Display.display();
@@ -1012,7 +1018,7 @@ private:
         int rows = visible_rows();
 
         if (_tracks.empty()) {
-            system_font::draw_center(M5.Display, "未找到支持的音频文件",
+            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::NoSupportedAudio),
                                      design_x(COVER_X + COVER_W / 2),
                                      design_y(COVER_Y + COVER_H / 2 - 20), TFT_BLACK);
             draw_view_indicator();
@@ -1150,9 +1156,9 @@ private:
         M5.Display.fillScreen(TFT_WHITE);
 
         std::string title;
-        if (_view == ContentView::List) title = "歌曲列表";
+        if (_view == ContentView::List) title = ui_locale::text(ui_locale::TextId::SongList);
         else if (_current >= 0) title = track_title(_tracks[_current].path);
-        else title = "选择歌曲";
+        else title = ui_locale::text(ui_locale::TextId::SelectSong);
         system_font::draw_left(M5.Display,
                                system_font::ellipsize(title, design_x(455)),
                                design_x(TITLE_X), design_y(TITLE_Y), TFT_BLACK);

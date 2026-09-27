@@ -4,6 +4,7 @@
 #include <string>
 #include <vector>
 #include "ui/script_conversion.h"
+#include "ui/reader_writing_mode.h"
 
 struct TxtPageLine {
     // Byte range inside TxtPage::text. Keeping ranges instead of another copy
@@ -16,6 +17,7 @@ struct TxtPageLine {
 };
 
 struct TxtPage {
+    bool vertical = false;
     std::string text;
     std::vector<TxtPageLine> lines;
     uint32_t start_offset = 0;
@@ -31,6 +33,7 @@ struct TxtBook {
     bool refresh_layout_settings();
     script_conversion::Mode script_mode() const { return _script_mode; }
     void set_script_mode(script_conversion::Mode mode) { _script_mode = mode; _layout_sig = layout_signature(); }
+    void set_writing_mode(reader_writing_mode::Mode mode) { _writing_mode = mode; _layout_sig = layout_signature(); }
 
     TxtPage read_page(uint32_t offset);
     uint32_t previous_page_offset(uint32_t offset);
@@ -49,6 +52,7 @@ private:
     uint32_t _layout_sig = 0;
     int _enc = 0;
     script_conversion::Mode _script_mode = script_conversion::Mode::Original;
+    reader_writing_mode::Mode _writing_mode = reader_writing_mode::Mode::Auto;
 
     static std::string cache_key(const char *path);
     static void ensure_progress_root();

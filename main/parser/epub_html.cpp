@@ -524,7 +524,9 @@ static std::unordered_set<std::string> collect_footnote_reference_targets(
 }
 
 static void flush_content_block(std::string *current, std::vector<EpubContentBlock> *blocks,
-                                int heading_level, std::vector<EpubFootnoteRef> *footnotes)
+                                int heading_level, std::vector<EpubFootnoteRef> *footnotes,
+                                int64_t *source_delta,
+                                std::vector<EpubSourcePoint> *source_points)
 {
     size_t leading = 0;
     while (leading < current->size() && std::isspace(static_cast<unsigned char>((*current)[leading]))) ++leading;
@@ -532,14 +534,29 @@ static void flush_content_block(std::string *current, std::vector<EpubContentBlo
     while (trailing > leading && std::isspace(static_cast<unsigned char>((*current)[trailing - 1]))) --trailing;
     std::string text = current->substr(leading, trailing - leading);
     current->clear();
+    const int64_t delta = source_delta ? *source_delta : 0;
+    if (source_delta) *source_delta = 0;
     if (text.empty()) {
         if (footnotes) footnotes->clear();
+        if (source_points) source_points->clear();
         return;
     }
 
     EpubContentBlock block;
     block.type = EpubContentBlockType::Text;
     block.text = text;
+    block.source_text_bytes = static_cast<size_t>(std::max<int64_t>(0,
+        static_cast<int64_t>(text.size()) + delta));
+    if (source_points && !source_points->empty()) {
+        block.source_points.push_back({0, 0});
+        for (const auto &point : *source_points) {
+            if (point.display <= leading || point.display >= trailing) continue;
+            block.source_points.push_back({point.display - leading,
+                point.source > leading ? point.source - leading : 0});
+        }
+        block.source_points.push_back({text.size(), block.source_text_bytes});
+        source_points->clear();
+    }
     block.heading = heading_level > 0;
     block.heading_level = heading_level;
     block.page_break_before = heading_level > 0 && heading_level <= 2 && !blocks->empty();
@@ -557,7 +574,9 @@ static void flush_content_block(std::string *current, std::vector<EpubContentBlo
     blocks->push_back(block);
 }
 
-bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_href, std::vector<EpubContentBlock> *blocks)
+bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_href,
+                             std::vector<EpubContentBlock> *blocks,
+                             bool inline_sup_annotations)
 {
     if (!blocks) return false;
     blocks->clear();
@@ -567,6 +586,8 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
     const auto footnote_definitions = collect_footnote_definitions(xhtml, item_href);
     const auto footnote_targets = collect_footnote_reference_targets(xhtml, item_href);
     std::vector<EpubFootnoteRef> pending_footnotes;
+    int64_t source_delta = 0;
+    std::vector<EpubSourcePoint> pending_source_points;
     struct ActiveLink {
         bool active = false;
         bool semantic = false;
@@ -622,6 +643,79 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
             continue;
         }
 
+        // Ruby text is an annotation of the base glyph, not another sentence
+        // following it. Keep the base in the normal text stream and attach the
+        // reading to its exact UTF-8 byte range for the existing note popup.
+        if (name == "ruby" && !closing) {
+            const size_t rt_open = xhtml.find("<rt", tag_end + 1);
+            const size_t ruby_close = xhtml.find("</ruby", tag_end + 1);
+            if (rt_open != std::string::npos && ruby_close != std::string::npos && rt_open < ruby_close) {
+                const size_t rt_tag_end = xhtml.find('>', rt_open + 3);
+                const size_t rt_close = rt_tag_end == std::string::npos
+                    ? std::string::npos : xhtml.find("</rt", rt_tag_end + 1);
+                const size_t rt_end = rt_close == std::string::npos
+                    ? std::string::npos : xhtml.find('>', rt_close + 4);
+                const size_t ruby_end = xhtml.find('>', ruby_close + 6);
+                if (rt_end != std::string::npos && rt_end < ruby_close && ruby_end != std::string::npos) {
+                    std::string base_text = plain_text_from_html(xhtml.substr(tag_end + 1, rt_open - tag_end - 1));
+                    base_text += plain_text_from_html(xhtml.substr(rt_end + 1, ruby_close - rt_end - 1));
+                    const std::string reading = plain_text_from_html(
+                        xhtml.substr(rt_tag_end + 1, rt_close - rt_tag_end - 1));
+                    const size_t anchor = current.size();
+                    append_normalized_text(base_text, &current);
+                    source_delta += static_cast<int64_t>(reading.size());
+                    pending_source_points.push_back({current.size(), static_cast<size_t>(
+                        std::max<int64_t>(0, static_cast<int64_t>(current.size()) + source_delta))});
+                    if (!reading.empty() && anchor < current.size()) {
+                        EpubFootnoteRef ref;
+                        ref.byte_start = anchor;
+                        ref.byte_end = current.size();
+                        ref.content = reading;
+                        ref.kind = EpubFootnoteRef::Kind::RubyText;
+                        pending_footnotes.push_back(std::move(ref));
+                    }
+                    pos = ruby_end + 1;
+                    continue;
+                }
+            }
+        }
+
+        // Some KF8 books use <sup> for very long in-line marginalia. Only
+        // apply this book-specific rule when its vertical stylesheet opts in.
+        // A whole paragraph of <sup> is still visible prose, not a marker.
+        if (inline_sup_annotations && name == "sup" && !closing) {
+            const size_t sup_close = xhtml.find("</sup", tag_end + 1);
+            if (sup_close != std::string::npos && sup_close - tag_end <= 16384) {
+                const size_t sup_end = xhtml.find('>', sup_close + 5);
+                if (sup_end != std::string::npos) {
+                    size_t next = sup_end + 1;
+                    while (next < xhtml.size() && std::isspace(static_cast<unsigned char>(xhtml[next]))) ++next;
+                    const bool whole_paragraph = trim_copy(current).empty() &&
+                        (xhtml.compare(next, 3, "</p") == 0 ||
+                         xhtml.compare(next, 5, "</div") == 0);
+                    if (!whole_paragraph) {
+                        const std::string note = plain_text_from_html(
+                            xhtml.substr(tag_end + 1, sup_close - tag_end - 1));
+                        if (!note.empty()) {
+                            EpubFootnoteRef ref;
+                            ref.byte_start = current.size();
+                            append_normalized_text("※", &current);
+                            source_delta += static_cast<int64_t>(note.size()) -
+                                            static_cast<int64_t>(current.size() - ref.byte_start);
+                            pending_source_points.push_back({current.size(), static_cast<size_t>(
+                                std::max<int64_t>(0, static_cast<int64_t>(current.size()) + source_delta))});
+                            ref.byte_end = current.size();
+                            ref.content = note;
+                            ref.kind = EpubFootnoteRef::Kind::InlineSup;
+                            pending_footnotes.push_back(std::move(ref));
+                            pos = sup_end + 1;
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
+
         if (name == "a") {
             if (!closing && parsed_attrs) {
                 const std::string href = attr_value(attrs, "href");
@@ -666,6 +760,7 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
                 ref.byte_start = active_annotation.byte_start;
                 ref.byte_end = current.size();
                 ref.target = item_href + "#wrannotation-" + active_annotation.range;
+                ref.kind = EpubFootnoteRef::Kind::WereadComment;
                 if (ref.byte_start < ref.byte_end) pending_footnotes.push_back(std::move(ref));
                 active_annotation = ActiveAnnotation();
             }
@@ -673,7 +768,8 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
 
         if (!closing) {
             if (name == "pagebreak" || tag_requests_page_break(tag)) {
-                flush_content_block(&current, blocks, heading_level, &pending_footnotes);
+                flush_content_block(&current, blocks, heading_level, &pending_footnotes,
+                                    &source_delta, &pending_source_points);
                 if (!blocks->empty() && blocks->back().type != EpubContentBlockType::PageBreak) {
                     EpubContentBlock page_break;
                     page_break.type = EpubContentBlockType::PageBreak;
@@ -707,7 +803,8 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
                         pos = tag_end + 1;
                         continue;
                     }
-                    flush_content_block(&current, blocks, heading_level, &pending_footnotes);
+                    flush_content_block(&current, blocks, heading_level, &pending_footnotes,
+                                        &source_delta, &pending_source_points);
                     if (!src.empty()) {
                         EpubContentBlock img;
                         img.type = EpubContentBlockType::Image;
@@ -722,18 +819,21 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
             } else if (name == "br") {
                 if (!current.empty() && current.back() != '\n') current.push_back('\n');
             } else if (name == "hr") {
-                flush_content_block(&current, blocks, heading_level, &pending_footnotes);
+                flush_content_block(&current, blocks, heading_level, &pending_footnotes,
+                                    &source_delta, &pending_source_points);
                 EpubContentBlock rule;
                 rule.type = EpubContentBlockType::HorizontalRule;
                 blocks->push_back(rule);
             } else if (is_block_tag(name)) {
-                flush_content_block(&current, blocks, heading_level, &pending_footnotes);
+                flush_content_block(&current, blocks, heading_level, &pending_footnotes,
+                                    &source_delta, &pending_source_points);
                 int level = heading_level_for_tag(name);
                 if (level > 0) heading_level = level;
             }
         } else {
             if (is_block_tag(name)) {
-                flush_content_block(&current, blocks, heading_level, &pending_footnotes);
+                flush_content_block(&current, blocks, heading_level, &pending_footnotes,
+                                    &source_delta, &pending_source_points);
                 if (is_heading_tag(name)) heading_level = 0;
             }
         }
@@ -741,7 +841,8 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
         pos = tag_end + 1;
     }
 
-    flush_content_block(&current, blocks, heading_level, &pending_footnotes);
+    flush_content_block(&current, blocks, heading_level, &pending_footnotes,
+                        &source_delta, &pending_source_points);
 
     // Popup footnotes must not consume normal pagination space. Limit removal
     // to definition text reached by a reference classified above; arbitrary

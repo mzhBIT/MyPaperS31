@@ -26,7 +26,7 @@ constexpr size_t MAX_RESPONSE_BYTES = 256 * 1024;
 
 class WifiShutdownGuard {
 public:
-    ~WifiShutdownGuard() { wifi_setting_deinit(true); }
+    ~WifiShutdownGuard() { wifi_setting_release(); }
 };
 
 std::string json_escape(const std::string &value)

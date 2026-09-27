@@ -4,6 +4,7 @@
 
 #include <string>
 #include "ui/script_conversion.h"
+#include "ui/reader_writing_mode.h"
 
 struct ReaderOverlayChapters {
     void *context = nullptr;
@@ -38,6 +39,7 @@ public:
     void set_weread_mode(bool enabled);
     void set_book_path(const char *path);
     script_conversion::Mode script_mode() const { return m_script_mode; }
+    reader_writing_mode::Mode writing_mode() const { return m_writing_mode; }
     void open(Tab tab);
     void close();
     // Applies the last progress-bar selection, if any. The selection remains
@@ -57,7 +59,7 @@ public:
     void redraw();
 
 private:
-    static constexpr int SETTING_COUNT = 8;
+    static constexpr int SETTING_COUNT = 9;
     static constexpr int BEAUTY_COUNT = 7;
     static constexpr int PROGRESS_AREA_H = 118;
 
@@ -100,6 +102,7 @@ private:
     bool m_settings_dirty = false;
     std::string m_book_path;
     script_conversion::Mode m_script_mode = script_conversion::Mode::Original;
+    reader_writing_mode::Mode m_writing_mode = reader_writing_mode::Mode::Auto;
     bool m_script_load_failed = false;
     Tab m_tab = Tab::Settings;
     int m_setting_focus = 0;

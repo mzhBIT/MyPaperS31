@@ -69,7 +69,8 @@ struct Builder {
                     return value < p.display;
                 });
             if (point != block.source_points.begin()) --point;
-            item.content_position = block.content_position + point->source;
+            item.content_position = block.content_position + point->source +
+                                    line.byte_start - point->display;
             if (!block.source_text.empty()) {
                 const size_t start = point->source;
                 auto finish = std::lower_bound(block.source_points.begin(), block.source_points.end(),
@@ -98,6 +99,7 @@ struct Builder {
             line_ref.byte_end = end - line.byte_start;
             line_ref.target = ref.target;
             line_ref.content = ref.content;
+            line_ref.kind = ref.kind;
             item.footnotes.push_back(std::move(line_ref));
         }
         for (const auto &span : block.styles) {
@@ -265,6 +267,54 @@ void fit_image_box(int source_width, int source_height,
 
 Pages paginate(const std::vector<Block> &blocks, const Options &options)
 {
+    if (options.vertical) {
+        // The existing builder's width is the line-breaking axis and its
+        // height is the page-advance axis. Transpose those axes for columns;
+        // convert image boxes back to physical screen coordinates afterward.
+        struct ImageResolver {
+            ResolveImageFn callback;
+            void *context;
+        } resolver{options.resolve_image, options.image_context};
+        Options rotated = options;
+        std::swap(rotated.content_width, rotated.content_height);
+        rotated.vertical = false;
+        rotated.image_context = &resolver;
+        rotated.resolve_image = [](void *context, const std::string &resource,
+                                    ImageInfo *info) -> bool {
+            auto *r = static_cast<ImageResolver *>(context);
+            if (!r->callback || !r->callback(r->context, resource, info)) return false;
+            std::swap(info->width, info->height);
+            return true;
+        };
+        std::vector<Block> rotated_blocks;
+        rotated_blocks.reserve(blocks.size() + 8);
+        for (auto block : blocks) {
+            if (block.type == BlockType::Image) {
+                // Keep a picture on one physical page rather than squeezing
+                // it into the narrow strip left by preceding columns.
+                std::swap(block.image_width, block.image_height);
+                block.page_break_before = true;
+                rotated_blocks.push_back(std::move(block));
+                Block break_after;
+                break_after.type = BlockType::PageBreak;
+                rotated_blocks.push_back(std::move(break_after));
+            } else {
+                rotated_blocks.push_back(std::move(block));
+            }
+        }
+        Pages result = paginate(rotated_blocks, rotated);
+        for (auto &page : result) {
+            for (auto &item : page) {
+                item.vertical = true;
+                if (item.type == PageItemType::Image) {
+                    std::swap(item.width, item.height);
+                    std::swap(item.source_width, item.source_height);
+                    std::swap(item.declared_width, item.declared_height);
+                }
+            }
+        }
+        return result;
+    }
     std::vector<Block> normalized_blocks = blocks;
     relax_decorative_heading_breaks(&normalized_blocks);
 
