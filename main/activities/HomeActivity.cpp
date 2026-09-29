@@ -20,11 +20,13 @@
 #include "ui/home_preferences.h"
 #include "ui/UiLocale.h"
 #include "ui/SystemFont.h"
+#include "time/time_basis.h"
 #include <M5Unified.h>
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
 #include <cstdio>
+#include <ctime>
 #include <cstring>
 #include <string>
 #include <sys/stat.h>
@@ -562,6 +564,17 @@ static void go_bookshelf() { ActivityManager::instance().push(new RecentBooksAct
 
 // ─── Drawing ───────────────────────────────────────────────────────
 
+static void draw_home_clock() {
+    const int w = M5.Display.width();
+    constexpr int clock_width = 204;
+    M5.Display.fillRect(w - clock_width, 0, clock_width, HEADER_H - 2, TFT_WHITE);
+    char clock[24] = "--:--";
+    if (time_basis_system_clock_valid()) {
+        time_basis_format_clock(std::time(nullptr), clock, sizeof(clock));
+    }
+    system_font::draw_right(M5.Display, clock, w - 10, 18, TFT_BLACK);
+}
+
 static void draw_header() {
     int w = M5.Display.width();
 
@@ -570,11 +583,7 @@ static void draw_header() {
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
     system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::HomeTitle), w / 2, 18);
 
-    // Time from RTC
-    auto dt = M5.Rtc.getDateTime();
-    char tbuf[16];
-    snprintf(tbuf, sizeof(tbuf), "%02d:%02d", dt.time.hours, dt.time.minutes);
-    system_font::draw_right(M5.Display, tbuf, w - 10, 18);
+    draw_home_clock();
 }
 
 [[maybe_unused]] static void draw_cover() {
@@ -740,6 +749,9 @@ static int hit_menu(int tx, int ty) {
 
 class HomeActivity : public Activity {
     bool m_seen_show = false;
+    int64_t m_clock_minute = -1;
+    int m_clock_offset = 0;
+    bool m_clock_24_hour = true;
 
 public:
     void on_create() override {
@@ -752,6 +764,7 @@ public:
         draw_home_page();
         M5.Display.display();
         M5.Display.endWrite();
+        remember_clock();
     }
 
     void on_show() override {
@@ -763,6 +776,27 @@ public:
         M5.Display.startWrite();
         M5.Display.setDither(false);
         M5.Display.setEpdMode(epd_mode_t::epd_text);
+        draw_home_page();
+        M5.Display.display();
+        M5.Display.endWrite();
+        remember_clock();
+    }
+
+    void loop() override {
+        const std::time_t now = std::time(nullptr);
+        const int64_t minute = time_basis_system_clock_valid() ? now / 60 : -1;
+        const int offset = time_basis_get_offset_minutes();
+        const bool hour24 = time_basis_use_24_hour();
+        if (minute == m_clock_minute && offset == m_clock_offset &&
+            hour24 == m_clock_24_hour) return;
+        m_clock_minute = minute;
+        m_clock_offset = offset;
+        m_clock_24_hour = hour24;
+        M5.Display.startWrite();
+        M5.Display.setDither(false);
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
+        // The panel scans the complete gate array even for a small dirty
+        // rectangle. Redraw the full home target to avoid weakening the tiles.
         draw_home_page();
         M5.Display.display();
         M5.Display.endWrite();
@@ -840,6 +874,12 @@ public:
     }
 
 private:
+    void remember_clock() {
+        const std::time_t now = std::time(nullptr);
+        m_clock_minute = time_basis_system_clock_valid() ? now / 60 : -1;
+        m_clock_offset = time_basis_get_offset_minutes();
+        m_clock_24_hour = time_basis_use_24_hour();
+    }
     static int menu_count(int page) {
         int count = 0;
         while (count < MENU_CNT && g_menu[page][count].action) ++count;

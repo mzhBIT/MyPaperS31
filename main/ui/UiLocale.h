@@ -506,6 +506,14 @@ enum class TextId : uint16_t {
     WifiOnDemand,
     WifiAlwaysOnHint,
     WifiOnDemandHint,
+    DateAndTime,
+    SyncTime,
+    HourFormat,
+    SyncingTime,
+    TimeSyncSuccess,
+    TimeSyncFailed,
+    TimeNotSet,
+    AppSettings,
     Count,
 };
 

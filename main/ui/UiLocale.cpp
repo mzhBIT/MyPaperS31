@@ -511,6 +511,14 @@ constexpr Translation kText[] = {
     {"Power saving", "省电模式", "省電模式"},
     {"Connect at startup and keep Wi-Fi on", "开机连接，退出应用后保持 Wi-Fi", "開機連線，離開應用後保持 Wi-Fi"},
     {"Connect when needed; turn off on exit", "按需连接，退出应用后关闭", "按需連線，離開應用後關閉"},
+    {"Date & Time", "日期与时间", "日期與時間"},
+    {"Sync from network", "通过网络校时", "透過網路校時"},
+    {"Hour format", "小时制", "小時制"},
+    {"Synchronizing time...", "正在校时...", "正在校時..."},
+    {"Time synchronized", "校时成功", "校時成功"},
+    {"Time sync failed", "校时失败", "校時失敗"},
+    {"Time not set", "时间未设置", "時間未設定"},
+    {"App settings", "应用配置", "應用設定"},
 };
 static_assert(sizeof(kText) / sizeof(kText[0]) == static_cast<size_t>(TextId::Count));
 

@@ -16,6 +16,10 @@ esp_err_t time_basis_set_offset_minutes(int minutes);
 // ML307A may report UTC clock digits alongside an incorrect +32 zone suffix.
 bool time_basis_modem_clock_is_utc(void);
 esp_err_t time_basis_set_modem_clock_is_utc(bool is_utc);
+bool time_basis_use_24_hour(void);
+esp_err_t time_basis_set_use_24_hour(bool enabled);
+bool time_basis_system_clock_valid(void);
+bool time_basis_format_clock(int64_t utc_seconds, char *display, size_t capacity);
 bool time_basis_parse_modem(const char *raw, int64_t *utc_seconds);
 bool time_basis_parse_modem_clock(const char *raw, int64_t *utc_seconds);
 bool time_basis_parse_beijing_key(int64_t key, int64_t *utc_seconds);

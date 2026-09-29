@@ -23,11 +23,13 @@
 #include <esp_err.h>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <esp_netif_sntp.h>
 #include <sdkconfig.h>
 
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <string>
 #include <vector>
 
@@ -38,8 +40,8 @@ constexpr int PAD = 20;
 constexpr int SETTINGS_ROW_Y = 94;
 constexpr int SETTINGS_ROW_H = 110;
 constexpr int SETTINGS_ROW_GAP = 0;
-constexpr int SETTINGS_ITEM_COUNT = 11;
-constexpr int SETTINGS_VISIBLE_ROWS = 10;
+constexpr int SETTINGS_ITEM_COUNT = 8;
+constexpr int SETTINGS_VISIBLE_ROWS = 8;
 
 constexpr int SCAN_TOP = 94;
 constexpr int SCAN_ROW_H = 92;
@@ -1031,6 +1033,12 @@ public:
         draw(true);
     }
 
+    void on_show() override
+    {
+        if (_shown) draw(false);
+        _shown = true;
+    }
+
     bool on_touch(const TouchEvent &event) override
     {
         if (event.type == TouchEventType::Back || header_back_hit(event)) {
@@ -1038,7 +1046,7 @@ public:
             return true;
         }
         if (event.type != TouchEventType::Tap) return false;
-        for (int i = 0; i < 4; ++i) {
+        for (int i = 0; i < 5; ++i) {
             const int top = row_top(i);
             if (event.y >= top && event.y < top + 126) {
                 _focus = i;
@@ -1056,7 +1064,7 @@ public:
             return true;
         }
         if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
-            _focus = (_focus + (key == APP_KEY_DOWN ? 1 : 3)) % 4;
+            _focus = (_focus + (key == APP_KEY_DOWN ? 1 : 4)) % 5;
             draw(false);
             return true;
         }
@@ -1071,12 +1079,18 @@ private:
     wifi_setting_network_mode_t _network_mode = WIFI_SETTING_NETWORK_WIFI;
     wifi_setting_power_mode_t _power_mode = WIFI_SETTING_POWER_ON_DEMAND;
     int _focus = 0;
+    bool _shown = false;
 
     static int row_top(int index) { return index < 2 ? 210 + index * 156
-                                                      : 610 + (index - 2) * 156; }
+                                      : index < 4 ? 610 + (index - 2) * 156
+                                                  : 960; }
 
     void select_focused()
     {
+        if (_focus == 4) {
+            ActivityManager::instance().push(new WifiSettingsActivity());
+            return;
+        }
         esp_err_t ret = ESP_OK;
         if (_focus < 2) {
             const wifi_setting_network_mode_t mode = _focus == 0
@@ -1131,6 +1145,24 @@ private:
         draw_option(3, ui_locale::text(ui_locale::TextId::WifiOnDemand),
                     ui_locale::text(ui_locale::TextId::WifiOnDemandHint),
                     _power_mode == WIFI_SETTING_POWER_ON_DEMAND);
+        char ssid[WIFI_SETTING_SSID_MAX_LEN + 1] = {};
+        char password[WIFI_SETTING_PASSWORD_MAX_LEN + 1] = {};
+        const bool configured = wifi_setting_load_credentials(ssid, sizeof(ssid),
+                                                               password, sizeof(password));
+        const int top = row_top(4);
+        M5.Display.drawFastHLine(PAD, top, M5.Display.width() - PAD * 2, TFT_BLACK);
+        M5.Display.drawFastHLine(PAD, top + 125, M5.Display.width() - PAD * 2, TFT_BLACK);
+        if (_focus == 4) M5.Display.fillRect(PAD + 2, top + 20, 5, 88, TFT_BLACK);
+        system_font::draw_left(M5.Display, ui_locale::text(ui_locale::TextId::Wifi),
+                               PAD + 18, top + 20, TFT_BLACK);
+        const std::string detail = configured
+            ? std::string(ui_locale::text(ui_locale::TextId::DefaultNetwork)) + ssid
+            : ui_locale::text(ui_locale::TextId::NotConfigured);
+        system_font::draw_left(M5.Display,
+                               system_font::ellipsize(detail, M5.Display.width() - PAD * 2 - 80),
+                               PAD + 18, top + 68, TFT_DARKGRAY);
+        system_font::draw_right(M5.Display, ">", M5.Display.width() - PAD - 18,
+                                top + 20, TFT_BLACK);
         M5.Display.display();
         M5.Display.endWrite();
     }
@@ -1355,6 +1387,132 @@ private:
     }
 };
 
+class DateTimeSettingsActivity final : public Activity {
+public:
+    void on_create() override { draw(true); }
+    void on_show() override
+    {
+        if (_shown) draw(false);
+        _shown = true;
+    }
+    bool on_touch(const TouchEvent &event) override
+    {
+        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+            ActivityManager::instance().pop();
+            return true;
+        }
+        if (event.type != TouchEventType::Tap || event.y < ROW_Y ||
+            event.y >= ROW_Y + ROW_H * 3) return false;
+        _focus = (event.y - ROW_Y) / ROW_H;
+        activate();
+        return true;
+    }
+    bool on_key(int key) override
+    {
+        if (key == APP_KEY_BACK) {
+            ActivityManager::instance().pop();
+            return true;
+        }
+        if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
+            _focus = (_focus + (key == APP_KEY_DOWN ? 1 : 2)) % 3;
+            draw(false);
+            return true;
+        }
+        if (key == APP_KEY_OK) {
+            activate();
+            return true;
+        }
+        return false;
+    }
+private:
+    static constexpr int ROW_Y = 160;
+    static constexpr int ROW_H = 210;
+    int _focus = 0;
+    bool _shown = false;
+    std::string _status;
+
+    void activate()
+    {
+        if (_focus == 0) sync_network_time();
+        else if (_focus == 1) {
+            esp_err_t ret = time_basis_set_use_24_hour(!time_basis_use_24_hour());
+            _status = ret == ESP_OK ? "" : esp_err_to_name(ret);
+            draw(false);
+        } else {
+            ActivityManager::instance().push(new TimeBasisSettingsActivity());
+        }
+    }
+
+    void sync_network_time()
+    {
+        using ui_locale::TextId;
+        _status = ui_locale::text(TextId::SyncingTime);
+        draw(false);
+        const bool was_connected = wifi_setting_is_connected();
+        esp_err_t ret = was_connected ? ESP_OK : wifi_setting_connect_saved(15000);
+        if (ret == ESP_OK) {
+            esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("ntp.aliyun.com");
+            ret = esp_netif_sntp_init(&config);
+            if (ret == ESP_OK) {
+                ret = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(10000));
+                esp_netif_sntp_deinit();
+            }
+            if (ret == ESP_OK && !time_basis_system_clock_valid()) ret = ESP_ERR_INVALID_RESPONSE;
+        }
+        if (!was_connected && wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_WIFI) {
+            wifi_setting_release();
+        }
+        _status = ret == ESP_OK ? ui_locale::text(TextId::TimeSyncSuccess)
+                                : std::string(ui_locale::text(TextId::TimeSyncFailed)) +
+                                      ": " + esp_err_to_name(ret);
+        ESP_LOGI(TAG, "network time sync: %s unix=%lld", esp_err_to_name(ret),
+                 static_cast<long long>(std::time(nullptr)));
+        draw(false);
+    }
+
+    void draw(bool quality)
+    {
+        using ui_locale::TextId;
+        const int width = M5.Display.width();
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
+        M5.Display.fillScreen(TFT_WHITE);
+        draw_header(ui_locale::text(TextId::DateAndTime));
+        char clock[24] = {};
+        char datetime[32] = {};
+        const std::time_t now = std::time(nullptr);
+        if (time_basis_system_clock_valid()) {
+            time_basis_format_clock(now, clock, sizeof(clock));
+            time_basis_format_utc(now, datetime, sizeof(datetime), nullptr);
+        }
+        const char *titles[] = {ui_locale::text(TextId::SyncTime),
+                                ui_locale::text(TextId::HourFormat),
+                                ui_locale::text(TextId::TimeBasis)};
+        const std::string current_time = time_basis_system_clock_valid()
+            ? std::string(datetime, 10) + " " + clock
+            : ui_locale::text(TextId::TimeNotSet);
+        const std::string details[] = {
+            current_time,
+            time_basis_use_24_hour() ? "24 h" : "12 h",
+            time_basis_label(),
+        };
+        for (int i = 0; i < 3; ++i) {
+            const int top = ROW_Y + i * ROW_H;
+            if (i == 0) M5.Display.drawFastHLine(PAD, top, width - 2 * PAD, TFT_BLACK);
+            M5.Display.drawFastHLine(PAD, top + ROW_H - 1, width - 2 * PAD, TFT_BLACK);
+            if (i == _focus) M5.Display.fillRect(PAD + 2, top + 22, 5, ROW_H - 44, TFT_BLACK);
+            system_font::draw_left(M5.Display, titles[i], PAD + 20, top + 30, TFT_BLACK);
+            system_font::draw_left(M5.Display, details[i], PAD + 20, top + 95, TFT_DARKGRAY);
+            if (i == 2) system_font::draw_right(M5.Display, ">", width - PAD - 20,
+                                                 top + 58, TFT_BLACK);
+        }
+        if (!_status.empty()) system_font::draw_center(M5.Display, _status,
+                                                        width / 2, 860, TFT_BLACK);
+        M5.Display.display();
+        M5.Display.endWrite();
+    }
+};
+
 class LanguageSettingsActivity final : public Activity {
 public:
     void on_create() override { draw(); }
@@ -1425,6 +1583,98 @@ private:
                 system_font::draw_right(M5.Display, "*", M5.Display.width() - PAD - 20,
                                         y + 48, TFT_BLACK);
             }
+        }
+        M5.Display.display();
+        M5.Display.endWrite();
+    }
+};
+
+class AppSettingsActivity final : public Activity {
+public:
+    void on_create() override { draw(true); }
+    void on_show() override
+    {
+        if (_shown) draw(false);
+        _shown = true;
+    }
+    bool on_touch(const TouchEvent &event) override
+    {
+        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+            ActivityManager::instance().pop();
+            return true;
+        }
+        if (event.type != TouchEventType::Tap || event.y < ROW_Y ||
+            event.y >= ROW_Y + ROW_H * 3) return false;
+        _focus = (event.y - ROW_Y) / ROW_H;
+        open_focused();
+        return true;
+    }
+    bool on_key(int key) override
+    {
+        if (key == APP_KEY_BACK) {
+            ActivityManager::instance().pop();
+            return true;
+        }
+        if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
+            _focus = (_focus + (key == APP_KEY_DOWN ? 1 : 2)) % 3;
+            draw(false);
+            return true;
+        }
+        if (key == APP_KEY_OK) {
+            open_focused();
+            return true;
+        }
+        return false;
+    }
+private:
+    static constexpr int ROW_Y = 160;
+    static constexpr int ROW_H = 210;
+    int _focus = 0;
+    bool _shown = false;
+
+    void open_focused()
+    {
+        if (_focus == 0) ActivityManager::instance().push(new DeepSeekSettingsActivity());
+        else if (_focus == 1) ActivityManager::instance().push(new ZhihuSettingsActivity());
+        else ActivityManager::instance().push(new MapSettingsActivity());
+    }
+
+    void draw(bool quality)
+    {
+        using ui_locale::TextId;
+        using ui_locale::text;
+        const int width = M5.Display.width();
+        DeepSeekConfig deepseek;
+        const bool deepseek_configured = deepseek_config_load(&deepseek);
+        ZhihuConfig zhihu;
+        const bool zhihu_configured = zhihu_config_load(&zhihu);
+        AmapConfig amap;
+        const bool map_configured = amap_config_load(&amap);
+        const char *titles[] = {text(TextId::DeepSeek), text(TextId::Zhihu), text(TextId::Map)};
+        const std::string details[] = {
+            deepseek_configured
+                ? std::string(text(TextId::ApiKeyConfigured)) + ", " +
+                      deepseek_model_label(deepseek.default_model)
+                : text(TextId::ApiKeyNotConfigured),
+            text(zhihu_configured ? TextId::AccessSecretConfigured
+                                  : TextId::AccessSecretNotConfigured),
+            text(map_configured ? TextId::ApiKeyConfigured : TextId::ApiKeyNotConfigured),
+        };
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
+        M5.Display.fillScreen(TFT_WHITE);
+        draw_header(text(TextId::AppSettings));
+        for (int i = 0; i < 3; ++i) {
+            const int top = ROW_Y + i * ROW_H;
+            if (i == 0) M5.Display.drawFastHLine(PAD, top, width - 2 * PAD, TFT_BLACK);
+            M5.Display.drawFastHLine(PAD, top + ROW_H - 1, width - 2 * PAD, TFT_BLACK);
+            if (i == _focus) M5.Display.fillRect(PAD + 2, top + 22, 5, ROW_H - 44, TFT_BLACK);
+            system_font::draw_left(M5.Display, titles[i], PAD + 20, top + 30, TFT_BLACK);
+            system_font::draw_left(M5.Display,
+                                   system_font::ellipsize(details[i], width - 2 * PAD - 80),
+                                   PAD + 20, top + 95, TFT_DARKGRAY);
+            system_font::draw_right(M5.Display, ">", width - PAD - 20,
+                                    top + 58, TFT_BLACK);
         }
         M5.Display.display();
         M5.Display.endWrite();
@@ -1527,14 +1777,11 @@ private:
     {
         if (_focus == 0) ActivityManager::instance().push(new LanguageSettingsActivity());
         else if (_focus == 1) ActivityManager::instance().push(new NetworkSettingsActivity());
-        else if (_focus == 2) ActivityManager::instance().push(new WifiSettingsActivity());
-        else if (_focus == 3) ActivityManager::instance().push(new FrontlightSettingsActivity());
-        else if (_focus == 4) ActivityManager::instance().push(new DeepSeekSettingsActivity());
-        else if (_focus == 5) ActivityManager::instance().push(new ZhihuSettingsActivity());
-        else if (_focus == 6) ActivityManager::instance().push(new MapSettingsActivity());
-        else if (_focus == 7) launch_epd_diagnostics();
-        else if (_focus == 8) ActivityManager::instance().push(new RssCacheSettingsActivity());
-        else if (_focus == 9) ActivityManager::instance().push(new TimeBasisSettingsActivity());
+        else if (_focus == 2) ActivityManager::instance().push(new FrontlightSettingsActivity());
+        else if (_focus == 3) ActivityManager::instance().push(new AppSettingsActivity());
+        else if (_focus == 4) launch_epd_diagnostics();
+        else if (_focus == 5) ActivityManager::instance().push(new RssCacheSettingsActivity());
+        else if (_focus == 6) ActivityManager::instance().push(new DateTimeSettingsActivity());
         else {
             const bool enabled = !home_icon_frames_enabled();
             const esp_err_t result = home_set_icon_frames_enabled(enabled);
@@ -1575,18 +1822,12 @@ private:
 
     void draw(bool quality)
     {
-        char ssid[WIFI_SETTING_SSID_MAX_LEN + 1] = {};
-        char password[WIFI_SETTING_PASSWORD_MAX_LEN + 1] = {};
-        bool configured = wifi_setting_load_credentials(ssid, sizeof(ssid),
-                                                        password, sizeof(password));
         M5.Display.startWrite();
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
         using ui_locale::TextId;
         using ui_locale::text;
         draw_header(text(TextId::Settings));
-        std::string detail = configured ? std::string(text(TextId::DefaultNetwork)) + ssid
-                                        : text(TextId::NotConfigured);
         const wifi_setting_network_mode_t network_mode = wifi_setting_get_network_mode();
         draw_item(0, text(TextId::Language), ui_locale::native_name(ui_locale::get()));
         draw_item(1, text(TextId::Network), network_mode == WIFI_SETTING_NETWORK_CELLULAR
@@ -1594,31 +1835,20 @@ private:
                                       : std::string(text(TextId::Wifi)) + " / " +
                                             text(wifi_setting_get_power_mode() == WIFI_SETTING_POWER_ALWAYS_ON
                                                  ? TextId::WifiAlwaysOn : TextId::WifiOnDemand));
-        draw_item(2, text(TextId::Wifi), detail);
-        draw_item(3, text(TextId::Frontlight), std::to_string(frontlight_get_percent()) + "%");
-        DeepSeekConfig deepseek;
-        bool has_api_key = deepseek_config_load(&deepseek);
-        draw_item(4, text(TextId::DeepSeek),
-                  has_api_key ? std::string(text(TextId::ApiKeyConfigured)) + ", " + deepseek_model_label(deepseek.default_model)
-                              : text(TextId::ApiKeyNotConfigured));
-        ZhihuConfig zhihu;
-        draw_item(5, text(TextId::Zhihu),
-                  zhihu_config_load(&zhihu) ? text(TextId::AccessSecretConfigured)
-                                            : text(TextId::AccessSecretNotConfigured));
-        AmapConfig amap;
-        draw_item(6, text(TextId::Map),
-                  amap_config_load(&amap) ? text(TextId::ApiKeyConfigured)
-                                          : text(TextId::ApiKeyNotConfigured));
-        draw_item(7, text(TextId::EpdDiagnostics), text(TextId::EpdDiagnosticsDetail));
+        draw_item(2, text(TextId::Frontlight), std::to_string(frontlight_get_percent()) + "%");
+        draw_item(3, text(TextId::AppSettings),
+                  std::string(text(TextId::DeepSeek)) + " / " + text(TextId::Zhihu) +
+                      " / " + text(TextId::Map));
+        draw_item(4, text(TextId::EpdDiagnostics), text(TextId::EpdDiagnosticsDetail));
         RssCacheInfo rss_cache = rss_cache_info();
         char rss_detail[64] = {};
         std::snprintf(rss_detail, sizeof(rss_detail), "%u %s, %s",
                       static_cast<unsigned>(rss_cache.files),
                       text(TextId::FilesUnit),
                       format_cache_bytes(rss_cache.bytes).c_str());
-        draw_item(8, text(TextId::ClearRssCache), rss_detail);
-        draw_item(9, text(TextId::TimeBasis), time_basis_label());
-        draw_item(10, text(TextId::HomeIconFrames),
+        draw_item(5, text(TextId::ClearRssCache), rss_detail);
+        draw_item(6, text(TextId::DateAndTime), time_basis_label());
+        draw_item(7, text(TextId::HomeIconFrames),
                   home_icon_frames_enabled() ? text(TextId::On) : text(TextId::Off), false);
         M5.Display.display();
         M5.Display.endWrite();

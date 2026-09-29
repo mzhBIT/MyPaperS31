@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 
 #include "nvs.h"
 
@@ -11,9 +12,11 @@ namespace {
 constexpr char NVS_NAMESPACE[] = "time_basis";
 constexpr char NVS_KEY[] = "offset_min";
 constexpr char NVS_CLOCK_KEY[] = "clock_utc";
+constexpr char NVS_HOUR_KEY[] = "hour_24";
 constexpr int DEFAULT_OFFSET = 8 * 60;
 std::atomic<int> s_offset_minutes{100000};
 std::atomic<int> s_clock_is_utc{-1};
+std::atomic<int> s_use_24_hour{-1};
 
 bool leap_year(int year)
 {
@@ -165,6 +168,55 @@ extern "C" esp_err_t time_basis_set_modem_clock_is_utc(bool is_utc)
     nvs_close(handle);
     if (ret == ESP_OK) s_clock_is_utc.store(is_utc ? 1 : 0);
     return ret;
+}
+
+extern "C" bool time_basis_use_24_hour(void)
+{
+    const int cached = s_use_24_hour.load();
+    if (cached >= 0) return cached != 0;
+    uint8_t loaded = 1;
+    nvs_handle_t handle = 0;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
+        nvs_get_u8(handle, NVS_HOUR_KEY, &loaded);
+        nvs_close(handle);
+    }
+    int expected = -1;
+    s_use_24_hour.compare_exchange_strong(expected, loaded != 0 ? 1 : 0);
+    return s_use_24_hour.load() != 0;
+}
+
+extern "C" esp_err_t time_basis_set_use_24_hour(bool enabled)
+{
+    nvs_handle_t handle = 0;
+    esp_err_t ret = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (ret != ESP_OK) return ret;
+    ret = nvs_set_u8(handle, NVS_HOUR_KEY, enabled ? 1 : 0);
+    if (ret == ESP_OK) ret = nvs_commit(handle);
+    nvs_close(handle);
+    if (ret == ESP_OK) s_use_24_hour.store(enabled ? 1 : 0);
+    return ret;
+}
+
+extern "C" bool time_basis_system_clock_valid(void)
+{
+    return std::time(nullptr) >= 1704067200; // 2024-01-01 UTC
+}
+
+extern "C" bool time_basis_format_clock(int64_t utc_seconds, char *display,
+                                           size_t capacity)
+{
+    if (!display || capacity == 0 || utc_seconds < 1704067200) return false;
+    int64_t local = utc_seconds + time_basis_get_offset_minutes() * 60;
+    int64_t seconds_in_day = local % 86400;
+    if (seconds_in_day < 0) seconds_in_day += 86400;
+    const int hour = static_cast<int>(seconds_in_day / 3600);
+    const int minute = static_cast<int>(seconds_in_day / 60 % 60);
+    const int written = time_basis_use_24_hour()
+        ? std::snprintf(display, capacity, "%02d:%02d", hour, minute)
+        : std::snprintf(display, capacity, "%02d:%02d %s",
+                        hour % 12 == 0 ? 12 : hour % 12, minute,
+                        hour < 12 ? "AM" : "PM");
+    return written >= 0 && static_cast<size_t>(written) < capacity;
 }
 
 extern "C" bool time_basis_parse_modem(const char *raw, int64_t *utc_seconds)
