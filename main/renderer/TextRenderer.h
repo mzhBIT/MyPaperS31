@@ -45,9 +45,15 @@ public:
     std::vector<text_layout::Line> layoutUtf8VerticalParagraph(const std::string &text,
                                                                int max_height,
                                                                int first_column_indent = 0);
+    std::vector<text_layout::Line> layoutUtf8VerticalParagraphStyled(
+        const std::string &text, const std::vector<inline_style::Span> &styles,
+        int max_height, int first_column_indent = 0);
     int verticalCellAdvance() const;
     int verticalRubyLaneWidth() const;
     int measureUtf8Vertical(const std::string &text) const;
+    int measureUtf8VerticalStyled(const std::string &text,
+                                  const std::vector<inline_style::Span> &styles,
+                                  size_t byte_end = std::string::npos) const;
     void drawStyledUtf8VerticalColumn(lgfx::LGFXBase &gfx, const std::string &text,
                                       const std::vector<inline_style::Span> &styles,
                                       int x, int y, int column_width, uint16_t color);

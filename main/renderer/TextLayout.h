@@ -7,12 +7,13 @@
 
 namespace text_layout {
 
-static constexpr uint32_t ALGORITHM_VERSION = 6;
+static constexpr uint32_t ALGORITHM_VERSION = 7;
 
 // The layout engine deliberately knows nothing about EPUB/TXT/RSS or the
 // concrete font backend. Format readers provide normalized UTF-8 paragraphs;
 // the renderer provides the codepoint width callback.
 using MeasureCodepointFn = int (*)(void *context, uint32_t codepoint);
+using MeasureCodepointAtFn = int (*)(void *context, uint32_t codepoint, size_t byte_offset);
 using MeasureKerningFn = int (*)(void *context, uint32_t left, uint32_t right);
 
 struct Options {
@@ -44,6 +45,7 @@ std::vector<Line> break_utf8(const std::string &text,
                              const Options &options,
                              MeasureCodepointFn measure,
                              void *measure_context,
-                             MeasureKerningFn measure_kerning = nullptr);
+                             MeasureKerningFn measure_kerning = nullptr,
+                             MeasureCodepointAtFn measure_at = nullptr);
 
 } // namespace text_layout

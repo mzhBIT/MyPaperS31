@@ -10,7 +10,7 @@
 
 namespace document_layout {
 
-static constexpr uint32_t ALGORITHM_VERSION = 8;
+static constexpr uint32_t ALGORITHM_VERSION = 9;
 
 enum class BlockType {
     Paragraph,
@@ -98,6 +98,10 @@ using Pages = std::vector<Page>;
 
 using LayoutParagraphFn = std::vector<text_layout::Line> (*)(
     void *context, const std::string &text, int max_width, int first_line_indent);
+using LayoutStyledParagraphFn = std::vector<text_layout::Line> (*)(
+    void *context, const std::string &text,
+    const std::vector<inline_style::Span> &styles,
+    int max_width, int first_line_indent);
 using ResolveImageFn = bool (*)(
     void *context, const std::string &resource, ImageInfo *info);
 
@@ -122,6 +126,7 @@ struct Options {
     const char *image_fallback_text = "[image]";
 
     LayoutParagraphFn layout_paragraph = nullptr;
+    LayoutStyledParagraphFn layout_styled_paragraph = nullptr;
     void *text_context = nullptr;
     ResolveImageFn resolve_image = nullptr;
     void *image_context = nullptr;

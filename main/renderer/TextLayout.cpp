@@ -537,7 +537,8 @@ std::vector<Line> break_utf8(const std::string &text,
                              const Options &options,
                              MeasureCodepointFn measure,
                              void *measure_context,
-                             MeasureKerningFn measure_kerning)
+                             MeasureKerningFn measure_kerning,
+                             MeasureCodepointAtFn measure_at)
 {
     std::vector<Line> result;
     if (text.empty()) {
@@ -574,7 +575,8 @@ std::vector<Line> break_utf8(const std::string &text,
             token.end = next_utf8(text, pos, &token.codepoint);
             token.width = token.codepoint == SOFT_HYPHEN
                         ? 0
-                        : (measure ? std::max(0, measure(measure_context, token.codepoint)) : 0);
+                        : (measure_at ? std::max(0, measure_at(measure_context, token.codepoint, pos))
+                           : (measure ? std::max(0, measure(measure_context, token.codepoint)) : 0));
             tokens.push_back(token);
             pos = token.end;
         }

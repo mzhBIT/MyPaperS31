@@ -1920,8 +1920,17 @@ private:
             output.allow_first_line_indent = !block.heading &&
                                              block.type == EpubContentBlockType::Text;
             output.paragraph_spacing_after = output.allow_first_line_indent;
+            output.styles = std::move(block.styles);
             output.footnotes.reserve(block.footnotes.size());
             for (auto &ref : block.footnotes) {
+                if (ref.kind == EpubFootnoteRef::Kind::InlineSup) {
+                    inline_style::Span span;
+                    span.byte_start = ref.byte_start;
+                    span.byte_end = ref.byte_end;
+                    span.flags = inline_style::Small;
+                    output.styles.push_back(span);
+                    continue;
+                }
                 document_layout::Block::FootnoteRef output_ref;
                 output_ref.byte_start = ref.byte_start;
                 output_ref.byte_end = ref.byte_end;
@@ -1932,7 +1941,10 @@ private:
                     : script_conversion::convert(ref.content, _script_mode).text;
                 output.footnotes.push_back(std::move(output_ref));
             }
-            output.styles = std::move(block.styles);
+            std::stable_sort(output.styles.begin(), output.styles.end(),
+                             [](const auto &a, const auto &b) {
+                                 return a.byte_start < b.byte_start;
+                             });
             size_t text_bytes = source_text_bytes;
             document_blocks.push_back(std::move(output));
 
@@ -1974,6 +1986,14 @@ private:
             : +[](void *context, const std::string &text, int width, int indent) {
                   return static_cast<TextRenderer *>(context)->layoutUtf8Paragraph(text, width, indent);
               };
+        if (vertical) {
+            options.layout_styled_paragraph =
+                +[](void *context, const std::string &text,
+                    const std::vector<inline_style::Span> &styles, int height, int indent) {
+                    return static_cast<TextRenderer *>(context)->layoutUtf8VerticalParagraphStyled(
+                        text, styles, height, indent);
+                };
+        }
         options.text_context = &renderer;
         options.resolve_image = [](void *context,
                                    const std::string &resource,
@@ -2696,17 +2716,19 @@ private:
                     int top = content_y() + item.x_offset;
                     if (item.centered) {
                         top = content_y() + std::max(0,
-                            (content_height() - renderer.measureUtf8Vertical(item.text)) / 2);
+                            (content_height() - renderer.measureUtf8VerticalStyled(
+                                item.text, item.styles)) / 2);
                     }
                     for (const auto &ref : item.footnotes) {
                         if (is_annotation_ref(ref) &&
                             !weread::store::public_comments_enabled()) continue;
                         if (ref.byte_start >= ref.byte_end || ref.byte_end > item.text.size()) continue;
-                        const int ref_top = top + renderer.measureUtf8Vertical(
-                            item.text.substr(0, ref.byte_start));
+                        const int prefix = renderer.measureUtf8VerticalStyled(
+                            item.text, item.styles, ref.byte_start);
+                        const int ref_top = top + prefix;
                         const int ref_height = std::max(renderer.verticalCellAdvance(),
-                            renderer.measureUtf8Vertical(item.text.substr(
-                                ref.byte_start, ref.byte_end - ref.byte_start)));
+                            renderer.measureUtf8VerticalStyled(item.text, item.styles,
+                                ref.byte_end) - prefix);
                         if (touch_x >= right - column_width - 12 && touch_x <= right + 12 &&
                             touch_y >= ref_top - 12 && touch_y <= ref_top + ref_height + 12) {
                             *result = ref;
@@ -2954,7 +2976,8 @@ private:
                 int y = content_y() + item.x_offset;
                 if (item.centered) {
                     y = content_y() + std::max(0,
-                        (content_height() - renderer.measureUtf8Vertical(item.text)) / 2);
+                        (content_height() - renderer.measureUtf8VerticalStyled(
+                            item.text, item.styles)) / 2);
                 }
                 renderer.drawStyledUtf8VerticalColumn(gfx, item.text, item.styles,
                                                       x, y, base_width, TFT_BLACK);
@@ -2962,10 +2985,12 @@ private:
                     if (is_annotation_ref(ref) &&
                         !weread::store::public_comments_enabled()) continue;
                     if (ref.byte_start >= ref.byte_end || ref.byte_end > item.text.size()) continue;
-                    const int top = y + renderer.measureUtf8Vertical(
-                        item.text.substr(0, ref.byte_start));
-                    const int length = std::max(cell, renderer.measureUtf8Vertical(
-                        item.text.substr(ref.byte_start, ref.byte_end - ref.byte_start)));
+                    const int prefix = renderer.measureUtf8VerticalStyled(
+                        item.text, item.styles, ref.byte_start);
+                    const int top = y + prefix;
+                    const int length = std::max(cell,
+                        renderer.measureUtf8VerticalStyled(item.text, item.styles,
+                            ref.byte_end) - prefix);
                     if (ref.kind == PageItem::FootnoteRef::Kind::RubyText) {
                         const bool drawn = item.vertical_ruby_lane &&
                             renderer.drawUtf8VerticalRuby(gfx, ref.content,

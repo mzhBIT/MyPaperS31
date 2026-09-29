@@ -1948,6 +1948,33 @@ int TextRenderer::measureUtf8Vertical(const std::string &text) const
     return cells * verticalCellAdvance();
 }
 
+int TextRenderer::measureUtf8VerticalStyled(
+    const std::string &text, const std::vector<inline_style::Span> &styles,
+    size_t byte_end) const
+{
+    const int cell = verticalCellAdvance();
+    const int small_cell = std::max(1, (cell * 65 + 50) / 100);
+    int height = 0;
+    const size_t limit = std::min(byte_end, text.size());
+    size_t style_index = 0;
+    for (size_t pos = 0; pos < limit;) {
+        const size_t byte_pos = pos;
+        uint32_t cp = 0;
+        pos = nextUtf8(text, pos, cp);
+        if (cp == '\r' || cp == '\n') continue;
+        while (style_index < styles.size() && styles[style_index].byte_end <= byte_pos)
+            ++style_index;
+        bool small = false;
+        for (size_t si = style_index; si < styles.size(); ++si) {
+            if (styles[si].byte_start > byte_pos) break;
+            if (byte_pos < styles[si].byte_end &&
+                inline_style::has(styles[si].flags, inline_style::Small)) small = true;
+        }
+        height += small ? small_cell : cell;
+    }
+    return height;
+}
+
 std::vector<text_layout::Line> TextRenderer::layoutUtf8VerticalParagraph(
     const std::string &text, int max_height, int first_column_indent)
 {
@@ -1962,6 +1989,39 @@ std::vector<text_layout::Line> TextRenderer::layoutUtf8VerticalParagraph(
         return static_cast<TextRenderer *>(context)->verticalCellAdvance();
     };
     return text_layout::break_utf8(text, options, measure, this);
+}
+
+std::vector<text_layout::Line> TextRenderer::layoutUtf8VerticalParagraphStyled(
+    const std::string &text, const std::vector<inline_style::Span> &styles,
+    int max_height, int first_column_indent)
+{
+    text_layout::Options options;
+    options.max_width = max_height;
+    options.first_line_indent = first_column_indent;
+    options.prefer_word_break = false;
+    options.apply_cjk_kinsoku = true;
+    options.optimize_western_lines = false;
+    options.hyphenate_english = false;
+    struct Context {
+        TextRenderer *renderer;
+        const std::vector<inline_style::Span> *styles;
+    } context{this, &styles};
+    auto measure = [](void *ctx, uint32_t) -> int {
+        return static_cast<Context *>(ctx)->renderer->verticalCellAdvance();
+    };
+    auto measure_at = [](void *ctx, uint32_t, size_t byte_pos) -> int {
+        auto *state = static_cast<Context *>(ctx);
+        const auto &spans = *state->styles;
+        const int cell = state->renderer->verticalCellAdvance();
+        for (const auto &span : spans) {
+            if (span.byte_start > byte_pos) break;
+            if (byte_pos < span.byte_end &&
+                inline_style::has(span.flags, inline_style::Small))
+                return std::max(1, (cell * 65 + 50) / 100);
+        }
+        return cell;
+    };
+    return text_layout::break_utf8(text, options, measure, &context, nullptr, measure_at);
 }
 
 void TextRenderer::drawStyledUtf8VerticalColumn(
@@ -1983,6 +2043,8 @@ void TextRenderer::drawStyledUtf8VerticalColumn(
             if (styles[si].byte_start > byte_pos) break;
             if (byte_pos < styles[si].byte_end) flags |= styles[si].flags;
         }
+        const bool small = inline_style::has(flags, inline_style::Small);
+        const int scale = small ? 65 : 100;
         if (_lv_ready && _lv_font) {
             const std::string glyph_text = codepointToUtf8(cp);
             gfx.setTextSize(1);
@@ -2014,13 +2076,21 @@ void TextRenderer::drawStyledUtf8VerticalColumn(
             const Glyph *glyph = vertical_cp ? getGlyph(vertical_cp) : nullptr;
             if (!glyph) glyph = getGlyph(cp);
             if (glyph) {
-            const int glyph_x = x + std::max(0, (column_width - glyph->advance) / 2);
-            drawGlyphStyled(gfx, *glyph, glyph_x, y + baseline(), color, flags);
+                const int advance = std::max(1, (glyph->advance * scale + 50) / 100);
+                const int glyph_x = x + std::max(0, (column_width - advance) / 2);
+                if (small) {
+                    drawGlyphScaled(gfx, *glyph, glyph_x,
+                                    y + (baseline() * scale + 50) / 100,
+                                    scale, color);
+                } else {
+                    drawGlyphStyled(gfx, *glyph, glyph_x, y + baseline(), color, flags);
+                }
             } else {
-                gfx.drawRect(x, y, std::min(column_width, cell), cell, color);
+                gfx.drawRect(x, y, std::min(column_width, cell),
+                             small ? std::max(1, (cell * 65 + 50) / 100) : cell, color);
             }
         }
-        y += cell;
+        y += small ? std::max(1, (cell * 65 + 50) / 100) : cell;
     }
 }
 

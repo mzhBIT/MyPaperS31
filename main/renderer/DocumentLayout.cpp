@@ -349,8 +349,12 @@ Pages paginate(const std::vector<Block> &blocks, const Options &options)
             int indent = block.allow_first_line_indent
                        ? std::max(0, options.first_line_indent)
                        : 0;
-            std::vector<text_layout::Line> wrapped = options.layout_paragraph(
-                options.text_context, block.text, options.content_width, indent);
+            std::vector<text_layout::Line> wrapped =
+                options.layout_styled_paragraph && !block.styles.empty()
+                    ? options.layout_styled_paragraph(options.text_context, block.text,
+                                                      block.styles, options.content_width, indent)
+                    : options.layout_paragraph(options.text_context, block.text,
+                                               options.content_width, indent);
 
             int protected_lines = std::min<int>(
                 std::max(1, options.orphan_lines), (int)wrapped.size());

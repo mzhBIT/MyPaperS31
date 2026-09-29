@@ -680,38 +680,26 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
             }
         }
 
-        // Some KF8 books use <sup> for very long in-line marginalia. Only
-        // apply this book-specific rule when its vertical stylesheet opts in.
-        // A whole paragraph of <sup> is still visible prose, not a marker.
+        // In this vertical KF8 book, <sup> is visible small inline commentary,
+        // not a link to a separate footnote. Preserve it in reading order and
+        // let the layout/renderer use the book's 65% superscript size.
         if (inline_sup_annotations && name == "sup" && !closing) {
             const size_t sup_close = xhtml.find("</sup", tag_end + 1);
             if (sup_close != std::string::npos && sup_close - tag_end <= 16384) {
                 const size_t sup_end = xhtml.find('>', sup_close + 5);
                 if (sup_end != std::string::npos) {
-                    size_t next = sup_end + 1;
-                    while (next < xhtml.size() && std::isspace(static_cast<unsigned char>(xhtml[next]))) ++next;
-                    const bool whole_paragraph = trim_copy(current).empty() &&
-                        (xhtml.compare(next, 3, "</p") == 0 ||
-                         xhtml.compare(next, 5, "</div") == 0);
-                    if (!whole_paragraph) {
-                        const std::string note = plain_text_from_html(
-                            xhtml.substr(tag_end + 1, sup_close - tag_end - 1));
-                        if (!note.empty()) {
-                            EpubFootnoteRef ref;
-                            ref.byte_start = current.size();
-                            append_normalized_text("※", &current);
-                            source_delta += static_cast<int64_t>(note.size()) -
-                                            static_cast<int64_t>(current.size() - ref.byte_start);
-                            pending_source_points.push_back({current.size(), static_cast<size_t>(
-                                std::max<int64_t>(0, static_cast<int64_t>(current.size()) + source_delta))});
-                            ref.byte_end = current.size();
-                            ref.content = note;
-                            ref.kind = EpubFootnoteRef::Kind::InlineSup;
-                            pending_footnotes.push_back(std::move(ref));
-                            pos = sup_end + 1;
-                            continue;
-                        }
+                    const std::string note = plain_text_from_html(
+                        xhtml.substr(tag_end + 1, sup_close - tag_end - 1));
+                    if (!note.empty()) {
+                        EpubFootnoteRef ref;
+                        ref.byte_start = current.size();
+                        append_normalized_text(note, &current);
+                        ref.byte_end = current.size();
+                        ref.kind = EpubFootnoteRef::Kind::InlineSup;
+                        if (ref.byte_start < ref.byte_end) pending_footnotes.push_back(std::move(ref));
                     }
+                    pos = sup_end + 1;
+                    continue;
                 }
             }
         }

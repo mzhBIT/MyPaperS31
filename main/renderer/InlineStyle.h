@@ -10,6 +10,7 @@ enum Flag : uint8_t {
     Bold = 1u << 0,
     Italic = 1u << 1,
     Code = 1u << 2,
+    Small = 1u << 3,
 };
 
 struct Span {
