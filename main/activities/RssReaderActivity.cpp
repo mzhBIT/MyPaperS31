@@ -8,6 +8,7 @@
 #include "reader_style.h"
 #include "renderer/DocumentLayout.h"
 #include "renderer/TextRenderer.h"
+#include "renderer/TurboJpegDecoder.h"
 #include "storage/app_paths.h"
 #include "ui/SystemFont.h"
 #include "ui/UiLocale.h"
@@ -87,6 +88,37 @@ struct ArticleImage {
     int height = 0;
     bool progressive = false;
 };
+
+static bool draw_article_image_file(lgfx::LGFXBase &gfx, const ArticleImage &image,
+                                    int x, int y, int width, int height, float scale)
+{
+    if (image.ext == ".jpg") {
+        bool ok = false;
+        if (!image.progressive) {
+            ok = gfx.drawJpgFile(image.path.c_str(), x, y, width, height,
+                                 0, 0, scale, scale);
+        }
+        if (!ok) {
+            turbo_jpeg::DrawStats stats;
+            ok = turbo_jpeg::draw_file(gfx, image.path.c_str(), x, y,
+                                       width, height, &stats);
+            ESP_LOGI(TAG,
+                     "RSS JPEG software draw path=%s progressive=%d size=%dx%d time=%lld ms ok=%d",
+                     image.path.c_str(), image.progressive ? 1 : 0,
+                     width, height, (long long)stats.total_ms, ok ? 1 : 0);
+        }
+        return ok;
+    }
+    if (image.ext == ".png") {
+        return gfx.drawPngFile(image.path.c_str(), x, y, width, height,
+                               0, 0, scale, scale);
+    }
+    if (image.ext == ".bmp") {
+        return gfx.drawBmpFile(image.path.c_str(), x, y, width, height,
+                               0, 0, scale, scale);
+    }
+    return false;
+}
 
 static std::vector<RssFeed> g_feeds;
 static std::vector<RssItem> g_items;
@@ -1490,6 +1522,16 @@ private:
                 ok = false;
                 break;
             }
+            // The EPD scan streams its frame from PSRAM through GDMA. Keep
+            // image network/SD transfers out of that short critical window.
+            while (M5.Display.displayBusy()) {
+                if (cancel_requested && *cancel_requested) {
+                    ok = false;
+                    break;
+                }
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            if (!ok) break;
             if (esp_http_client_is_complete_data_received(client)) break;
             int want = 4096;
             if (!chunked && content_length >= 0) {
@@ -2172,7 +2214,9 @@ private:
             // to the same content block.
             image_block.resource = positioned.image->url;
             image_block.content_position = body_position + image_position;
-            image_block.image_height = std::min(320, std::max(120, (int)M5.Display.height() / 3));
+            // Allow tall article images to use most of a portrait page;
+            // the paginator still caps this to the available content height.
+            image_block.image_height = 960;
             image_block.blank_after = 0;
             blocks.push_back(std::move(image_block));
             body_cursor = image_position;
@@ -2247,14 +2291,8 @@ private:
         int x = std::max(0, (screen_w - draw_w) / 2);
         int y = std::max(0, (screen_h - draw_h) / 2);
 
-        bool ok = false;
-        if (image.ext == ".jpg" && !image.progressive) {
-            ok = M5.Display.drawJpgFile(image.path.c_str(), x, y, draw_w, draw_h, 0, 0, scale, scale);
-        } else if (image.ext == ".png") {
-            ok = M5.Display.drawPngFile(image.path.c_str(), x, y, draw_w, draw_h, 0, 0, scale, scale);
-        } else if (image.ext == ".bmp") {
-            ok = M5.Display.drawBmpFile(image.path.c_str(), x, y, draw_w, draw_h, 0, 0, scale, scale);
-        }
+        bool ok = draw_article_image_file(M5.Display, image, x, y,
+                                          draw_w, draw_h, scale);
         ESP_LOGI(TAG, "Bing wallpaper draw src=%dx%d screen=%dx%d draw=%dx%d scale=%.3f ok=%d",
                  image.width, image.height, screen_w, screen_h, draw_w, draw_h,
                  (double)scale, ok ? 1 : 0);
@@ -2262,8 +2300,7 @@ private:
             M5.Display.fillScreen(TFT_WHITE);
             M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
             system_font::draw_center(M5.Display,
-                                     ui_locale::text(image.progressive ? ui_locale::TextId::ProgressiveJpegUnsupported
-                                                                       : ui_locale::TextId::ImageDecodeFailed),
+                                     ui_locale::text(ui_locale::TextId::ImageDecodeFailed),
                                      screen_w / 2,
                                      screen_h / 2 - 18);
         }
@@ -2583,23 +2620,13 @@ private:
                     int draw_h = layout_item.height;
                     float scale = layout_item.scale;
                     int x = rs.margin_left + std::max(0, (content_width - draw_w) / 2);
-                    bool ok = false;
-                    if (image->ext == ".jpg" && !image->progressive) {
-                        ok = M5.Display.drawJpgFile(image->path.c_str(), x, y,
-                                                   draw_w, draw_h, 0, 0, scale, scale);
-                    } else if (image->ext == ".png") {
-                        ok = M5.Display.drawPngFile(image->path.c_str(), x, y,
-                                                   draw_w, draw_h, 0, 0, scale, scale);
-                    } else if (image->ext == ".bmp") {
-                        ok = M5.Display.drawBmpFile(image->path.c_str(), x, y,
-                                                   draw_w, draw_h, 0, 0, scale, scale);
-                    }
+                    bool ok = draw_article_image_file(M5.Display, *image, x, y,
+                                                      draw_w, draw_h, scale);
                     if (!ok) {
                         M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
                         system_font::draw_center(
                             M5.Display,
-                            ui_locale::text(image->progressive ? ui_locale::TextId::ProgressiveJpegUnsupported
-                                                                : ui_locale::TextId::ImageDecodeFailed),
+                            ui_locale::text(ui_locale::TextId::ImageDecodeFailed),
                             M5.Display.width() / 2,
                             y + std::max(0, draw_h / 2 - 18));
                     }

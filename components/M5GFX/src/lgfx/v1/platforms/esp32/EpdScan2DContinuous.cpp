@@ -72,6 +72,7 @@ namespace lgfx
       size_t active_words = 0;
       size_t rows = 0;
       size_t frame_bytes = 0;
+      size_t dma_node_count = 0;
       uint32_t line_period_us = MYPAPER_EPD_2D_LINE_PERIOD_US;
       size_t dma_alignment = 64;
       size_t line_bytes = 0;
@@ -272,6 +273,7 @@ namespace lgfx
           std::max(internal_alignment, external_alignment));
       const size_t node_count = esp_dma_calculate_node_count(
           state->frame_bytes, state->dma_alignment, DMA_NODE_MAX_BYTES);
+      state->dma_node_count = node_count;
       gdma_link_list_config_t links = {};
       links.num_items = node_count;
       links.item_alignment = 8; // AXI GDMA descriptor alignment on ESP32-P4.
@@ -604,6 +606,31 @@ namespace lgfx
         return false;
       }
     }
+    // VSYNC can stop the LCD before the final GDMA descriptor is returned,
+    // particularly when another task is using PSRAM/SD.  Never remount a
+    // descriptor list while the old transfer still owns any of its entries.
+    lcd_ll_stop(state->lcd_hal.dev);
+    if ((err = gdma_stop(state->dma_channel)) != ESP_OK ||
+        (err = gdma_reset(state->dma_channel)) != ESP_OK) {
+      ESP_LOGE(TAG, "frame DMA stop/reset failed: %s", esp_err_to_name(err));
+      return false;
+    }
+    size_t stale_nodes = 0;
+    for (size_t i = 0; i < state->dma_node_count; ++i) {
+      gdma_lli_owner_t owner = GDMA_LLI_OWNER_CPU;
+      if (gdma_link_get_owner(state->dma_links, (int)i, &owner) != ESP_OK) {
+        ESP_LOGE(TAG, "frame DMA owner query failed at node %u", (unsigned)i);
+        return false;
+      }
+      if (owner == GDMA_LLI_OWNER_DMA) {
+        ++stale_nodes;
+        gdma_link_set_owner(state->dma_links, (int)i, GDMA_LLI_OWNER_CPU);
+      }
+    }
+    if (stale_nodes != 0) {
+      ESP_LOGW(TAG, "reclaimed %u stale frame DMA descriptors after stop",
+               (unsigned)stale_nodes);
+    }
     gdma_buffer_mount_config_t mount = {};
     mount.buffer = const_cast<uint8_t*>(data);
     mount.buffer_alignment = state->dma_alignment;
@@ -616,8 +643,6 @@ namespace lgfx
     }
 
     while (xSemaphoreTake(state->frame_done, 0) == pdTRUE) {}
-    gdma_reset(state->dma_channel);
-    lcd_ll_stop(state->lcd_hal.dev);
     lcd_ll_fifo_reset(state->lcd_hal.dev);
     lcd_ll_clear_interrupt_status(state->lcd_hal.dev, UINT32_MAX);
     lcd_ll_enable_auto_next_frame(state->lcd_hal.dev, false);
