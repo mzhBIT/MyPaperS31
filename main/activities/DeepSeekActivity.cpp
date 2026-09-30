@@ -31,11 +31,11 @@ namespace {
 constexpr const char *TAG = "DEEPSEEK_UI";
 constexpr int HEADER_H = 76;
 constexpr int PAD = 20;
-constexpr int SESSION_TOP = 100;
+constexpr int SESSION_TOP = HEADER_H;
 constexpr int SESSION_ROW_H = 104;
-constexpr int CHAT_TOOLBAR_Y = 88;
+constexpr int CHAT_TOOLBAR_Y = HEADER_H;
 constexpr int CHAT_TOOLBAR_H = 66;
-constexpr int CHAT_BODY_Y = 170;
+constexpr int CHAT_BODY_Y = CHAT_TOOLBAR_Y + CHAT_TOOLBAR_H + 16;
 constexpr int CHAT_INPUT_H = 86;
 constexpr int CHAT_INPUT_Y_MARGIN = 20;
 

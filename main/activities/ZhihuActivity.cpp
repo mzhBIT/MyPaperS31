@@ -20,7 +20,7 @@ namespace {
 
 constexpr const char *TAG = "ZHIHU";
 constexpr int HEADER_H = 76;
-constexpr int LIST_TOP = 84;
+constexpr int LIST_TOP = HEADER_H;
 constexpr int FOOTER_H = 72;
 constexpr int SIDE_PAD = 18;
 constexpr int PAGE_SIZE = 5;

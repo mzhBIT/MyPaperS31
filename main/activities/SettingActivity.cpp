@@ -37,13 +37,13 @@ namespace {
 
 constexpr int HEADER_H = 76;
 constexpr int PAD = 20;
-constexpr int SETTINGS_ROW_Y = 94;
+constexpr int SETTINGS_ROW_Y = HEADER_H;
 constexpr int SETTINGS_ROW_H = 110;
 constexpr int SETTINGS_ROW_GAP = 0;
 constexpr int SETTINGS_ITEM_COUNT = 8;
 constexpr int SETTINGS_VISIBLE_ROWS = 8;
 
-constexpr int SCAN_TOP = 94;
+constexpr int SCAN_TOP = HEADER_H;
 constexpr int SCAN_ROW_H = 92;
 constexpr int SCAN_FOOTER_Y = 1102;
 constexpr int SCAN_FOOTER_H = 82;
@@ -378,6 +378,9 @@ private:
             case ui::VirtualKeyboardAction::InputChanged:
                 refresh_keyboard_input();
                 return true;
+            case ui::VirtualKeyboardAction::CursorMoved:
+                refresh_keyboard_input();
+                return true;
             case ui::VirtualKeyboardAction::LayoutChanged:
                 draw_keyboard();
                 return true;
@@ -480,17 +483,17 @@ public:
             return true;
         }
         if (event.type != TouchEventType::Tap) return false;
-        if (event.y >= 130 && event.y < 270) {
+        if (event.y >= HEADER_H && event.y < HEADER_H + 140) {
             _focus = 0;
             edit_api_key();
             return true;
         }
-        if (event.y >= 290 && event.y < 430) {
+        if (event.y >= HEADER_H + 160 && event.y < HEADER_H + 300) {
             _focus = 1;
             toggle_model();
             return true;
         }
-        if (event.y >= 450 && event.y < 590) {
+        if (event.y >= HEADER_H + 320 && event.y < HEADER_H + 460) {
             _focus = 2;
             test_api_key();
             return true;
@@ -587,13 +590,13 @@ private:
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
         draw_header(ui_locale::text(ui_locale::TextId::DeepSeekSettings));
-        draw_row(130, ui_locale::text(ui_locale::TextId::DeepSeekApiKey), key_detail, _focus == 0);
-        draw_row(290, ui_locale::text(ui_locale::TextId::DefaultModel), deepseek_model_label(config.default_model), _focus == 1);
-        draw_row(450, ui_locale::text(ui_locale::TextId::TestConnection), ui_locale::text(ui_locale::TextId::ValidateModelsHint), _focus == 2);
+        draw_row(HEADER_H, ui_locale::text(ui_locale::TextId::DeepSeekApiKey), key_detail, _focus == 0);
+        draw_row(HEADER_H + 160, ui_locale::text(ui_locale::TextId::DefaultModel), deepseek_model_label(config.default_model), _focus == 1);
+        draw_row(HEADER_H + 320, ui_locale::text(ui_locale::TextId::TestConnection), ui_locale::text(ui_locale::TextId::ValidateModelsHint), _focus == 2);
         system_font::draw_center(M5.Display,
                                  _message.empty() ? ui_locale::text(ui_locale::TextId::ApiKeyNvsHint) :
                                                     system_font::ellipsize(_message, M5.Display.width() - 40),
-                                 M5.Display.width() / 2, 630, TFT_BLACK);
+                                 M5.Display.width() / 2, HEADER_H + 500, TFT_BLACK);
         M5.Display.display();
         M5.Display.endWrite();
     }
@@ -619,12 +622,12 @@ public:
             return true;
         }
         if (event.type != TouchEventType::Tap) return false;
-        if (event.y >= 170 && event.y < 310) {
+        if (event.y >= HEADER_H && event.y < HEADER_H + 140) {
             _focus = 0;
             edit_access_secret();
             return true;
         }
-        if (event.y >= 330 && event.y < 470) {
+        if (event.y >= HEADER_H + 160 && event.y < HEADER_H + 300) {
             _focus = 1;
             test_connection();
             return true;
@@ -710,17 +713,17 @@ private:
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
         draw_header(ui_locale::text(ui_locale::TextId::ZhihuSettings));
-        draw_row(170, ui_locale::text(ui_locale::TextId::AccessSecret),
+        draw_row(HEADER_H, ui_locale::text(ui_locale::TextId::AccessSecret),
                  configured ? ui_locale::text(ui_locale::TextId::ConfiguredTapReplace)
                             : ui_locale::text(ui_locale::TextId::NotConfigured),
                  _focus == 0);
-        draw_row(330, ui_locale::text(ui_locale::TextId::TestConnection),
+        draw_row(HEADER_H + 160, ui_locale::text(ui_locale::TextId::TestConnection),
                  ui_locale::text(ui_locale::TextId::RequestHotListHint), _focus == 1);
         system_font::draw_center(M5.Display,
                                  _message.empty() ? ui_locale::text(ui_locale::TextId::SecretNvsHint) :
                                                     system_font::ellipsize(_message,
                                                                            M5.Display.width() - 40),
-                                 M5.Display.width() / 2, 540, TFT_BLACK);
+                                 M5.Display.width() / 2, HEADER_H + 370, TFT_BLACK);
         M5.Display.display();
         M5.Display.endWrite();
     }
@@ -746,12 +749,12 @@ public:
             return true;
         }
         if (event.type != TouchEventType::Tap) return false;
-        if (event.y >= 180 && event.y < 320) {
+        if (event.y >= HEADER_H && event.y < HEADER_H + 140) {
             _focus = 0;
             edit_api_key();
             return true;
         }
-        if (event.y >= 340 && event.y < 480) {
+        if (event.y >= HEADER_H + 160 && event.y < HEADER_H + 300) {
             _focus = 1;
             clear_cache();
             return true;
@@ -835,18 +838,18 @@ private:
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_text);
         M5.Display.fillScreen(TFT_WHITE);
         draw_header(ui_locale::text(ui_locale::TextId::MapSettings));
-        draw_row(180, ui_locale::text(ui_locale::TextId::AmapApiKey),
+        draw_row(HEADER_H, ui_locale::text(ui_locale::TextId::AmapApiKey),
                  configured ? ui_locale::text(ui_locale::TextId::ConfiguredTapReplace)
                             : ui_locale::text(ui_locale::TextId::NotConfigured),
                  _focus == 0);
-        draw_row(340, ui_locale::text(ui_locale::TextId::ClearMapCache),
+        draw_row(HEADER_H + 160, ui_locale::text(ui_locale::TextId::ClearMapCache),
                  cached ? ui_locale::text(ui_locale::TextId::CachedMapAvailable)
                         : ui_locale::text(ui_locale::TextId::NoCachedMap),
                  _focus == 1);
         system_font::draw_center(M5.Display,
                                  _message.empty() ? ui_locale::text(ui_locale::TextId::ApiKeyNvsHint)
                                                   : _message,
-                                 M5.Display.width() / 2, 550, TFT_BLACK);
+                                 M5.Display.width() / 2, HEADER_H + 370, TFT_BLACK);
         M5.Display.display();
         M5.Display.endWrite();
     }
@@ -890,7 +893,7 @@ public:
         if (event.type != TouchEventType::Tap) return false;
 
         if (!_confirm) {
-            if (event.y >= 430 && event.y < 530) begin_confirm();
+            if (event.y >= 340 && event.y < 440) begin_confirm();
             return true;
         }
 
@@ -979,20 +982,20 @@ private:
                       static_cast<unsigned>(_info.files),
                       ui_locale::text(ui_locale::TextId::ImageFiles),
                       format_cache_bytes(_info.bytes).c_str());
-        system_font::draw_center(M5.Display, summary, width / 2, 180, TFT_BLACK);
+        system_font::draw_center(M5.Display, summary, width / 2, HEADER_H + 14, TFT_BLACK);
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::RssCacheRemoveHint),
-                                 width / 2, 260, TFT_BLACK);
+                                 width / 2, 170, TFT_BLACK);
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::RssCacheKeepHint),
-                                 width / 2, 320, TFT_BLACK);
+                                 width / 2, 230, TFT_BLACK);
 
-        M5.Display.fillRoundRect(70, 430, width - 140, 100, 8, TFT_BLACK);
+        M5.Display.fillRoundRect(70, 340, width - 140, 100, 8, TFT_BLACK);
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ClearRssCache), width / 2,
-                                 430 + std::max(0, (100 - system_font::line_height()) / 2),
+                                 340 + std::max(0, (100 - system_font::line_height()) / 2),
                                  TFT_WHITE);
         if (!_message.empty()) {
             system_font::draw_center(M5.Display,
                                      system_font::ellipsize(_message, width - 50),
-                                     width / 2, 590, TFT_BLACK);
+                                     width / 2, 500, TFT_BLACK);
         }
 
         if (_confirm) {
@@ -1081,9 +1084,9 @@ private:
     int _focus = 0;
     bool _shown = false;
 
-    static int row_top(int index) { return index < 2 ? 210 + index * 156
-                                      : index < 4 ? 610 + (index - 2) * 156
-                                                  : 960; }
+    static int row_top(int index) { return index < 2 ? 150 + index * 156
+                                      : index < 4 ? 530 + (index - 2) * 156
+                                                  : 895; }
 
     void select_focused()
     {
@@ -1132,13 +1135,13 @@ private:
         M5.Display.fillScreen(TFT_WHITE);
         draw_header(ui_locale::text(ui_locale::TextId::Network));
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::NetworkChoiceHint),
-                                 M5.Display.width() / 2, 130, 0x8410);
+                                 M5.Display.width() / 2, HEADER_H + 8, 0x8410);
         draw_option(0, "WiFi", ui_locale::text(ui_locale::TextId::WifiChoiceHint),
                     _network_mode == WIFI_SETTING_NETWORK_WIFI);
         draw_option(1, "4G", ui_locale::text(ui_locale::TextId::CellularChoiceHint),
                     _network_mode == WIFI_SETTING_NETWORK_CELLULAR);
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::WifiPowerMode),
-                                 M5.Display.width() / 2, 535, 0x8410);
+                                 M5.Display.width() / 2, 465, 0x8410);
         draw_option(2, ui_locale::text(ui_locale::TextId::WifiAlwaysOn),
                     ui_locale::text(ui_locale::TextId::WifiAlwaysOnHint),
                     _power_mode == WIFI_SETTING_POWER_ALWAYS_ON);
@@ -1208,7 +1211,7 @@ public:
     }
 
 private:
-    static constexpr int CONTROL_Y = 492;
+    static constexpr int CONTROL_Y = 350;
     static constexpr int CONTROL_H = 132;
 
     struct Layout {
@@ -1252,9 +1255,9 @@ private:
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_text);
         M5.Display.fillScreen(TFT_WHITE);
         draw_header(ui_locale::text(ui_locale::TextId::Frontlight));
-        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Brightness), width / 2, 250, TFT_BLACK);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Brightness), width / 2, HEADER_H + 14, TFT_BLACK);
         system_font::draw_center(M5.Display, std::to_string(frontlight_get_percent()) + "%",
-                                 width / 2, 334, TFT_BLACK);
+                                 width / 2, 180, TFT_BLACK);
 
         M5.Display.drawRoundRect(layout.minus_x, CONTROL_Y, layout.button_w, CONTROL_H,
                                  10, TFT_BLACK);
@@ -1271,9 +1274,9 @@ private:
             else M5.Display.drawRoundRect(x, CONTROL_Y + 43, layout.bar_w, 46, 5, TFT_BLACK);
         }
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::BrightnessStepHint),
-                                 width / 2, 730, TFT_DARKGRAY);
+                                 width / 2, 590, TFT_DARKGRAY);
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::FrontlightOffHint),
-                                 width / 2, 786, TFT_DARKGRAY);
+                                 width / 2, 646, TFT_DARKGRAY);
         M5.Display.display();
         M5.Display.endWrite();
     }
@@ -1304,11 +1307,11 @@ public:
             ActivityManager::instance().pop();
             return true;
         }
-        if (event.type == TouchEventType::Tap && event.y >= 320 && event.y < 450) {
+        if (event.type == TouchEventType::Tap && event.y >= 250 && event.y < 380) {
             change(event.x < M5.Display.width() / 2 ? -30 : 30);
             return true;
         }
-        if (event.type == TouchEventType::Tap && event.y >= 680 && event.y < 830) {
+        if (event.type == TouchEventType::Tap && event.y >= 610 && event.y < 760) {
             change_clock_basis();
             return true;
         }
@@ -1356,32 +1359,32 @@ private:
         M5.Display.fillScreen(TFT_WHITE);
         draw_header(ui_locale::text(ui_locale::TextId::TimeBasis));
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::PhoneSmsTimezone),
-                                 width / 2, 165, TFT_BLACK);
-        system_font::draw_center(M5.Display, time_basis_label(), width / 2, 255,
+                                 width / 2, HEADER_H + 14, TFT_BLACK);
+        system_font::draw_center(M5.Display, time_basis_label(), width / 2, 185,
                                  TFT_BLACK);
         const int button_width = (width - 120) / 2;
-        M5.Display.drawRect(40, 320, button_width, 130, TFT_BLACK);
-        M5.Display.drawRect(80 + button_width, 320, button_width, 130, TFT_BLACK);
+        M5.Display.drawRect(40, 250, button_width, 130, TFT_BLACK);
+        M5.Display.drawRect(80 + button_width, 250, button_width, 130, TFT_BLACK);
         system_font::draw_center(M5.Display, "- 30 min", 40 + button_width / 2,
-                                 355, TFT_BLACK);
+                                 285, TFT_BLACK);
         system_font::draw_center(M5.Display, "+ 30 min", 80 + button_width + button_width / 2,
-                                 355, TFT_BLACK);
+                                 285, TFT_BLACK);
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::BeijingDefaultHint),
-                                 width / 2, 510, TFT_DARKGRAY);
+                                 width / 2, 440, TFT_DARKGRAY);
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ModemTimeHint),
-                                 width / 2, 575, TFT_DARKGRAY);
-        M5.Display.drawRect(40, 680, width - 80, 150, TFT_BLACK);
+                                 width / 2, 505, TFT_DARKGRAY);
+        M5.Display.drawRect(40, 610, width - 80, 150, TFT_BLACK);
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ModemClockDigits),
-                                 width / 2, 700, TFT_BLACK);
+                                 width / 2, 630, TFT_BLACK);
         system_font::draw_center(M5.Display,
                                  time_basis_modem_clock_is_utc()
                                      ? ui_locale::text(ui_locale::TextId::UtcIgnoreReportedZone)
                                      : ui_locale::text(ui_locale::TextId::UseReportedZone),
-                                 width / 2, 755, TFT_BLACK);
+                                 width / 2, 685, TFT_BLACK);
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::SmsOwnZoneHint),
-                                 width / 2, 880, TFT_DARKGRAY);
+                                 width / 2, 810, TFT_DARKGRAY);
         if (!_error.empty()) system_font::draw_center(M5.Display, _error, width / 2,
-                                                       950, TFT_BLACK);
+                                                       880, TFT_BLACK);
         M5.Display.display();
         M5.Display.endWrite();
     }
@@ -1425,7 +1428,7 @@ public:
         return false;
     }
 private:
-    static constexpr int ROW_Y = 160;
+    static constexpr int ROW_Y = HEADER_H;
     static constexpr int ROW_H = 210;
     int _focus = 0;
     bool _shown = false;
@@ -1524,7 +1527,7 @@ public:
             return true;
         }
         if (event.type != TouchEventType::Tap) return false;
-        constexpr int row_y = 230;
+        constexpr int row_y = HEADER_H;
         constexpr int row_h = 170;
         if (event.y < row_y || event.y >= row_y + row_h * 3) return false;
         choose((event.y - row_y) / row_h);
@@ -1570,7 +1573,7 @@ private:
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
         draw_header(ui_locale::text(ui_locale::TextId::SelectLanguage));
-        constexpr int row_y = 230;
+        constexpr int row_y = HEADER_H;
         constexpr int row_h = 170;
         for (int i = 0; i < 3; ++i) {
             int y = row_y + i * row_h;
@@ -1627,7 +1630,7 @@ public:
         return false;
     }
 private:
-    static constexpr int ROW_Y = 160;
+    static constexpr int ROW_Y = HEADER_H;
     static constexpr int ROW_H = 210;
     int _focus = 0;
     bool _shown = false;

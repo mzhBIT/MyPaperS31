@@ -10,6 +10,7 @@
 
 #include <M5Unified.h>
 #include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 
@@ -20,6 +21,7 @@ constexpr int STEP_BOX_W = 96;
 constexpr int STEP_BOX_GAP = 10;
 constexpr int VALUE_W = 100;
 constexpr int CHAPTER_INDEX_H = 52;
+constexpr int PANEL_RADIUS = 10;
 
 const char *base_name(const char *path)
 {
@@ -45,28 +47,28 @@ void setting_text(int index, script_conversion::Mode script_mode, bool script_fa
         *value = buf;
         break;
     case 2:
+        *name = ui_locale::text(ui_locale::TextId::LetterSpacing);
+        snprintf(buf, sizeof(buf), "%d", style.letter_spacing);
+        *value = buf;
+        break;
+    case 3:
         *name = ui_locale::text(ui_locale::TextId::LineSpacing);
         snprintf(buf, sizeof(buf), "%d", style.line_spacing);
         *value = buf;
         break;
-    case 3:
+    case 4:
         *name = ui_locale::text(ui_locale::TextId::FirstLineIndent);
         snprintf(buf, sizeof(buf), "%d", style.first_line_indent);
         *value = buf;
         break;
-    case 4:
+    case 5:
         *name = ui_locale::text(ui_locale::TextId::ParagraphGap);
         snprintf(buf, sizeof(buf), "%.1f", style.paragraph_spacing * 0.1f);
         *value = buf;
         break;
-    case 5:
-        *name = ui_locale::text(ui_locale::TextId::LeftMargin);
-        snprintf(buf, sizeof(buf), "%d", style.margin_left);
-        *value = buf;
-        break;
     case 6:
-        *name = ui_locale::text(ui_locale::TextId::RightMargin);
-        snprintf(buf, sizeof(buf), "%d", style.margin_right);
+        *name = ui_locale::text(ui_locale::TextId::PageMargin);
+        snprintf(buf, sizeof(buf), "%d", (style.margin_left + style.margin_right) / 2);
         *value = buf;
         break;
     case 7:
@@ -319,19 +321,20 @@ void ReaderOverlay::adjust_setting(int delta)
             style.font_size += delta * 2;
             break;
         case 2:
-            style.line_spacing += delta * 2;
+            style.letter_spacing += delta;
             break;
         case 3:
-            style.first_line_indent += delta;
+            style.line_spacing += delta * 2;
             break;
         case 4:
-            style.paragraph_spacing += delta;
+            style.first_line_indent += delta;
             break;
         case 5:
-            style.margin_left += delta * 5;
+            style.paragraph_spacing += delta;
             break;
         case 6:
-            style.margin_right += delta * 5;
+            style.margin_left = (style.margin_left + style.margin_right) / 2 + delta * 5;
+            style.margin_right = style.margin_left;
             break;
         default:
             return;
@@ -702,15 +705,28 @@ void ReaderOverlay::draw_chapters(const Geometry &g)
 
 void ReaderOverlay::draw_tabs(const Geometry &g)
 {
+    const int bottom = g.y + g.h - 1;
+    const auto fill_tab = [&](int x, int width, uint16_t color, bool left_edge, bool right_edge) {
+        const int top = g.tab_y + 1;
+        const int straight_bottom = bottom - PANEL_RADIUS;
+        M5.Display.fillRect(x, top, width, straight_bottom - top + 1, color);
+        for (int y = straight_bottom + 1; y < bottom; ++y) {
+            const int dy = y - straight_bottom;
+            const int inset = PANEL_RADIUS - static_cast<int>(
+                std::sqrt(PANEL_RADIUS * PANEL_RADIUS - dy * dy));
+            const int left = x + (left_edge ? inset : 0);
+            const int right = x + width - (right_edge ? inset : 0);
+            if (right > left) M5.Display.drawFastHLine(left, y, right - left, color);
+        }
+    };
     if (!m_chapters_enabled) {
         int half = g.w / 2;
         M5.Display.drawFastHLine(g.x, g.tab_y, g.w, TFT_BLACK);
         M5.Display.drawFastVLine(g.x + half, g.tab_y, g.tab_h, TFT_BLACK);
         bool settings = m_tab == Tab::Settings;
-        M5.Display.fillRect(g.x + 1, g.tab_y + 1, half - 1, g.tab_h - 2,
-                            settings ? TFT_BLACK : TFT_WHITE);
-        M5.Display.fillRect(g.x + half + 1, g.tab_y + 1, g.w - half - 2, g.tab_h - 2,
-                            settings ? TFT_WHITE : TFT_BLACK);
+        fill_tab(g.x + 1, half - 1, settings ? TFT_BLACK : TFT_WHITE, true, false);
+        fill_tab(g.x + half + 1, g.w - half - 2,
+                 settings ? TFT_WHITE : TFT_BLACK, false, true);
         int text_y = g.tab_y + std::max(2, (g.tab_h - system_font::line_height()) / 2);
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Settings), g.x + half / 2, text_y,
                                  settings ? TFT_WHITE : TFT_BLACK);
@@ -730,12 +746,9 @@ void ReaderOverlay::draw_tabs(const Geometry &g)
     bool settings = m_tab == Tab::Settings;
     bool beauty = m_tab == Tab::Beauty;
     bool chapters = m_tab == Tab::Chapters;
-    M5.Display.fillRect(x0 + 1, g.tab_y + 1, x1 - x0 - 1, g.tab_h - 2,
-                        settings ? TFT_BLACK : TFT_WHITE);
-    M5.Display.fillRect(x1 + 1, g.tab_y + 1, x2 - x1 - 1, g.tab_h - 2,
-                        beauty ? TFT_BLACK : TFT_WHITE);
-    M5.Display.fillRect(x2 + 1, g.tab_y + 1, x3 - x2 - 2, g.tab_h - 2,
-                        chapters ? TFT_BLACK : TFT_WHITE);
+    fill_tab(x0 + 1, x1 - x0 - 1, settings ? TFT_BLACK : TFT_WHITE, true, false);
+    fill_tab(x1 + 1, x2 - x1 - 1, beauty ? TFT_BLACK : TFT_WHITE, false, false);
+    fill_tab(x2 + 1, x3 - x2 - 2, chapters ? TFT_BLACK : TFT_WHITE, false, true);
     int text_y = g.tab_y + std::max(2, (g.tab_h - system_font::line_height()) / 2);
     system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Settings), x0 + (x1 - x0) / 2, text_y,
                              settings ? TFT_WHITE : TFT_BLACK);
@@ -749,12 +762,12 @@ void ReaderOverlay::draw()
 {
     if (!m_visible) return;
     Geometry g = geometry();
-    M5.Display.fillRoundRect(g.x, g.y, g.w, g.h, 10, TFT_WHITE);
-    M5.Display.drawRoundRect(g.x, g.y, g.w, g.h, 10, TFT_BLACK);
+    M5.Display.fillRoundRect(g.x, g.y, g.w, g.h, PANEL_RADIUS, TFT_WHITE);
     if (m_tab == Tab::Settings) draw_settings(g);
     else if (m_tab == Tab::Beauty) draw_beauty(g);
     else draw_chapters(g);
     draw_tabs(g);
+    M5.Display.drawRoundRect(g.x, g.y, g.w, g.h, PANEL_RADIUS, TFT_BLACK);
 }
 
 void ReaderOverlay::redraw()

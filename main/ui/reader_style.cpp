@@ -9,7 +9,8 @@
 
 static const char *TAG = "READER_STYLE";
 static const char *NVS_NS = "reader_style";
-static const char *NVS_KEY = "style_v6";
+static const char *NVS_KEY = "style_v7";
+static const char *NVS_KEY_V6 = "style_v6";
 static const char *NVS_KEY_V5 = "style_v5";
 static const char *NVS_KEY_V4 = "style_v4";
 static const char *NVS_KEY_V3 = "style_v3";
@@ -58,6 +59,22 @@ struct ReaderStyleV5 {
     int underline_type;
 };
 
+struct ReaderStyleV6 {
+    int font_size;
+    int line_spacing;
+    int margin_left;
+    int margin_right;
+    int margin_top;
+    int margin_bottom;
+    int refresh_mode;
+    int show_images;
+    int first_line_indent;
+    int paragraph_spacing;
+    int full_refresh_pages;
+    int underline_type;
+    int hide_header;
+};
+
 struct ReaderStyleV1 {
     int font_size;
     int line_spacing;
@@ -87,6 +104,7 @@ static bool load_style_from_sd(ReaderStyle *out)
         if (sscanf(line, "%47[^=]=%d", key, &val) != 2) continue;
         if (strcmp(key, "font_size") == 0) style.font_size = val;
         else if (strcmp(key, "line_spacing") == 0) style.line_spacing = val;
+        else if (strcmp(key, "letter_spacing") == 0) style.letter_spacing = val;
         else if (strcmp(key, "margin_left") == 0) style.margin_left = val;
         else if (strcmp(key, "margin_right") == 0) style.margin_right = val;
         else if (strcmp(key, "margin_top") == 0) style.margin_top = val;
@@ -123,6 +141,29 @@ static bool load_style_from_nvs(ReaderStyle *out, bool *migrated)
     bool loaded = false;
     err = nvs_get_blob(h, NVS_KEY, &style, &len);
     loaded = err == ESP_OK && len == sizeof(style);
+    if (!loaded) {
+        ReaderStyleV6 legacy_v6 = {};
+        len = sizeof(legacy_v6);
+        err = nvs_get_blob(h, NVS_KEY_V6, &legacy_v6, &len);
+        if (err == ESP_OK && len == sizeof(legacy_v6)) {
+            style = ReaderStyle();
+            style.font_size = legacy_v6.font_size;
+            style.line_spacing = legacy_v6.line_spacing;
+            style.margin_left = legacy_v6.margin_left;
+            style.margin_right = legacy_v6.margin_right;
+            style.margin_top = legacy_v6.margin_top;
+            style.margin_bottom = legacy_v6.margin_bottom;
+            style.refresh_mode = legacy_v6.refresh_mode;
+            style.show_images = legacy_v6.show_images;
+            style.first_line_indent = legacy_v6.first_line_indent;
+            style.paragraph_spacing = legacy_v6.paragraph_spacing;
+            style.full_refresh_pages = legacy_v6.full_refresh_pages;
+            style.underline_type = legacy_v6.underline_type;
+            style.hide_header = legacy_v6.hide_header;
+            loaded = true;
+            if (migrated) *migrated = true;
+        }
+    }
     if (!loaded) {
         ReaderStyleV5 legacy_v5 = {};
         len = sizeof(legacy_v5);
@@ -236,6 +277,7 @@ ReaderStyle reader_style_clamp(ReaderStyle style)
 {
     style.font_size = std::min(56, std::max(24, style.font_size));
     style.line_spacing = std::min(32, std::max(0, style.line_spacing));
+    style.letter_spacing = std::min(12, std::max(0, style.letter_spacing));
     style.margin_left = std::min(120, std::max(0, style.margin_left));
     style.margin_right = std::min(120, std::max(0, style.margin_right));
     style.margin_top = std::min(80, std::max(0, style.margin_top));
@@ -313,9 +355,10 @@ void reader_style_init()
 
     bool migrated = false;
     if (load_style_from_nvs(&s_style, &migrated)) {
-        ESP_LOGI(TAG, "loaded style from NVS size=%d line=%d indent=%d paragraph=%d full_refresh=%d underline=%s hide_header=%d margins=%d,%d,%d,%d refresh=%s",
+        ESP_LOGI(TAG, "loaded style from NVS size=%d line=%d letter=%d indent=%d paragraph=%d full_refresh=%d underline=%s hide_header=%d margins=%d,%d,%d,%d refresh=%s",
                  s_style.font_size,
                  s_style.line_spacing,
+                 s_style.letter_spacing,
                  s_style.first_line_indent,
                  s_style.paragraph_spacing,
                  s_style.full_refresh_pages,
@@ -327,7 +370,7 @@ void reader_style_init()
                  s_style.margin_bottom,
                  reader_style_refresh_mode_name(s_style.refresh_mode));
         if (migrated) {
-            ESP_LOGI(TAG, "migrating reader style to v6");
+            ESP_LOGI(TAG, "migrating reader style to v7");
             reader_style_save();
         }
         return;

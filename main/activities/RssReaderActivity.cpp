@@ -1920,7 +1920,7 @@ private:
 
     int hit_row(int ty) const
     {
-        int y0 = TOP_H + 6;
+        int y0 = TOP_H;
         if (ty < y0) return -1;
         int idx = g_scroll + (ty - y0) / row_height();
         return idx >= 0 && idx < item_count() ? idx : -1;
@@ -1959,7 +1959,7 @@ private:
         draw_topbar(ui_locale::text(_view == View::Feeds ? ui_locale::TextId::RssFeeds
                                                     : ui_locale::TextId::RssNews));
         int w = M5.Display.width();
-        int y0 = TOP_H + 6;
+        int y0 = TOP_H;
         int rh = row_height();
         int vis = std::max(1, ((int)M5.Display.height() - y0) / rh);
         for (int i = 0; i < vis; ++i) {
@@ -2082,6 +2082,7 @@ private:
         ReaderStyle rs = reader_style_get();
         ts.font_size = rs.font_size;
         ts.line_spacing = rs.line_spacing;
+        ts.letter_spacing = rs.letter_spacing;
         reader_text_renderer().begin(ts);
         std::vector<document_layout::Block> blocks;
         uint64_t content_position = 0;

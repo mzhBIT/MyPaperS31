@@ -174,7 +174,7 @@ private:
 
     int hit(int y) const
     {
-        int top = TOP_H + 6;
+        int top = TOP_H;
         if (y < top) return -1;
         int index = m_scroll + (y - top) / ROW_H;
         return index >= 0 && index < item_count() ? index : -1;
@@ -229,7 +229,7 @@ private:
                                  width / 2, 7, TFT_BLACK);
         M5.Display.drawFastHLine(0, TOP_H - 1, width, TFT_BLACK);
 
-        int top = TOP_H + 6;
+        int top = TOP_H;
         for (int row = 0; row < rows; ++row) {
             int index = m_scroll + row;
             if (index >= item_count()) break;

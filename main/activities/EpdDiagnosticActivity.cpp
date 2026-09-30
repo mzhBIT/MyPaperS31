@@ -20,7 +20,7 @@ namespace {
 
 constexpr int HEADER_H = 76;
 constexpr int PAD = 20;
-constexpr int MENU_TOP = 108;
+constexpr int MENU_TOP = HEADER_H;
 constexpr int MENU_ROW_H = 70;
 constexpr int MENU_ROW_GAP = 4;
 constexpr int MENU_COUNT = 13;

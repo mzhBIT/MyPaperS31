@@ -4,6 +4,7 @@
 #include "activities/ActivityManager.h"
 #include "ime/PinyinEngine.h"
 #include "ui/SystemFont.h"
+#include "ui/TextCursorView.h"
 #include "ui/UiLocale.h"
 #include "ui/Utf8Text.h"
 #include "ui/VirtualKeyboard.h"
@@ -29,6 +30,7 @@ constexpr int MODE_KEY_W = 116;
 constexpr int MODE_KEY_GAP = 8;
 constexpr int PAGE_KEY_W = 36;
 constexpr int SECRET_TOGGLE_W = 104;
+constexpr int CURSOR_BUTTON_W = 48;
 
 class TextInputActivity final : public Activity {
 public:
@@ -37,7 +39,9 @@ public:
           _keyboard(_options.max_bytes > _options.fixed_suffix.size()
                         ? _options.max_bytes - _options.fixed_suffix.size() : 0),
           _engine(CANDIDATE_SLOTS),
-          _committed(ui::utf8::truncate_bytes(_options.initial_text, _options.max_bytes)),
+          _committed(ui::utf8::truncate_bytes(_options.initial_text,
+                       _options.max_bytes > _options.fixed_suffix.size()
+                           ? _options.max_bytes - _options.fixed_suffix.size() : 0)),
           _chinese(_options.start_in_chinese)
     {
         _keyboard.set_secret(false);
@@ -48,6 +52,7 @@ public:
         _keyboard.set_placeholder("");
         _keyboard.set_input_visible(_chinese);
         _keyboard.set_secret(_options.secret);
+        _committed_cursor = _committed.size();
         if (!_chinese) _keyboard.set_text(_committed);
     }
 
@@ -69,6 +74,7 @@ public:
             redraw();
             return true;
         }
+        if (editor_tap(event.x, event.y)) return true;
         // The language key lives in the candidate row and must remain
         // reachable in both modes; otherwise switching to English disables
         // the only path back to Chinese.
@@ -84,6 +90,12 @@ public:
             case ui::VirtualKeyboardAction::LayoutChanged:
                 redraw();
                 return true;
+            case ui::VirtualKeyboardAction::CursorMoved:
+                // Pinyin composition remains append-only; the editor above
+                // moves the cursor in committed text instead.
+                if (_chinese) _keyboard.set_cursor(_keyboard.text().size());
+                redraw();
+                return true;
             case ui::VirtualKeyboardAction::LanguageChanged:
                 return true;
             case ui::VirtualKeyboardAction::Submit:
@@ -95,7 +107,7 @@ public:
                 return true;
             case ui::VirtualKeyboardAction::None:
                 if (_chinese && before.empty() && backspace_hit(event.x, event.y)) {
-                    ui::utf8::erase_last(&_committed);
+                    ui::utf8::erase_before(&_committed, &_committed_cursor);
                     redraw();
                     return true;
                 }
@@ -123,7 +135,7 @@ public:
                 _keyboard.erase_last();
                 update_composition();
             } else if (_chinese) {
-                ui::utf8::erase_last(&_committed);
+                ui::utf8::erase_before(&_committed, &_committed_cursor);
             } else {
                 _keyboard.erase_last();
             }
@@ -143,6 +155,7 @@ private:
     ui::VirtualKeyboard _keyboard;
     ime::PinyinEngine _engine;
     std::string _committed;
+    size_t _committed_cursor = 0;
     std::string _message;
     bool _chinese;
     bool _secret_visible = false;
@@ -188,7 +201,8 @@ private:
 
     void append_committed(const std::string &text)
     {
-        if (!ui::utf8::append(&_committed, text, committed_limit())) _message = ui_locale::text(ui_locale::TextId::TextTooLong);
+        if (!ui::utf8::insert(&_committed, &_committed_cursor, text, committed_limit()))
+            _message = ui_locale::text(ui_locale::TextId::TextTooLong);
     }
 
     void commit_candidate(size_t slot)
@@ -205,9 +219,11 @@ private:
         if (_chinese) {
             if (!_engine.composition().empty()) commit_candidate(0);
             _keyboard.set_text(_committed);
+            _keyboard.set_cursor(_committed_cursor);
             _chinese = false;
         } else {
             _committed = _keyboard.text();
+            _committed_cursor = _keyboard.cursor();
             _keyboard.set_text("");
             _engine.set_composition("");
             _chinese = true;
@@ -234,6 +250,36 @@ private:
         if (!_options.secret || y < EDIT_Y || y >= EDIT_Y + EDIT_H) return false;
         const int right = M5.Display.width() - 20;
         return x >= right - SECRET_TOGGLE_W && x < right;
+    }
+
+    bool editor_tap(int x, int y)
+    {
+        if (y < EDIT_Y || y >= EDIT_Y + EDIT_H) return false;
+        const int edit_x = 20;
+        const int edit_w = M5.Display.width() - 40;
+        if (x < edit_x || x >= edit_x + edit_w) return false;
+        if (_chinese && !_engine.composition().empty()) commit_candidate(0);
+        const std::string &value = _chinese ? _committed : _keyboard.text();
+        size_t cursor = _chinese ? _committed_cursor : _keyboard.cursor();
+        const int toggle_space = _options.secret ? SECRET_TOGGLE_W + 10 : 0;
+        const int right_x = edit_x + edit_w - toggle_space - CURSOR_BUTTON_W;
+        if (x < edit_x + CURSOR_BUTTON_W) {
+            cursor = ui::utf8::previous_boundary(value, cursor);
+        } else if (x >= right_x) {
+            cursor = ui::utf8::next_boundary(value, cursor);
+        } else {
+            const int text_x = edit_x + CURSOR_BUTTON_W + 4;
+            const int max_w = std::max(0, right_x - text_x - 8 -
+                                       system_font::measure(_options.fixed_suffix));
+            const auto view = ui::cursor_view(value, cursor, max_w,
+                                               _options.secret && !_secret_visible);
+            cursor = ui::cursor_at_x(value, view, x - text_x,
+                                     _options.secret && !_secret_visible);
+        }
+        if (_chinese) _committed_cursor = cursor;
+        else _keyboard.set_cursor(cursor);
+        redraw();
+        return true;
     }
 
     bool candidate_tap(int x, int y)
@@ -291,38 +337,30 @@ private:
         int width = M5.Display.width();
         int pad = 20;
         M5.Display.drawRoundRect(pad, EDIT_Y, width - pad * 2, EDIT_H, 7, TFT_BLACK);
-        std::string editable = _chinese ? _committed : _keyboard.text();
-        if (_options.secret && !_secret_visible && !editable.empty()) {
-            editable.assign(ui::utf8::length(editable), '*');
-        }
-        const int text_x = pad + 14;
+        const std::string &editable = _chinese ? _committed : _keyboard.text();
+        const size_t cursor = _chinese ? _committed_cursor : _keyboard.cursor();
+        const int text_x = pad + CURSOR_BUTTON_W + 4;
         const int text_y = EDIT_Y + std::max(0, (EDIT_H - system_font::line_height()) / 2);
-        const int inner_w = width - pad * 2 - 28;
-        const int suffix_w = system_font::measure(_options.fixed_suffix);
-        const int caret_gap = 8;
         const int toggle_space = _options.secret ? SECRET_TOGGLE_W + 10 : 0;
-        const int editable_w = std::max(0, inner_w - suffix_w - caret_gap - toggle_space);
-
-        // Keep the insertion point visible for long names by retaining the
-        // tail nearest the cursor. No placeholder is drawn for an empty name.
-        while (!editable.empty() && system_font::measure(editable) > editable_w) {
-            size_t bytes = 1;
-            unsigned char lead = static_cast<unsigned char>(editable[0]);
-            if ((lead & 0xE0) == 0xC0) bytes = 2;
-            else if ((lead & 0xF0) == 0xE0) bytes = 3;
-            else if ((lead & 0xF8) == 0xF0) bytes = 4;
-            editable.erase(0, std::min(bytes, editable.size()));
-        }
-
-        system_font::draw_left(M5.Display, editable, text_x, text_y, TFT_BLACK);
-        int caret_x = text_x + system_font::measure(editable) + 3;
+        const int right_x = width - pad - toggle_space - CURSOR_BUTTON_W;
+        const int editable_w = std::max(0, right_x - text_x - 8 -
+                                       system_font::measure(_options.fixed_suffix));
+        const auto view = ui::cursor_view(editable, cursor, editable_w,
+                                          _options.secret && !_secret_visible);
+        system_font::draw_left(M5.Display, view.label, text_x, text_y, TFT_BLACK);
+        int caret_x = text_x + view.caret_x + 2;
         int caret_y = EDIT_Y + 12;
         int caret_h = std::min(EDIT_H - 24, system_font::line_height());
         M5.Display.fillRect(caret_x, caret_y, 3, caret_h, TFT_BLACK);
         if (!_options.fixed_suffix.empty()) {
             system_font::draw_left(M5.Display, _options.fixed_suffix,
-                                   caret_x + caret_gap, text_y, TFT_BLACK);
+                                   right_x - system_font::measure(_options.fixed_suffix) - 7,
+                                   text_y, TFT_BLACK);
         }
+        system_font::draw_center(M5.Display, "<", pad + CURSOR_BUTTON_W / 2,
+                                 text_y, TFT_BLACK);
+        system_font::draw_center(M5.Display, ">", right_x + CURSOR_BUTTON_W / 2,
+                                 text_y, TFT_BLACK);
         if (_options.secret) {
             const int toggle_x = width - pad - SECRET_TOGGLE_W;
             M5.Display.fillRect(toggle_x - 6, EDIT_Y + 1, SECRET_TOGGLE_W + 5,

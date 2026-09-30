@@ -306,6 +306,7 @@ bool TxtBook::refresh_layout_settings()
     ReaderStyle reader_style = reader_style_get();
     style.font_size = reader_style.font_size;
     style.line_spacing = reader_style.line_spacing;
+    style.letter_spacing = reader_style.letter_spacing;
     bool ok = reader_text_renderer().begin(style);
     _layout_sig = layout_signature();
     return ok;

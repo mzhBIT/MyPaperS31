@@ -27,6 +27,7 @@ enum class VirtualKeyboardAction {
     LanguageChanged,
     Submit,
     LimitReached,
+    CursorMoved,
 };
 
 class VirtualKeyboard {
@@ -46,6 +47,9 @@ public:
     const std::string &text() const;
     bool empty() const;
     bool erase_last();
+    size_t cursor() const;
+    void set_cursor(size_t cursor);
+    bool move_cursor(int direction);
 
     void draw(M5GFX &display) const;
     void draw_input(M5GFX &display) const;
@@ -60,6 +64,7 @@ private:
     VirtualKeyboardLayout _layout;
     size_t _max_length;
     std::string _text;
+    size_t _cursor = 0;
     std::string _placeholder = "Text";
     std::string _submit_label = "Done";
     bool _secret = false;

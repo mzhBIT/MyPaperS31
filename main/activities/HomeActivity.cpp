@@ -285,7 +285,7 @@ static void recent_card_rect(int slot, int *x, int *y, int *w, int *h)
 {
     int screen_w = M5.Display.width();
     int screen_h = M5.Display.height();
-    int content_y = RECENT_HEADER_H + 12;
+    int content_y = RECENT_HEADER_H;
     int content_h = screen_h - content_y - 16;
     int row_h = (content_h - RECENT_GAP * (RECENT_PAGE_SIZE - 1)) / RECENT_PAGE_SIZE;
     if (x) *x = RECENT_PAD;

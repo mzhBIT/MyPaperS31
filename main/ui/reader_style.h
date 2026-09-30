@@ -14,6 +14,7 @@ struct ReaderStyle {
     int full_refresh_pages = 30;    // Force one quality refresh after this many non-quality page refreshes.
     int underline_type = 0;         // 0=None, 1=Solid, 2=Dashed.
     int hide_header = 0;            // Hide reader top bar and let content use the extra vertical space.
+    int letter_spacing = 0;         // Extra pixels between adjacent characters.
 };
 
 void reader_style_init();

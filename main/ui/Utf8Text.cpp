@@ -1,5 +1,7 @@
 #include "ui/Utf8Text.h"
 
+#include <algorithm>
+
 namespace ui::utf8 {
 
 static size_t sequence_length(unsigned char lead)
@@ -58,6 +60,45 @@ bool append(std::string *text, const std::string &suffix, size_t max_bytes)
 {
     if (!text || text->size() + suffix.size() > max_bytes || !valid(suffix)) return false;
     text->append(suffix);
+    return true;
+}
+
+size_t previous_boundary(const std::string &text, size_t cursor)
+{
+    cursor = std::min(cursor, text.size());
+    if (cursor == 0) return 0;
+    --cursor;
+    while (cursor > 0 && (static_cast<unsigned char>(text[cursor]) & 0xC0) == 0x80) --cursor;
+    return cursor;
+}
+
+size_t next_boundary(const std::string &text, size_t cursor)
+{
+    cursor = std::min(cursor, text.size());
+    if (cursor == text.size()) return cursor;
+    ++cursor;
+    while (cursor < text.size() &&
+           (static_cast<unsigned char>(text[cursor]) & 0xC0) == 0x80) ++cursor;
+    return cursor;
+}
+
+bool insert(std::string *text, size_t *cursor, const std::string &value, size_t max_bytes)
+{
+    if (!text || !cursor || text->size() + value.size() > max_bytes || !valid(value)) return false;
+    *cursor = std::min(*cursor, text->size());
+    text->insert(*cursor, value);
+    *cursor += value.size();
+    return true;
+}
+
+bool erase_before(std::string *text, size_t *cursor)
+{
+    if (!text || !cursor) return false;
+    *cursor = std::min(*cursor, text->size());
+    if (*cursor == 0) return false;
+    const size_t start = previous_boundary(*text, *cursor);
+    text->erase(start, *cursor - start);
+    *cursor = start;
     return true;
 }
 

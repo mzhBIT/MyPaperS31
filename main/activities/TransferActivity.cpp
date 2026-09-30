@@ -17,7 +17,7 @@ constexpr int HEADER_H = 76;
 constexpr int PAD = 24;
 constexpr int ROW_H = 170;
 constexpr int ROW_GAP = 24;
-constexpr int FIRST_ROW_Y = 130;
+constexpr int FIRST_ROW_Y = HEADER_H;
 
 class TransferActivity final : public Activity {
 public:
@@ -111,7 +111,7 @@ private:
     void draw_row(int y, const char *title, const char *detail, bool focused)
     {
         const int w = M5.Display.width();
-        if (focused) M5.Display.drawRect(PAD, y, w - PAD * 2, ROW_H, TFT_BLACK);
+        if (focused) M5.Display.fillCircle(PAD + 9, y + 44, 5, TFT_BLACK);
         system_font::draw_left(M5.Display, title, PAD + 20, y + 24, TFT_BLACK);
         system_font::draw_left(M5.Display, detail, PAD + 20, y + 88, TFT_DARKGRAY);
         M5.Display.drawFastHLine(PAD, y + ROW_H - 1, w - PAD * 2, TFT_BLACK);

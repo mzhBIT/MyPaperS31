@@ -4,6 +4,7 @@
 #include "ime/PinyinEngine.h"
 #include "ui/NineKeyKeyboard.h"
 #include "ui/SystemFont.h"
+#include "ui/TextCursorView.h"
 #include "ui/UiLocale.h"
 #include "ui/Utf8Text.h"
 #include "ui/VirtualKeyboard.h"
@@ -28,6 +29,7 @@ constexpr int PAGE_KEY_W = 36;
 constexpr int PINYIN_DIGITS_W = 92;
 constexpr int PINYIN_PAGE_KEY_W = 40;
 constexpr int SECRET_TOGGLE_W = 104;
+constexpr int CURSOR_BUTTON_W = 48;
 constexpr const char *INPUT_NVS_NAMESPACE = "text_input";
 constexpr const char *INPUT_NVS_LAYOUT = "cn_layout";
 
@@ -80,6 +82,7 @@ struct TextInputOverlay::Impl {
     ime::PinyinEngine engine{CANDIDATE_SLOTS};
     ime::Pinyin9Engine nine_engine{CANDIDATE_SLOTS};
     std::string committed;
+    size_t committed_cursor = 0;
     std::string message;
     bool chinese = true;
     bool nine_key = false;
@@ -142,7 +145,7 @@ struct TextInputOverlay::Impl {
 
     void append_committed(const std::string &text)
     {
-        if (!utf8::append(&committed, text, committed_limit())) {
+        if (!utf8::insert(&committed, &committed_cursor, text, committed_limit())) {
             message = ui_locale::text(ui_locale::TextId::TextTooLong);
         }
     }
@@ -187,9 +190,11 @@ struct TextInputOverlay::Impl {
         if (chinese) {
             if (!active_composition().empty()) commit_candidate(0);
             keyboard->set_text(committed);
+            keyboard->set_cursor(committed_cursor);
             chinese = false;
         } else {
             committed = keyboard->text();
+            committed_cursor = keyboard->cursor();
             keyboard->set_text("");
             engine.set_composition("");
             chinese = true;
@@ -330,7 +335,7 @@ struct TextInputOverlay::Impl {
                     nine_engine.erase_last()) {
                     break;
                 }
-                utf8::erase_last(&committed);
+                utf8::erase_before(&committed, &committed_cursor);
                 break;
             case NineKeyActionType::Reset:
                 nine_engine.clear();
@@ -395,6 +400,36 @@ struct TextInputOverlay::Impl {
         return true;
     }
 
+    bool editor_tap(int x, int y)
+    {
+        if (y < editor_y() || y >= editor_y() + editor_h()) return false;
+        const int edit_x = 36;
+        const int edit_w = M5.Display.width() - 72;
+        if (x < edit_x || x >= edit_x + edit_w) return false;
+        if (chinese && !active_composition().empty()) commit_candidate(0);
+        const std::string &value = chinese ? committed : keyboard->text();
+        size_t cursor = chinese ? committed_cursor : keyboard->cursor();
+        const int toggle_space = options.secret ? SECRET_TOGGLE_W + 10 : 0;
+        const int right_x = edit_x + edit_w - toggle_space - CURSOR_BUTTON_W;
+        if (x < edit_x + CURSOR_BUTTON_W) {
+            cursor = utf8::previous_boundary(value, cursor);
+        } else if (x >= right_x) {
+            cursor = utf8::next_boundary(value, cursor);
+        } else {
+            const int text_x = edit_x + CURSOR_BUTTON_W + 4;
+            const int max_w = std::max(0, right_x - text_x - 8 -
+                                       system_font::measure(options.fixed_suffix));
+            const auto view = cursor_view(value, cursor, max_w,
+                                          options.secret && !secret_visible);
+            cursor = cursor_at_x(value, view, x - text_x,
+                                 options.secret && !secret_visible);
+        }
+        if (chinese) committed_cursor = cursor;
+        else keyboard->set_cursor(cursor);
+        draw();
+        return true;
+    }
+
     void draw_editor()
     {
         const int width = M5.Display.width();
@@ -412,33 +447,31 @@ struct TextInputOverlay::Impl {
         const int edit_w = dialog_w - 36;
         M5.Display.drawRoundRect(edit_x, editor_y(), edit_w, editor_h(),
                                  6, TFT_BLACK);
-        std::string editable = chinese ? committed : keyboard->text();
-        if (options.secret && !secret_visible && !editable.empty()) {
-            editable.assign(utf8::length(editable), '*');
-        }
-        const int text_x = edit_x + 12;
+        const std::string &editable = chinese ? committed : keyboard->text();
+        const size_t cursor = chinese ? committed_cursor : keyboard->cursor();
+        const int text_x = edit_x + CURSOR_BUTTON_W + 4;
         const int text_y = editor_y() +
             std::max(0, (editor_h() - system_font::line_height()) / 2);
-        const int suffix_w = system_font::measure(options.fixed_suffix);
         const int toggle_space = options.secret ? SECRET_TOGGLE_W + 10 : 0;
-        const int editable_w = std::max(0, edit_w - 28 - suffix_w - toggle_space);
-        while (!editable.empty() && system_font::measure(editable) > editable_w) {
-            size_t bytes = 1;
-            const unsigned char lead = static_cast<unsigned char>(editable[0]);
-            if ((lead & 0xE0) == 0xC0) bytes = 2;
-            else if ((lead & 0xF0) == 0xE0) bytes = 3;
-            else if ((lead & 0xF8) == 0xF0) bytes = 4;
-            editable.erase(0, std::min(bytes, editable.size()));
-        }
-        system_font::draw_left(M5.Display, editable, text_x, text_y, TFT_BLACK);
-        const int caret_x = text_x + system_font::measure(editable) + 3;
+        const int right_x = edit_x + edit_w - toggle_space - CURSOR_BUTTON_W;
+        const int editable_w = std::max(0, right_x - text_x - 8 -
+                                       system_font::measure(options.fixed_suffix));
+        const auto view = cursor_view(editable, cursor, editable_w,
+                                      options.secret && !secret_visible);
+        system_font::draw_left(M5.Display, view.label, text_x, text_y, TFT_BLACK);
+        const int caret_x = text_x + view.caret_x + 2;
         M5.Display.fillRect(caret_x, editor_y() + 10, 3,
                             std::min(editor_h() - 20, system_font::line_height()),
                             TFT_BLACK);
         if (!options.fixed_suffix.empty()) {
             system_font::draw_left(M5.Display, options.fixed_suffix,
-                                   caret_x + 7, text_y, TFT_BLACK);
+                                   right_x - system_font::measure(options.fixed_suffix) - 7,
+                                   text_y, TFT_BLACK);
         }
+        system_font::draw_center(M5.Display, "<", edit_x + CURSOR_BUTTON_W / 2,
+                                 text_y, TFT_BLACK);
+        system_font::draw_center(M5.Display, ">", right_x + CURSOR_BUTTON_W / 2,
+                                 text_y, TFT_BLACK);
         if (options.secret) {
             const int toggle_x = edit_x + edit_w - SECRET_TOGGLE_W;
             M5.Display.fillRect(toggle_x - 6, editor_y() + 1,
@@ -455,16 +488,16 @@ struct TextInputOverlay::Impl {
         const int gap = 16;
         const int button_w = (dialog_w - 36 - gap) / 2;
         const int left_x = dialog_x + 18;
-        const int right_x = left_x + button_w + gap;
+        const int submit_x = left_x + button_w + gap;
         M5.Display.drawRoundRect(left_x, buttons_y(), button_w, buttons_h(),
                                  6, TFT_BLACK);
-        M5.Display.fillRoundRect(right_x, buttons_y(), button_w, buttons_h(),
+        M5.Display.fillRoundRect(submit_x, buttons_y(), button_w, buttons_h(),
                                  6, TFT_BLACK);
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Cancel),
                                  left_x + button_w / 2, buttons_y() + 8,
                                  TFT_BLACK);
         system_font::draw_center(M5.Display, options.submit_label,
-                                 right_x + button_w / 2, buttons_y() + 8,
+                                 submit_x + button_w / 2, buttons_y() + 8,
                                  TFT_WHITE);
     }
 
@@ -601,6 +634,7 @@ void TextInputOverlay::open(const TextInputOptions &options,
     _impl->keyboard->set_submit_visible(false);
     _impl->keyboard->set_secret(options.secret);
     _impl->committed = utf8::truncate_bytes(options.initial_text, limit);
+    _impl->committed_cursor = _impl->committed.size();
     _impl->message.clear();
     _impl->engine.set_composition("");
     _impl->nine_engine.clear();
@@ -641,6 +675,7 @@ bool TextInputOverlay::handle_touch(const TouchEvent &event)
 
     bool submit_button = false;
     if (_impl->secret_toggle_tap(event.x, event.y)) return true;
+    if (_impl->editor_tap(event.x, event.y)) return true;
     if (_impl->button_tap(event.x, event.y, &submit_button)) {
         if (!submit_button) {
             cancel();
@@ -676,6 +711,9 @@ bool TextInputOverlay::handle_touch(const TouchEvent &event)
         case VirtualKeyboardAction::LayoutChanged:
             _impl->draw();
             return true;
+        case VirtualKeyboardAction::CursorMoved:
+            _impl->draw();
+            return true;
         case VirtualKeyboardAction::LimitReached:
             _impl->message = "Text is too long";
             _impl->draw();
@@ -683,7 +721,7 @@ bool TextInputOverlay::handle_touch(const TouchEvent &event)
         case VirtualKeyboardAction::None:
             if (_impl->chinese && before.empty() &&
                 _impl->backspace_hit(event.x, event.y)) {
-                utf8::erase_last(&_impl->committed);
+                utf8::erase_before(&_impl->committed, &_impl->committed_cursor);
                 _impl->draw();
             }
             return true;
@@ -708,7 +746,7 @@ bool TextInputOverlay::handle_key(int key)
             _impl->keyboard->erase_last();
             _impl->update_composition();
         } else if (_impl->chinese) {
-            utf8::erase_last(&_impl->committed);
+            utf8::erase_before(&_impl->committed, &_impl->committed_cursor);
         } else {
             _impl->keyboard->erase_last();
         }

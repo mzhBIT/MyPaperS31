@@ -135,6 +135,7 @@ static bool refresh_text_renderer()
     text_style.font_path = reader_font_path();
     text_style.font_size = style.font_size;
     text_style.line_spacing = style.line_spacing;
+    text_style.letter_spacing = style.letter_spacing;
     return reader_text_renderer().begin(text_style);
 }
 
@@ -2952,6 +2953,20 @@ private:
         draw_topbar(M5.Display, w);
     }
 
+    static bool is_single_image_page(const document_layout::Page &page)
+    {
+        int image_count = 0;
+        for (const PageItem &item : page) {
+            if (item.type == PageItemType::Image) {
+                if (++image_count > 1) return false;
+            } else if (item.type != PageItemType::Space &&
+                       !(item.type == PageItemType::Text && item.text.empty())) {
+                return false;
+            }
+        }
+        return image_count == 1;
+    }
+
     void draw_vertical_page_content(lgfx::LGFXBase &gfx,
                                     const document_layout::Page &page,
                                     bool prepare_glyphs,
@@ -2965,6 +2980,7 @@ private:
             renderer.preparePage(page_text);
         }
         const int cell = renderer.verticalCellAdvance();
+        const bool center_image = is_single_image_page(page);
         int right = content_x() + content_width();
         for (size_t i = 0; i < page.size() && right > content_x(); ++i) {
             if ((i & 7) == 0) vTaskDelay(1);
@@ -3012,7 +3028,9 @@ private:
                 right -= item.height;
             } else if (item.type == PageItemType::Image) {
                 CachedImage image;
-                const int draw_x = right - item.width;
+                const int draw_x = center_image
+                    ? content_x() + std::max(0, (content_width() - item.width) / 2)
+                    : right - item.width;
                 const int draw_y = content_y() +
                     std::max(0, (content_height() - item.height) / 2);
                 if (probe_resource_image(item.resource, &image)) {
@@ -3051,6 +3069,7 @@ private:
         int64_t yield_us = 0;
         size_t text_items = 0;
         size_t image_items = 0;
+        const bool center_image = is_single_image_page(page);
         (void)w;
         int x = content_x();
         int y = content_y();
@@ -3187,7 +3206,9 @@ private:
                               item.width > 0 ? item.width : content_width(),
                               item.height, &draw_w, &draw_h, &scale);
                 int draw_x = x + std::max(0, (content_width() - draw_w) / 2);
-                int draw_y = y + std::max(0, (item.height - draw_h) / 2);
+                int draw_y = center_image
+                    ? content_y() + std::max(0, (content_height() - draw_h) / 2)
+                    : y + std::max(0, (item.height - draw_h) / 2);
                 ImageDrawStats draw_stats;
                 const std::string resolved = g_epub.normalize_resource_href(item.resource);
                 load_stats.memory_cache_hit = _prefetched_image_href == resolved &&

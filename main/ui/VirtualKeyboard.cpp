@@ -1,6 +1,7 @@
 #include "ui/VirtualKeyboard.h"
 
 #include "ui/SystemFont.h"
+#include "ui/TextCursorView.h"
 #include "ui/UiLocale.h"
 #include "ui/Utf8Text.h"
 
@@ -20,6 +21,7 @@ VirtualKeyboard::VirtualKeyboard(size_t max_length, const VirtualKeyboardLayout 
 void VirtualKeyboard::reset()
 {
     _text.clear();
+    _cursor = 0;
     _show_secret = false;
     _upper = false;
     _symbols = false;
@@ -60,6 +62,7 @@ void VirtualKeyboard::set_submit_visible(bool visible)
 void VirtualKeyboard::set_text(const std::string &text)
 {
     _text = utf8::truncate_bytes(text, _max_length);
+    _cursor = _text.size();
 }
 
 const std::string &VirtualKeyboard::text() const
@@ -74,7 +77,25 @@ bool VirtualKeyboard::empty() const
 
 bool VirtualKeyboard::erase_last()
 {
-    return utf8::erase_last(&_text);
+    return utf8::erase_before(&_text, &_cursor);
+}
+
+size_t VirtualKeyboard::cursor() const { return _cursor; }
+
+void VirtualKeyboard::set_cursor(size_t cursor)
+{
+    _cursor = std::min(cursor, _text.size());
+    while (_cursor > 0 && _cursor < _text.size() &&
+           (static_cast<unsigned char>(_text[_cursor]) & 0xC0) == 0x80) --_cursor;
+}
+
+bool VirtualKeyboard::move_cursor(int direction)
+{
+    const size_t next = direction < 0 ? utf8::previous_boundary(_text, _cursor)
+                                      : utf8::next_boundary(_text, _cursor);
+    if (next == _cursor) return false;
+    _cursor = next;
+    return true;
 }
 
 const char *VirtualKeyboard::row_text(int row) const
@@ -98,16 +119,16 @@ void VirtualKeyboard::draw_input(M5GFX &display) const
     display.drawRoundRect(pad, _layout.input_y, width - pad * 2,
                           _layout.input_height, 7, TFT_BLACK);
 
-    std::string visible;
-    if (!_secret || _show_secret) visible = _text;
-    else visible.assign(_text.size(), '*');
-    if (visible.empty()) visible = _placeholder;
     int action_width = _secret ? 140 : 28;
-    visible = system_font::ellipsize(visible, width - pad * 2 - action_width);
-    system_font::draw_left(display, visible, pad + 14,
-                           _layout.input_y + std::max(
-                               0, (_layout.input_height - system_font::line_height()) / 2),
-                           TFT_BLACK);
+    const int text_x = pad + 14;
+    const int text_y = _layout.input_y + std::max(
+        0, (_layout.input_height - system_font::line_height()) / 2);
+    const auto view = cursor_view(_text, _cursor, width - pad * 2 - action_width,
+                                  _secret && !_show_secret);
+    system_font::draw_left(display, _text.empty() ? _placeholder : view.label,
+                           text_x, text_y, TFT_BLACK);
+    display.fillRect(text_x + view.caret_x + 2, _layout.input_y + 10, 2,
+                     std::min(_layout.input_height - 20, system_font::line_height()), TFT_BLACK);
     if (_secret) {
         system_font::draw_right(display, ui_locale::text(_show_secret ? ui_locale::TextId::Hide : ui_locale::TextId::Show),
                                 width - pad - 14,
@@ -213,13 +234,25 @@ VirtualKeyboardAction VirtualKeyboard::handle_tap(int x, int y, int display_widt
     if (_secret && y >= _layout.input_y && y < _layout.input_y + _layout.input_height &&
         x > display_width - pad - 130) {
         _show_secret = !_show_secret;
-        return VirtualKeyboardAction::InputChanged;
+        return VirtualKeyboardAction::CursorMoved;
+    }
+    if (_input_visible && y >= _layout.input_y &&
+        y < _layout.input_y + _layout.input_height &&
+        x >= pad && x < display_width - pad) {
+        const int action_width = _secret ? 140 : 28;
+        const int text_x = pad + 14;
+        const auto view = cursor_view(_text, _cursor,
+                                     display_width - pad * 2 - action_width,
+                                     _secret && !_show_secret);
+        set_cursor(cursor_at_x(_text, view, x - text_x, _secret && !_show_secret));
+        return VirtualKeyboardAction::CursorMoved;
     }
 
     char value = '\0';
     if (character_at(x, y, display_width, &value)) {
         if (_text.size() >= _max_length) return VirtualKeyboardAction::LimitReached;
-        _text.push_back(value);
+        _text.insert(_cursor, 1, value);
+        ++_cursor;
         return VirtualKeyboardAction::InputChanged;
     }
 
@@ -240,7 +273,8 @@ VirtualKeyboardAction VirtualKeyboard::handle_tap(int x, int y, int display_widt
                 }
                 if (i == 2) {
                     if (_text.size() >= _max_length) return VirtualKeyboardAction::LimitReached;
-                    _text.push_back(' ');
+                    _text.insert(_cursor, 1, ' ');
+                    ++_cursor;
                     return VirtualKeyboardAction::InputChanged;
                 }
                 if (erase_last()) return VirtualKeyboardAction::InputChanged;

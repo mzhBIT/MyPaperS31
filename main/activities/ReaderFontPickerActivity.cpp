@@ -99,7 +99,7 @@ class FontPickerActivity : public Activity {
     {
         int w = M5.Display.width();
         int h = M5.Display.height();
-        int y0 = TOP_H + 8;
+        int y0 = TOP_H;
         int rows = std::max(1, (h - y0 - 12) / ROW_H);
         int max_scroll = std::max(0, (int)m_fonts.size() - rows);
         m_scroll = std::min(std::max(0, m_scroll), max_scroll);
@@ -137,7 +137,7 @@ class FontPickerActivity : public Activity {
 
     int hit_row(int y) const
     {
-        int y0 = TOP_H + 8;
+        int y0 = TOP_H;
         if (y < y0) return -1;
         int idx = m_scroll + (y - y0) / ROW_H;
         return idx >= 0 && idx < (int)m_fonts.size() ? idx : -1;

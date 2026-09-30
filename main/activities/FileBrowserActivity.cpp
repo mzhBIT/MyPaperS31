@@ -113,7 +113,7 @@ static void draw_topbar() {
 static void draw_list() {
     int w = M5.Display.width();
     int h = M5.Display.height();
-    int y0 = TOP_BAR_H + 5;
+    int y0 = TOP_BAR_H;
     int vis_rows = (h - y0) / ROW_H;
 
     // Clamp scroll
@@ -145,26 +145,6 @@ static void draw_list() {
         std::string label = e.is_dir ? (e.name + "/") : e.name;
         label = system_font::ellipsize(label, w - PAD - 86);
         system_font::draw_left(M5.Display, label, PAD + 12, ry + 14, sel ? TFT_WHITE : TFT_BLACK);
-    }
-
-    // Page up/down buttons on right edge + scrollbar + count
-    int bar_h = vis_rows * ROW_H;
-    int btn_w = 50, btn_h = 50;
-    int btn_up_y = y0 + 5;
-    int btn_dn_y = y0 + bar_h - btn_h - 5;
-
-    if (g_scroll > 0) {
-        // Up arrow (filled triangle)
-        M5.Display.fillTriangle(w - btn_w, btn_up_y,
-                                w - 10, btn_up_y,
-                                w - 10 - btn_w/2, btn_up_y + btn_h, TFT_BLACK);
-    }
-    int max_scroll2 = std::max(0, (int)g_entries.size() - vis_rows);
-    if (g_scroll < max_scroll2) {
-        // Down arrow
-        M5.Display.fillTriangle(w - btn_w, btn_dn_y + btn_h,
-                                w - 10, btn_dn_y + btn_h,
-                                w - 10 - btn_w/2, btn_dn_y, TFT_BLACK);
     }
 
     // Count indicator
@@ -227,7 +207,7 @@ static void go_up() {
 }
 
 static int hit_row(int ty) {
-    int y0 = TOP_BAR_H + 5;
+    int y0 = TOP_BAR_H;
     if (ty < y0 || ty > M5.Display.height()) return -1;
     int idx = (ty - y0) / ROW_H + g_scroll;
     return (idx < (int)g_entries.size()) ? idx : -1;
@@ -269,27 +249,13 @@ public:
         M5.Display.endWrite();
     }
 
-    bool hit_page_up(int tx, int ty) {
-        int bar_h = (M5.Display.height() - TOP_BAR_H - 5) / ROW_H * ROW_H;
-        int y0 = TOP_BAR_H + 5;
-        return (tx >= M5.Display.width() - 55 && tx <= M5.Display.width()
-                && ty >= y0 && ty <= y0 + bar_h / 2 && g_scroll > 0);
-    }
-    bool hit_page_dn(int tx, int ty) {
-        int bar_h = (M5.Display.height() - TOP_BAR_H - 5) / ROW_H * ROW_H;
-        int y0 = TOP_BAR_H + 5;
-        int max_sc = std::max(0, (int)g_entries.size() - (int)(bar_h / ROW_H));
-        return (tx >= M5.Display.width() - 55 && tx <= M5.Display.width()
-                && ty >= y0 + bar_h / 2 && ty <= y0 + bar_h && g_scroll < max_sc);
-    }
-
     std::string selected_path() const {
         if (g_focus < 0 || g_focus >= (int)g_entries.size()) return std::string();
         return g_path + "/" + g_entries[g_focus].name;
     }
 
     int visible_rows() const {
-        return (M5.Display.height() - TOP_BAR_H - 5) / ROW_H;
+        return (M5.Display.height() - TOP_BAR_H) / ROW_H;
     }
 
     void go_back_or_up() {
@@ -503,21 +469,10 @@ public:
 
     void begin_rename() {
         if (g_focus < 0 || g_focus >= (int)g_entries.size()) return;
-        const FsEntry entry = g_entries[g_focus];
         const std::string old_path = selected_path();
-        std::string stem = entry.name;
-        std::string suffix;
-        if (!entry.is_dir) {
-            size_t dot = stem.find_last_of('.');
-            if (dot != std::string::npos && dot > 0) {
-                suffix = stem.substr(dot);
-                stem.erase(dot);
-            }
-        }
         TextInputOptions options;
         options.title = ui_locale::text(ui_locale::TextId::Rename);
-        options.initial_text = stem;
-        options.fixed_suffix = suffix;
+        options.initial_text = g_entries[g_focus].name;
         options.submit_label = ui_locale::text(ui_locale::TextId::Rename);
         options.max_bytes = 255;
         options.start_in_chinese = true;
@@ -646,7 +601,7 @@ public:
             load_dir(g_path);
             if (!g_entries.empty()) {
                 g_focus = std::min(old_focus, (int)g_entries.size() - 1);
-                int vis_rows = (M5.Display.height() - TOP_BAR_H - 5) / ROW_H;
+                int vis_rows = (M5.Display.height() - TOP_BAR_H) / ROW_H;
                 if (g_focus < g_scroll) g_scroll = g_focus;
                 if (g_focus >= g_scroll + vis_rows) g_scroll = std::max(0, g_focus - vis_rows + 1);
             }
@@ -711,15 +666,6 @@ public:
                 go_back_or_up();
                 return true;
             }
-            if (hit_page_up(event.x, event.y)) {
-                page_up();
-                return true;
-            }
-            if (hit_page_dn(event.x, event.y)) {
-                page_down();
-                return true;
-            }
-
             int idx = hit_row(event.y);
 
             if (idx >= 0) {

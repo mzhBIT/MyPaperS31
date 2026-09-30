@@ -36,12 +36,12 @@ namespace {
 
 constexpr const char *TAG = "WEREAD_UI";
 constexpr int HEADER_H = 76;
-constexpr int LIST_TOP = 92;
+constexpr int LIST_TOP = HEADER_H;
 constexpr int LIST_BOTTOM = 1124;
 constexpr int LIST_ROWS = 5;
 constexpr int LIST_ROW_H = (LIST_BOTTOM - LIST_TOP) / LIST_ROWS;
 constexpr int FOOTER_Y = 1138;
-constexpr int REVIEW_TABS_TOP = 88;
+constexpr int REVIEW_TABS_TOP = HEADER_H;
 constexpr int REVIEW_TABS_H = 72;
 constexpr int REVIEW_LIST_TOP = REVIEW_TABS_TOP + REVIEW_TABS_H + 12;
 constexpr int REVIEW_ROWS = 4;
