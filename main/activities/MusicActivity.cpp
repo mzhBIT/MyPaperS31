@@ -527,7 +527,9 @@ private:
         esp_err_t ret = audio_radio_play_file(_tracks[index].path.c_str());
         if (ret == ESP_OK) {
             _current = index;
-            _view = ContentView::Cover;
+            // Selecting a song from the list opens playback, but track changes
+            // must preserve the user's cover/lyrics view (including auto-next).
+            if (_view == ContentView::List) _view = ContentView::Cover;
             _terminal_handled = false;
             _status.clear();
             if (_play_mode == PlayMode::Shuffle && !keep_shuffle_order) {
