@@ -223,7 +223,7 @@ public:
         } else {
             _streaming_active = false;
             _status = event->result.canceled ? ui_locale::text(ui_locale::TextId::Canceled)
-                                              : event->result.error;
+                                              : ui_locale::localize_message(event->result.error);
         }
         preserve_line_start(preserved_start);
         draw_chat(false);
@@ -893,7 +893,7 @@ private:
             draw_chat(false);
             return;
         }
-        const std::string prompt = question.empty() ? "Describe this image." : question;
+        const std::string prompt = question.empty() ? ui_locale::text(ui_locale::TextId::DescribeImagePrompt) : question;
         if (_session.id.empty() &&
             !_store.create(_session.model, _session.thinking, &_session)) {
             _status = ui_locale::text(ui_locale::TextId::SessionCreateFailed);

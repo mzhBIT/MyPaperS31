@@ -92,6 +92,8 @@ set(srcs
     "parser/epub_html.cpp"
     "parser/mobi_parser.cpp"
     "parser/markdown_parser.cpp"
+    "parser/docx_parser.cpp"
+    "parser/comic_zip.cpp"
     "parser/reflow_book.cpp")
 
 idf_component_register(SRCS ${srcs}

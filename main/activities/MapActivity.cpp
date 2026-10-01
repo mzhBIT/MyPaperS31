@@ -75,7 +75,7 @@ std::string localized_map_error(const std::string &error)
             return std::string(ui_locale::text(entry.id)) + error.substr(prefix.size());
         }
     }
-    return error;
+    return ui_locale::localize_message(error);
 }
 
 class MapActivity final : public Activity {

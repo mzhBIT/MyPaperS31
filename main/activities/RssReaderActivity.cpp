@@ -1027,7 +1027,7 @@ static bool parse_bing_wallpaper_items(const std::string &json, std::vector<RssI
         std::string date = json_string_value_utf8(obj, "startdate");
         if (!full_url.empty()) {
             RssItem item;
-            item.title = title.empty() ? "Bing Wallpaper" : title;
+        item.title = title.empty() ? ui_locale::text(ui_locale::TextId::FeedBingWallpaper) : title;
             item.date = bing_date_text(date);
             item.text = copyright.empty() ? item.title : copyright;
             item.link = json_string_value_utf8(obj, "copyrightlink");
@@ -1063,13 +1063,13 @@ static void load_feeds()
         std::fclose(fp);
     }
     if (g_feeds.empty()) {
-        g_feeds.push_back({"IT Home", "https://www.ithome.com/rss"});
-        g_feeds.push_back({"Zaobao China", "https://plink.anyfeeder.com/zaobao/realtime/china"});
-        g_feeds.push_back({"Zaobao World", "https://plink.anyfeeder.com/zaobao/realtime/world"});
-        g_feeds.push_back({"The Paper", "https://plink.anyfeeder.com/thepaper"});
-        g_feeds.push_back({"Fortune China", "https://plink.anyfeeder.com/fortunechina"});
-        g_feeds.push_back({"Bing Wallpaper", "https://rsshub.app/bing"});
-        g_feeds.push_back({"Wallstreetcn Global", "https://feed.wallstreetcn.com/wallstreetcn/news/global"});
+        g_feeds.push_back({ui_locale::text(ui_locale::TextId::FeedItHome), "https://www.ithome.com/rss"});
+        g_feeds.push_back({ui_locale::text(ui_locale::TextId::FeedZaobaoChina), "https://plink.anyfeeder.com/zaobao/realtime/china"});
+        g_feeds.push_back({ui_locale::text(ui_locale::TextId::FeedZaobaoWorld), "https://plink.anyfeeder.com/zaobao/realtime/world"});
+        g_feeds.push_back({ui_locale::text(ui_locale::TextId::FeedThePaper), "https://plink.anyfeeder.com/thepaper"});
+        g_feeds.push_back({ui_locale::text(ui_locale::TextId::FeedFortuneChina), "https://plink.anyfeeder.com/fortunechina"});
+        g_feeds.push_back({ui_locale::text(ui_locale::TextId::FeedBingWallpaper), "https://rsshub.app/bing"});
+        g_feeds.push_back({ui_locale::text(ui_locale::TextId::FeedWallstreetcn), "https://feed.wallstreetcn.com/wallstreetcn/news/global"});
     }
 }
 

@@ -9,6 +9,8 @@
 #include <strings.h>
 #include <sys/stat.h>
 #include <vector>
+#include <esp_timer.h>
+#include <esp_log.h>
 
 static constexpr size_t RECENT_BOOK_LIMIT = 20;
 static constexpr uint32_t TXT_PROGRESS_MAGIC = 0x54585032; // TXP2
@@ -44,6 +46,86 @@ static std::string recent_book_progress_key(const char *path)
     char key[32];
     std::snprintf(key, sizeof(key), "%08lx", (unsigned long)hash);
     return key;
+}
+
+static std::string reading_time_path(const char *path)
+{
+    return std::string(app_paths::data_dir()) + "/reading_time/" +
+           recent_book_progress_key(path) + ".time";
+}
+
+static uint64_t load_reading_time(const char *path)
+{
+    const std::string file = reading_time_path(path);
+    // A backup remains recoverable if power was lost during replacement.
+    for (const std::string &candidate : {file, file + ".bak"}) {
+        FILE *fp = std::fopen(candidate.c_str(), "rb");
+        if (!fp) continue;
+        uint32_t magic = 0;
+        uint64_t elapsed = 0;
+        const bool ok = std::fread(&magic, sizeof(magic), 1, fp) == 1 &&
+                        std::fread(&elapsed, sizeof(elapsed), 1, fp) == 1 &&
+                        magic == 0x42525431; // BRT1, elapsed microseconds
+        std::fclose(fp);
+        if (ok) return elapsed;
+    }
+    return 0;
+}
+
+void BookReadingTimer::configure(const char *path)
+{
+    path_ = path ? path : "";
+    elapsed_us_ = 0;
+    started_us_ = -1;
+}
+
+void BookReadingTimer::resume()
+{
+    if (!path_.empty() && started_us_ < 0) started_us_ = esp_timer_get_time();
+}
+
+void BookReadingTimer::pause()
+{
+    if (started_us_ < 0) return;
+    elapsed_us_ += static_cast<uint64_t>(esp_timer_get_time() - started_us_);
+    started_us_ = -1;
+}
+
+void BookReadingTimer::finish()
+{
+    pause();
+    if (path_.empty() || !elapsed_us_) return;
+    const uint64_t total = load_reading_time(path_.c_str()) + elapsed_us_;
+    const std::string dir = std::string(app_paths::data_dir()) + "/reading_time";
+    app_paths::ensure_dir(dir.c_str());
+    const std::string file = reading_time_path(path_.c_str());
+    const std::string temp = file + ".tmp", backup = file + ".bak";
+    FILE *fp = std::fopen(temp.c_str(), "wb");
+    bool ok = false;
+    if (fp) {
+        const uint32_t magic = 0x42525431;
+        ok = std::fwrite(&magic, sizeof(magic), 1, fp) == 1 &&
+             std::fwrite(&total, sizeof(total), 1, fp) == 1;
+        if (std::fclose(fp) != 0) ok = false;
+    }
+    if (ok) {
+        struct stat st = {};
+        if (stat(file.c_str(), &st) == 0) {
+            std::remove(backup.c_str());
+            ok = std::rename(file.c_str(), backup.c_str()) == 0;
+        }
+        if (ok) ok = std::rename(temp.c_str(), file.c_str()) == 0;
+        if (ok) std::remove(backup.c_str());
+    }
+    if (ok) {
+        ESP_LOGI("READING_TIME", "saved total=%llu s session=%llu s",
+                 (unsigned long long)(total / 1000000),
+                 (unsigned long long)(elapsed_us_ / 1000000));
+        elapsed_us_ = 0;
+    } else {
+        ESP_LOGW("READING_TIME", "save failed: %s", file.c_str());
+        std::remove(temp.c_str());
+    }
 }
 
 static int txt_progress_percent(const char *path)
@@ -203,18 +285,26 @@ static RecentBookProgress fb2_progress(const char *path)
                               FB2_PROGRESS_MAGIC, FB2_PROGRESS_VERSION);
 }
 
-RecentBookProgress recent_book_progress(const RecentBook &book)
+static RecentBookProgress load_book_progress(const RecentBook &book)
 {
     if (strcasecmp(book.type.c_str(), "epub") == 0) {
         return epub_progress(book.path.c_str());
     }
     if (strcasecmp(book.type.c_str(), "mobi") == 0) return mobi_progress(book.path.c_str());
     if (strcasecmp(book.type.c_str(), "fb2") == 0) return fb2_progress(book.path.c_str());
-    if (strcasecmp(book.type.c_str(), "markdown") == 0) {
+    if (strcasecmp(book.type.c_str(), "markdown") == 0 || strcasecmp(book.type.c_str(), "docx") == 0 ||
+        strcasecmp(book.type.c_str(), "comic") == 0) {
         return generic_reflow_progress(book.path.c_str());
     }
     RecentBookProgress result;
     result.percent = txt_progress_percent(book.path.c_str());
+    return result;
+}
+
+RecentBookProgress recent_book_progress(const RecentBook &book)
+{
+    RecentBookProgress result = load_book_progress(book);
+    result.reading_seconds = load_reading_time(book.path.c_str()) / 1000000;
     return result;
 }
 
@@ -256,6 +346,8 @@ static void normalize_book(RecentBook *book)
         else if (dot && (strcasecmp(dot, ".mobi") == 0 || strcasecmp(dot, ".prc") == 0 ||
                          strcasecmp(dot, ".azw") == 0 || strcasecmp(dot, ".azw3") == 0)) book->type = "mobi";
         else if (dot && strcasecmp(dot, ".fb2") == 0) book->type = "fb2";
+        else if (dot && strcasecmp(dot, ".docx") == 0) book->type = "docx";
+        else if (dot && (strcasecmp(dot, ".zip") == 0 || strcasecmp(dot, ".cbz") == 0)) book->type = "comic";
         else if (dot && (strcasecmp(dot, ".md") == 0 || strcasecmp(dot, ".markdown") == 0)) book->type = "markdown";
         else book->type = "txt";
     }
@@ -266,7 +358,9 @@ static void normalize_book(RecentBook *book)
     if (strcasecmp(book->type.c_str(), "epub") == 0 ||
         strcasecmp(book->type.c_str(), "mobi") == 0 ||
         strcasecmp(book->type.c_str(), "fb2") == 0 ||
-        strcasecmp(book->type.c_str(), "markdown") == 0 || book->title.empty()) {
+        strcasecmp(book->type.c_str(), "markdown") == 0 ||
+        strcasecmp(book->type.c_str(), "docx") == 0 ||
+        strcasecmp(book->type.c_str(), "comic") == 0 || book->title.empty()) {
         book->title = recent_book_file_stem(book->path.c_str());
     }
 }
@@ -339,7 +433,8 @@ bool recent_book_save(const char *path, const char *type, const char *title, con
     current.path = path;
     current.type = type;
     bool packaged_book = strcasecmp(type, "epub") == 0 || strcasecmp(type, "mobi") == 0 ||
-                           strcasecmp(type, "fb2") == 0;
+                           strcasecmp(type, "fb2") == 0 || strcasecmp(type, "docx") == 0 ||
+                           strcasecmp(type, "comic") == 0;
     current.title = packaged_book
                         ? recent_book_file_stem(path)
                         : ((title && title[0]) ? title : recent_book_base_name(path));
@@ -384,6 +479,20 @@ bool recent_book_save(const char *path, const char *type, const char *title, con
 bool recent_books_rename_path(const char *old_path, const char *new_path)
 {
     if (!old_path || !old_path[0] || !new_path || !new_path[0]) return false;
+    // Timing survives renames even when the book has fallen out of the shelf.
+    if (std::strcmp(old_path, new_path) != 0) {
+        for (const char *suffix : {"", ".bak"}) {
+            const std::string old_time = reading_time_path(old_path) + suffix;
+            const std::string new_time = reading_time_path(new_path) + suffix;
+            struct stat source = {}, destination = {};
+            if (stat(old_time.c_str(), &source) == 0 &&
+                stat(new_time.c_str(), &destination) != 0 &&
+                std::rename(old_time.c_str(), new_time.c_str()) != 0) {
+                ESP_LOGW("READING_TIME", "rename failed: %s", old_time.c_str());
+                return false;
+            }
+        }
+    }
     FILE *fp = std::fopen(app_paths::recent_books_file(), "rb");
     if (!fp) return true;  // No shelf state to migrate.
 

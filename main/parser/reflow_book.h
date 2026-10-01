@@ -2,6 +2,8 @@
 
 #include "parser/epub_parser.h"
 #include "parser/fb2_parser.h"
+#include "parser/docx_parser.h"
+#include "parser/comic_zip.h"
 #include "parser/mobi_parser.h"
 #include "weread/WereadApi.h"
 
@@ -25,7 +27,7 @@ struct ReflowTocItem {
 
 class ReflowBook {
 public:
-    enum class Format { None, Epub, Mobi, Fb2, Markdown, Weread };
+    enum class Format { None, Epub, Mobi, Fb2, Markdown, Weread, Docx, ComicZip };
 
     std::string title;
 
@@ -34,12 +36,18 @@ public:
     Format format() const { return _format; }
     bool is_mobi() const { return _format == Format::Mobi; }
     bool is_fb2() const { return _format == Format::Fb2; }
+    bool is_docx() const { return _format == Format::Docx; }
+    bool is_comic_zip() const { return _format == Format::ComicZip; }
     bool is_markdown() const { return _format == Format::Markdown; }
     bool is_weread() const { return _format == Format::Weread; }
     const char *type_name() const {
+        if (is_docx()) return "docx";
+        if (is_comic_zip()) return "comic";
         return is_weread() ? "weread" : (is_mobi() ? "mobi" : (is_fb2() ? "fb2" : (is_markdown() ? "markdown" : "epub")));
     }
     const char *display_name() const {
+        if (is_docx()) return "DOCX";
+        if (is_comic_zip()) return "ZIP/CBZ";
         return is_weread() ? "WeRead" : (is_mobi() ? "MOBI" : (is_fb2() ? "FB2" : (is_markdown() ? "Markdown" : "EPUB")));
     }
     const std::string &last_error() const { return _last_error; }
@@ -74,6 +82,8 @@ private:
     EpubBook _epub;
     MobiBook _mobi;
     Fb2Book _fb2;
+    DocxBook _docx;
+    ComicZip _comic;
     EpubBook _weread_epub;
     weread::Book _weread_book;
     std::vector<weread::Chapter> _weread_chapters;

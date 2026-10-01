@@ -715,7 +715,7 @@ bool TextInputOverlay::handle_touch(const TouchEvent &event)
             _impl->draw();
             return true;
         case VirtualKeyboardAction::LimitReached:
-            _impl->message = "Text is too long";
+            _impl->message = ui_locale::text(ui_locale::TextId::TextTooLong);
             _impl->draw();
             return true;
         case VirtualKeyboardAction::None:

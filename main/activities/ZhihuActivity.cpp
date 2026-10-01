@@ -272,7 +272,7 @@ private:
         draw_header();
         if (!_result.success) {
             const std::string message = _result.error.empty() ? ui_locale::text(ui_locale::TextId::HotListLoadFailed)
-                                                               : _result.error;
+                                                               : ui_locale::localize_message(_result.error);
             system_font::draw_center(M5.Display,
                                      system_font::ellipsize(message, M5.Display.width() - 50),
                                      M5.Display.width() / 2, 390, TFT_BLACK);

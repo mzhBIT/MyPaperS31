@@ -56,6 +56,7 @@ struct EpubContentBlock {
 bool epub_parse_xhtml_text_blocks(const std::string &xhtml, std::vector<EpubTextBlock> *blocks);
 bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_href,
                              std::vector<EpubContentBlock> *blocks,
-                             bool inline_sup_annotations = false);
+                             bool inline_sup_annotations = false,
+                             bool preserve_inline_styles = false);
 bool epub_resolve_footnote(const std::string &xhtml, const std::string &item_href,
                            const std::string &target, std::string *content);

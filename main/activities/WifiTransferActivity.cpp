@@ -42,54 +42,6 @@ static const size_t UPLOAD_BUFFER_BYTES = 64 * 1024;
 static const size_t FILE_WRITE_BUFFER_BYTES = 64 * 1024;
 static const size_t UPLOAD_LOG_INTERVAL_BYTES = 1024 * 1024;
 
-static const char INDEX_HTML[] =
-    "<!doctype html><html><head><meta charset='utf-8'>"
-    "<meta name='viewport' content='width=device-width,initial-scale=1'>"
-    "<title>MyPaperP4 Transfer</title>"
-    "<style>"
-    "body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:24px;max-width:720px;color:#111}"
-    "h1{font-size:26px;margin:0 0 16px}.box{border:1px solid #bbb;padding:16px;margin:14px 0}"
-    "label{display:block;margin:12px 0 6px;font-weight:600}input,button{font-size:16px;width:100%;box-sizing:border-box}"
-    "button{margin-top:14px;padding:12px;background:#111;color:white;border:0}.muted{color:#666;font-size:14px}"
-    "progress{width:100%;height:18px}pre{white-space:pre-wrap;background:#f3f3f3;padding:12px}"
-    "</style></head><body>"
-    "<h1>MyPaperP4 WiFi Transfer</h1>"
-    "<div class='box'>"
-    "<div class='muted'>Choose any supported files. They will be sorted into books, images, fonts, or music automatically.</div>"
-    "<label>Files</label><input id='files' type='file' multiple "
-    "accept='.txt,.md,.markdown,.epub,.mobi,.prc,.azw,.azw3,.fb2,.bmp,.png,.jpg,.jpeg,.ttf,.otf,.bin," AUDIO_FILE_ACCEPT_EXTENSIONS "'>"
-    "<button onclick='upload()'>Upload</button>"
-    "<p><progress id='bar' value='0' max='100'></progress></p>"
-    "<pre id='log'>Ready.</pre>"
-    "</div>"
-    "<script>"
-    "const log=t=>document.getElementById('log').textContent=t;"
-    "function sendFile(f,onp){return new Promise((resolve)=>{"
-    " const xhr=new XMLHttpRequest();"
-    " xhr.open('POST','/upload?name='+encodeURIComponent(f.name));"
-    " xhr.upload.onprogress=e=>{if(e.lengthComputable)onp(e.loaded,e.total);};"
-    " xhr.onload=()=>resolve({ok:xhr.status>=200&&xhr.status<300,text:xhr.responseText,status:xhr.status});"
-    " xhr.onerror=()=>resolve({ok:false,text:'Network error',status:0});"
-    " xhr.send(f);"
-    "});}"
-    "async function upload(){"
-    " const files=[...document.getElementById('files').files];"
-    " const bar=document.getElementById('bar');"
-    " if(!files.length){log('Choose at least one file.');return;}"
-    " let out='';"
-    " for(let i=0;i<files.length;i++){"
-    "  const f=files[i]; bar.value=Math.round(i*100/files.length);"
-    "  out+='Uploading '+f.name+'...\\n'; log(out);"
-    "  const r=await sendFile(f,(loaded,total)=>{"
-    "   const filePct=total?loaded/total:0;"
-    "   bar.value=Math.round(((i+filePct)*100)/files.length);"
-    "   log(out+'Progress '+Math.round(filePct*100)+'% ('+loaded+'/'+total+')');"
-    "  });"
-    "  out+=(r.ok?'OK: ':'ERR '+r.status+': ')+r.text+'\\n'; log(out);"
-    " }"
-    " bar.value=100;"
-    "}"
-    "</script></body></html>";
 
 static const char FILE_MANAGER_HTML[] = R"HTML(<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -101,26 +53,29 @@ button.alt{background:#fff;color:#111;border:1px solid #777}.muted{color:#666;fo
 pre{white-space:pre-wrap;background:#f3f3f3;padding:12px}.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
 .toolbar button{width:auto}.path{font-family:monospace;overflow-wrap:anywhere}.row{display:grid;grid-template-columns:1fr auto;gap:8px;padding:10px 2px;border-top:1px solid #ddd;align-items:center}
 .actions{display:flex;gap:6px}.actions button{padding:6px 9px}.hidden{display:none}.upload{padding:10px;background:#111;color:#fff;border-radius:3px;cursor:pointer}
-</style></head><body><h1>MyPaperP4 WiFi Transfer</h1>
-<div class="tabs"><button onclick="tab('smart')">Smart upload</button><button class="alt" onclick="tab('manager')">SD file manager</button></div>
-<section id="smart" class="box"><div class="muted">Supported files are sorted into books, images, fonts, music, or the input-method directory automatically.</div>
-<p><input id="smartFiles" type="file" multiple></p><button onclick="uploadFiles('smartFiles','')">Upload and sort</button></section>
+</style></head><body><h1>MyPaperP4 <span data-i18n="WifiTransfer"></span></h1>
+<div class="tabs"><button onclick="tab('smart')" data-i18n="WebSmartUpload"></button><button class="alt" onclick="tab('manager')" data-i18n="WebFileManager"></button></div>
+<section id="smart" class="box"><div class="muted" data-i18n="WebSortHint"></div>
+<p><input id="smartFiles" type="file" multiple></p><button onclick="uploadFiles('smartFiles','')" data-i18n="WebUploadSort"></button></section>
 <section id="manager" class="box hidden"><div class="path" id="path">/</div><div class="toolbar">
-<button onclick="up()">Up</button><button onclick="reload()">Refresh</button><button onclick="mkdirPrompt()">New folder</button>
-<label class="upload">Upload here<input id="directFiles" type="file" multiple class="hidden" onchange="uploadFiles('directFiles',currentPath)"></label></div>
-<div id="entries">Loading...</div></section>
-<p><progress id="bar" value="0" max="100"></progress></p><pre id="log">Ready.</pre>
+<button onclick="up()" data-i18n="WebUp"></button><button onclick="reload()" data-i18n="WebRefresh"></button><button onclick="mkdirPrompt()" data-i18n="WebNewFolder"></button>
+<label class="upload"><span data-i18n="WebUploadHere"></span><input id="directFiles" type="file" multiple class="hidden" onchange="uploadFiles('directFiles',currentPath)"></label></div>
+<div id="entries" data-i18n="WebLoading"></div></section>
+<p><progress id="bar" value="0" max="100"></progress></p><pre id="log" data-i18n="WebReady"></pre>
 <script>
+const translations=__UI_LOCALE__;const t=key=>translations[key]||key;
+document.documentElement.lang=translations.lang;document.title='MyPaperP4 '+t('WifiTransfer');
+document.querySelectorAll('[data-i18n]').forEach(el=>el.textContent=t(el.dataset.i18n));
 let currentPath='/';const $=id=>document.getElementById(id);const log=t=>$('log').textContent=t;
 function tab(id){$('smart').classList.toggle('hidden',id!=='smart');$('manager').classList.toggle('hidden',id!=='manager');if(id==='manager')reload()}
 function request(method,url){return fetch(url,{method}).then(async r=>({ok:r.ok,status:r.status,text:await r.text()}))}
-function sendFile(f,path,onp){return new Promise(resolve=>{const x=new XMLHttpRequest();let u='/upload?name='+encodeURIComponent(f.name);if(path)u+='&path='+encodeURIComponent(path);x.open('POST',u);x.upload.onprogress=e=>{if(e.lengthComputable)onp(e.loaded,e.total)};x.onload=()=>resolve({ok:x.status>=200&&x.status<300,text:x.responseText,status:x.status});x.onerror=()=>resolve({ok:false,text:'Network error',status:0});x.send(f)})}
-async function uploadFiles(id,path){const files=[...$(id).files];if(!files.length)return;let out='';for(let i=0;i<files.length;i++){const f=files[i];out+='Uploading '+f.name+'...\n';log(out);const r=await sendFile(f,path,(n,total)=>{$('bar').value=Math.round(((i+n/total)*100)/files.length)});out+=(r.ok?'OK: ':'ERR '+r.status+': ')+r.text+'\n';log(out)}$('bar').value=100;$(id).value='';if(path)reload()}
+function sendFile(f,path,onp){return new Promise(resolve=>{const x=new XMLHttpRequest();let u='/upload?name='+encodeURIComponent(f.name);if(path)u+='&path='+encodeURIComponent(path);x.open('POST',u);x.upload.onprogress=e=>{if(e.lengthComputable)onp(e.loaded,e.total)};x.onload=()=>resolve({ok:x.status>=200&&x.status<300,text:x.responseText,status:x.status});x.onerror=()=>resolve({ok:false,text:t('WebNetworkError'),status:0});x.send(f)})}
+async function uploadFiles(id,path){const files=[...$(id).files];if(!files.length)return;let out='';for(let i=0;i<files.length;i++){const f=files[i];out+=t('WebUploading')+f.name+'...\n';log(out);const r=await sendFile(f,path,(n,total)=>{$('bar').value=Math.round(((i+n/total)*100)/files.length)});out+=(r.ok?t('WebOk'):t('WebError')+' '+r.status+': ')+r.text+'\n';log(out)}$('bar').value=100;$(id).value='';if(path)reload()}
 function join(p,n){return p==='/'?'/'+n:p+'/'+n}function up(){if(currentPath==='/')return;currentPath=currentPath.slice(0,currentPath.lastIndexOf('/'))||'/';reload()}
 function btn(text,fn,alt=true){const b=document.createElement('button');b.textContent=text;if(alt)b.className='alt';b.onclick=fn;return b}
-async function reload(){const r=await fetch('/api/list?path='+encodeURIComponent(currentPath));if(!r.ok){log(await r.text());return}const data=await r.json();currentPath=data.path;$('path').textContent=currentPath;const box=$('entries');box.textContent='';for(const e of data.entries){const row=document.createElement('div');row.className='row';const name=document.createElement(e.dir?'button':'span');name.textContent=(e.dir?'DIR  ':'')+e.name;if(e.dir){name.className='alt';name.onclick=()=>{currentPath=join(currentPath,e.name);reload()}}const acts=document.createElement('div');acts.className='actions';if(!e.dir)acts.appendChild(btn('Download',()=>location.href='/download?path='+encodeURIComponent(join(currentPath,e.name))));acts.appendChild(btn('Rename',()=>renamePrompt(e.name)));acts.appendChild(btn('Delete',()=>removeEntry(e.name)));row.append(name,acts);box.appendChild(row)}if(!data.entries.length)box.textContent='Empty directory'}
-async function action(op,path,name=''){let u='/api/action?op='+op+'&path='+encodeURIComponent(path);if(name)u+='&name='+encodeURIComponent(name);const r=await request('POST',u);log((r.ok?'OK: ':'ERR: ')+r.text);if(r.ok)reload()}
-function mkdirPrompt(){const n=prompt('Folder name');if(n)action('mkdir',currentPath,n)}function renamePrompt(old){const n=prompt('New name',old);if(n&&n!==old)action('rename',join(currentPath,old),n)}function removeEntry(n){if(confirm('Delete '+n+'?'))action('delete',join(currentPath,n))}
+async function reload(){const r=await fetch('/api/list?path='+encodeURIComponent(currentPath));if(!r.ok){log(await r.text());return}const data=await r.json();currentPath=data.path;$('path').textContent=currentPath;const box=$('entries');box.textContent='';for(const e of data.entries){const row=document.createElement('div');row.className='row';const name=document.createElement(e.dir?'button':'span');name.textContent=(e.dir?t('WebDir'):'')+e.name;if(e.dir){name.className='alt';name.onclick=()=>{currentPath=join(currentPath,e.name);reload()}}const acts=document.createElement('div');acts.className='actions';if(!e.dir)acts.appendChild(btn(t('WebDownload'),()=>location.href='/download?path='+encodeURIComponent(join(currentPath,e.name))));acts.appendChild(btn(t('Rename'),()=>renamePrompt(e.name)));acts.appendChild(btn(t('Delete'),()=>removeEntry(e.name)));row.append(name,acts);box.appendChild(row)}if(!data.entries.length)box.textContent=t('WebEmptyDirectory')}
+async function action(op,path,name=''){let u='/api/action?op='+op+'&path='+encodeURIComponent(path);if(name)u+='&name='+encodeURIComponent(name);const r=await request('POST',u);log((r.ok?t('WebOk'):t('WebError')+': ')+r.text);if(r.ok)reload()}
+function mkdirPrompt(){const n=prompt(t('WebFolderName'));if(n)action('mkdir',currentPath,n)}function renamePrompt(old){const n=prompt(t('WebNewName'),old);if(n&&n!==old)action('rename',join(currentPath,old),n)}function removeEntry(n){if(confirm(t('WebDeletePrefix')+n+'?'))action('delete',join(currentPath,n))}
 </script></body></html>)HTML";
 
 static bool has_ext_ci(const std::string &name, const char *ext)
@@ -313,7 +268,8 @@ static const char *upload_dir_for_name(const std::string &name)
     if (has_ext_ci(name, ".txt") || has_ext_ci(name, ".md") ||
         has_ext_ci(name, ".markdown") || has_ext_ci(name, ".epub") ||
         has_ext_ci(name, ".mobi") || has_ext_ci(name, ".prc") || has_ext_ci(name, ".azw") ||
-        has_ext_ci(name, ".azw3") || has_ext_ci(name, ".fb2")) {
+        has_ext_ci(name, ".azw3") || has_ext_ci(name, ".fb2") || has_ext_ci(name, ".docx") ||
+        has_ext_ci(name, ".zip") || has_ext_ci(name, ".cbz")) {
         return "/sdcard/books";
     }
     if (has_ext_ci(name, ".bmp") || has_ext_ci(name, ".png") ||
@@ -393,7 +349,7 @@ private:
     bool _ap_mode = true;
     std::string _network_name;
     char _ip[24] = "192.168.4.1";
-    char _last_name[96] = "No uploads yet";
+    char _last_name[96] = {};
     size_t _last_bytes = 0;
     bool _last_ok = true;
     bool _starting = false;
@@ -731,7 +687,7 @@ private:
             y += 8;
             draw_line(ui_locale::text(_last_ok ? ui_locale::TextId::LastUpload
                                                : ui_locale::TextId::UploadError));
-            std::string last = _last_name;
+            std::string last = _last_name[0] ? _last_name : ui_locale::text(ui_locale::TextId::NoUploadsYet);
             if (last.size() > 20) last = last.substr(0, 17) + "...";
             draw_line(last);
             char bytes[48];
@@ -754,7 +710,46 @@ private:
     static esp_err_t handle_index(httpd_req_t *req)
     {
         httpd_resp_set_type(req, "text/html; charset=utf-8");
-        return httpd_resp_send(req, FILE_MANAGER_HTML, HTTPD_RESP_USE_STRLEN);
+        using ui_locale::TextId;
+        struct WebText { const char *key; TextId id; };
+        static constexpr WebText labels[] = {
+            {"WifiTransfer", TextId::WifiTransfer},
+            {"WebSmartUpload", TextId::WebSmartUpload},
+            {"WebFileManager", TextId::WebFileManager},
+            {"WebSortHint", TextId::WebSortHint},
+            {"WebUploadSort", TextId::WebUploadSort},
+            {"WebUp", TextId::WebUp},
+            {"WebRefresh", TextId::WebRefresh},
+            {"WebNewFolder", TextId::WebNewFolder},
+            {"WebUploadHere", TextId::WebUploadHere},
+            {"WebLoading", TextId::WebLoading},
+            {"WebReady", TextId::WebReady},
+            {"WebNetworkError", TextId::WebNetworkError},
+            {"WebUploading", TextId::WebUploading},
+            {"WebOk", TextId::WebOk},
+            {"WebError", TextId::WebError},
+            {"WebDir", TextId::WebDir},
+            {"WebDownload", TextId::WebDownload},
+            {"WebEmptyDirectory", TextId::WebEmptyDirectory},
+            {"WebFolderName", TextId::WebFolderName},
+            {"WebNewName", TextId::WebNewName},
+            {"WebDeletePrefix", TextId::WebDeletePrefix},
+            {"Rename", TextId::Rename},
+            {"Delete", TextId::Delete},
+        };
+        const char *language = ui_locale::get() == ui_locale::Language::SimplifiedChinese ? "zh-Hans"
+                             : ui_locale::get() == ui_locale::Language::TraditionalChinese ? "zh-Hant" : "en";
+        std::string translations = std::string("{\"lang\":\"") + language + "\"";
+        for (const auto &label : labels) {
+            translations += std::string(",\"") + label.key + "\":\"" +
+                            json_escape(ui_locale::text(label.id)) + "\"";
+        }
+        translations += "}";
+        std::string page = FILE_MANAGER_HTML;
+        constexpr char marker[] = "__UI_LOCALE__";
+        const size_t position = page.find(marker);
+        if (position != std::string::npos) page.replace(position, sizeof(marker) - 1, translations);
+        return httpd_resp_send(req, page.c_str(), page.size());
     }
 
     static bool query_value(httpd_req_t *req, const char *key, std::string *value)
@@ -773,10 +768,10 @@ private:
         std::string requested, web_path, sd_path;
         query_value(req, "path", &requested);
         if (!normalize_web_path(requested, &web_path, &sd_path)) {
-            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid path");
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, ui_locale::text(ui_locale::TextId::InvalidPath));
         }
         DIR *dir = opendir(sd_path.c_str());
-        if (!dir) return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Directory not found");
+        if (!dir) return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, ui_locale::text(ui_locale::TextId::DirectoryNotFound));
 
         httpd_resp_set_type(req, "application/json; charset=utf-8");
         std::string head = "{\"path\":\"" + json_escape(web_path) + "\",\"entries\":[";
@@ -811,40 +806,40 @@ private:
         std::string op, requested, name, web_path, sd_path;
         if (!query_value(req, "op", &op) || !query_value(req, "path", &requested) ||
             !normalize_web_path(requested, &web_path, &sd_path)) {
-            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid action or path");
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, ui_locale::text(ui_locale::TextId::InvalidActionPath));
         }
         query_value(req, "name", &name);
         int result = -1;
         if (op == "mkdir") {
-            if (!valid_path_component(name)) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid folder name");
+            if (!valid_path_component(name)) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, ui_locale::text(ui_locale::TextId::InvalidFolderName));
             result = mkdir((sd_path + "/" + name).c_str(), 0775);
         } else if (op == "rename") {
             if (web_path == "/" || !valid_path_component(name)) {
-                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid new name");
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, ui_locale::text(ui_locale::TextId::InvalidNewName));
             }
             size_t slash = sd_path.find_last_of('/');
             std::string destination = sd_path.substr(0, slash + 1) + name;
             struct stat st = {};
             if (stat(destination.c_str(), &st) == 0) {
-                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Destination already exists");
+                return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, ui_locale::text(ui_locale::TextId::DestinationExists));
             }
             result = std::rename(sd_path.c_str(), destination.c_str());
             if (result == 0) recent_books_rename_path(sd_path.c_str(), destination.c_str());
         } else if (op == "delete") {
-            if (web_path == "/") return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Cannot delete SD root");
+            if (web_path == "/") return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, ui_locale::text(ui_locale::TextId::CannotDeleteSdRoot));
             struct stat st = {};
-            if (stat(sd_path.c_str(), &st) != 0) return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Not found");
+            if (stat(sd_path.c_str(), &st) != 0) return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, ui_locale::text(ui_locale::TextId::EntryNotFound));
             result = S_ISDIR(st.st_mode) ? rmdir(sd_path.c_str()) : unlink(sd_path.c_str());
         } else {
-            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unknown action");
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, ui_locale::text(ui_locale::TextId::UnknownAction));
         }
         if (result != 0) {
             ESP_LOGW(TAG, "file action failed op=%s path=%s errno=%d", op.c_str(), sd_path.c_str(), errno);
             return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                                       op == "delete" ? "Delete failed; folders must be empty" : "File operation failed");
+                                       op == "delete" ? ui_locale::text(ui_locale::TextId::DeleteEmptyFolderHint) : ui_locale::text(ui_locale::TextId::FileOperationFailed));
         }
         httpd_resp_set_type(req, "text/plain; charset=utf-8");
-        return httpd_resp_sendstr(req, "Operation complete");
+        return httpd_resp_sendstr(req, ui_locale::text(ui_locale::TextId::OperationComplete));
     }
 
     static esp_err_t handle_download(httpd_req_t *req)
@@ -852,19 +847,19 @@ private:
         std::string requested, web_path, sd_path;
         if (!query_value(req, "path", &requested) ||
             !normalize_web_path(requested, &web_path, &sd_path) || web_path == "/") {
-            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid file path");
+            return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, ui_locale::text(ui_locale::TextId::InvalidFilePath));
         }
         struct stat st = {};
         if (stat(sd_path.c_str(), &st) != 0 || S_ISDIR(st.st_mode)) {
-            return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
+            return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, ui_locale::text(ui_locale::TextId::FileNotFound));
         }
         FILE *fp = std::fopen(sd_path.c_str(), "rb");
-        if (!fp) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Open failed");
+        if (!fp) return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ui_locale::text(ui_locale::TextId::FileOpenFailed));
         char *buffer = static_cast<char *>(heap_caps_malloc(32 * 1024, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
         if (!buffer) buffer = static_cast<char *>(heap_caps_malloc(16 * 1024, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
         if (!buffer) {
             std::fclose(fp);
-            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Download buffer unavailable");
+            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ui_locale::text(ui_locale::TextId::DownloadBufferUnavailable));
         }
         httpd_resp_set_type(req, "application/octet-stream");
         size_t slash = web_path.find_last_of('/');
@@ -894,7 +889,7 @@ private:
         std::string requested_dir, web_dir, direct_dir;
         bool direct = query_value(req, "path", &requested_dir);
         if (direct && !normalize_web_path(requested_dir, &web_dir, &direct_dir)) {
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid destination path");
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, ui_locale::text(ui_locale::TextId::InvalidDestinationPath));
             return ESP_FAIL;
         }
         const char *dir = direct ? direct_dir.c_str() : upload_dir_for_name(name);
@@ -902,7 +897,7 @@ private:
                  dir ? dir : "unsupported", name.c_str(), req->content_len);
         if (dir == nullptr) {
             ESP_LOGW(TAG, "upload rejected unsupported name=%s", name.c_str());
-            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Unsupported file type");
+            httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, ui_locale::text(ui_locale::TextId::UnsupportedFileType));
             if (self) self->record_upload(name, 0, false);
             return ESP_FAIL;
         }
@@ -912,7 +907,7 @@ private:
                                      : ensure_upload_dir(dir);
         if (!destination_ok) {
             ESP_LOGE(TAG, "upload destination unavailable dir=%s", dir);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Destination directory unavailable");
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ui_locale::text(ui_locale::TextId::DestinationUnavailable));
             if (self) self->record_upload(name, 0, false);
             return ESP_FAIL;
         }
@@ -930,7 +925,7 @@ private:
         FILE *fp = std::fopen(path.c_str(), prealloc_result == ESP_OK ? "r+b" : "wb");
         if (!fp) {
             ESP_LOGE(TAG, "upload open failed path=%s errno=%d", path.c_str(), errno);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to create file");
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ui_locale::text(ui_locale::TextId::CreateFileFailed));
             if (self) self->record_upload(name, 0, false);
             return ESP_FAIL;
         }
@@ -956,7 +951,7 @@ private:
             std::fclose(fp);
             if (file_buf) free(file_buf);
             unlink(path.c_str());
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "SD DMA buffer allocation failed");
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ui_locale::text(ui_locale::TextId::SdDmaBufferFailed));
             if (self) self->record_upload(name, 0, false);
             return ESP_FAIL;
         }
@@ -965,7 +960,7 @@ private:
             std::fclose(fp);
             free(file_buf);
             unlink(path.c_str());
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "SD write buffer setup failed");
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ui_locale::text(ui_locale::TextId::SdWriteBufferFailed));
             if (self) self->record_upload(name, 0, false);
             return ESP_FAIL;
         }
@@ -985,7 +980,7 @@ private:
             std::fclose(fp);
             if (file_buf) free(file_buf);
             unlink(path.c_str());
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Upload buffer allocation failed");
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ui_locale::text(ui_locale::TextId::UploadBufferFailed));
             if (self) self->record_upload(name, 0, false);
             return ESP_FAIL;
         }
@@ -1020,7 +1015,7 @@ private:
                 std::fclose(fp);
                 if (file_buf) free(file_buf);
                 unlink(path.c_str());
-                httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Upload receive failed");
+                httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ui_locale::text(ui_locale::TextId::UploadReceiveFailed));
                 if (self) self->record_upload(name, written, false);
                 return ESP_FAIL;
             }
@@ -1035,7 +1030,7 @@ private:
                 std::fclose(fp);
                 if (file_buf) free(file_buf);
                 unlink(path.c_str());
-                httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "SD write failed");
+                httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ui_locale::text(ui_locale::TextId::SdWriteFailed));
                 if (self) self->record_upload(name, written, false);
                 return ESP_FAIL;
             }
@@ -1069,7 +1064,7 @@ private:
         if (close_result != 0) {
             ESP_LOGE(TAG, "upload final flush failed path=%s errno=%d (%s)", path.c_str(), errno, strerror(errno));
             unlink(path.c_str());
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "SD final flush failed");
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ui_locale::text(ui_locale::TextId::SdFlushFailed));
             if (self) self->record_upload(name, written, false);
             return ESP_FAIL;
         }
@@ -1082,7 +1077,7 @@ private:
         bool had_previous = stat(final_path.c_str(), &previous) == 0;
         if (had_previous && std::rename(final_path.c_str(), backup_path.c_str()) != 0) {
             unlink(path.c_str());
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to preserve previous file");
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ui_locale::text(ui_locale::TextId::PreserveFileFailed));
             if (self) self->record_upload(name, written, false);
             return ESP_FAIL;
         }
@@ -1091,14 +1086,14 @@ private:
                      path.c_str(), final_path.c_str(), errno);
             if (had_previous) std::rename(backup_path.c_str(), final_path.c_str());
             unlink(path.c_str());
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to commit uploaded file");
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ui_locale::text(ui_locale::TextId::CommitUploadFailed));
             if (self) self->record_upload(name, written, false);
             return ESP_FAIL;
         }
         if (had_previous) unlink(backup_path.c_str());
 
         char msg[256];
-        std::snprintf(msg, sizeof(msg), "Saved %s (%u bytes)", final_path.c_str(), (unsigned)written);
+        std::snprintf(msg, sizeof(msg), ui_locale::text(ui_locale::TextId::UploadSavedFormat), final_path.c_str(), (unsigned)written);
         httpd_resp_set_type(req, "text/plain; charset=utf-8");
         httpd_resp_sendstr(req, msg);
         if (self) self->record_upload(name, written, true);

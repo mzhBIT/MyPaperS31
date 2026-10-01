@@ -16,9 +16,23 @@ struct RecentBook {
 };
 
 struct RecentBookProgress {
+    uint64_t reading_seconds = 0;
     int percent = 0;
     int chapter = 0;
     int chapter_count = 0;
+};
+
+// Monotonic, in-memory timing. Only finish() writes storage, on reader exit.
+class BookReadingTimer {
+public:
+    void configure(const char *path);
+    void resume();
+    void pause();
+    void finish();
+private:
+    std::string path_;
+    uint64_t elapsed_us_ = 0;
+    int64_t started_us_ = -1;
 };
 
 bool recent_book_load(RecentBook *book);

@@ -403,7 +403,7 @@ std::string localized_weread_error(const std::string &message)
     for (const auto &entry : known) {
         if (message == entry.source) return ui_locale::text(entry.id);
     }
-    return message;
+    return ui_locale::localize_message(message);
 }
 
 void draw_header(const std::string &title)

@@ -727,10 +727,10 @@ private:
         M5.Display.fillScreen(TFT_WHITE);
 
         M5.Display.fillRect(0, 0, 150, 115, TFT_BLACK);
-        system_font::draw_center(M5.Display, "TL", 75, 32, TFT_WHITE);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::TopLeft), 75, 32, TFT_WHITE);
         M5.Display.drawRect(width - 150, 0, 150, 115, TFT_BLACK);
         M5.Display.fillTriangle(width - 150, 0, width, 0, width, 115, TFT_BLACK);
-        system_font::draw_right(M5.Display, "TR", width - 16, 32, TFT_WHITE);
+        system_font::draw_right(M5.Display, ui_locale::text(ui_locale::TextId::TopRight), width - 16, 32, TFT_WHITE);
 
         M5.Display.drawRect(0, height - 115, 150, 115, TFT_BLACK);
         for (int y = height - 105; y < height - 10; y += 16) {

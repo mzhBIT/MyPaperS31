@@ -412,6 +412,7 @@ public:
 
     ~EpubReaderActivity()
     {
+        _reading_timer.finish();
         finish_annotation_worker();
         flush_progress(true);
         release_runtime_cache();
@@ -426,6 +427,10 @@ public:
 
     void on_show() override
     {
+        if (_ok && !g_epub.is_weread()) {
+            if (!_seen_show) _reading_timer.configure(g_epub.path().c_str());
+            _reading_timer.resume();
+        }
         if (!_seen_show) {
             _seen_show = true;
             return;
@@ -437,6 +442,8 @@ public:
         _overlay.clear_settings_dirty();
         redraw_all(epd_mode_t::epd_quality);
     }
+
+    void on_hide() override { _reading_timer.pause(); }
 
     void loop() override
     {
@@ -780,6 +787,7 @@ private:
     script_conversion::Mode _script_mode = script_conversion::Mode::Original;
     reader_writing_mode::Mode _writing_override = reader_writing_mode::Mode::Auto;
     bool _seen_show = false;
+    BookReadingTimer _reading_timer;
     int _spine_index = 0;
     int _page_index = 0;
     int _page_count = 0;
@@ -1451,7 +1459,7 @@ private:
     {
         return _is_markdown
             ? markdown_parse_blocks(source, g_epub.path(), blocks)
-            : epub_parse_xhtml_blocks(source, href, blocks, vertical);
+            : epub_parse_xhtml_blocks(source, href, blocks, vertical, g_epub.is_docx());
     }
 
     bool is_ignored_layout_image(const std::string &href) const
@@ -2635,7 +2643,7 @@ private:
         if (created != pdPASS) {
             delete job;
             _annotation_loading = false;
-            _footnote_popup_text = "Unable to start the comment loader.";
+            _footnote_popup_text = ui_locale::text(ui_locale::TextId::CommentLoaderStartFailed);
             _annotation_redraw_pending = true;
         } else {
             ESP_LOGI(TAG, "annotation fetch started core=0");
@@ -2669,8 +2677,8 @@ private:
                              result->annotation.total_count,
                              result->annotation.has_more ? 1 : 0);
                 } else if (current) {
-            _footnote_popup_text = std::string(ui_locale::text(ui_locale::TextId::CommentsUnavailable)) + "\n\n" +
-                                           result->error;
+                    _footnote_popup_text = std::string(ui_locale::text(ui_locale::TextId::CommentsUnavailable)) + "\n\n" +
+                                           ui_locale::localize_message(result->error);
                     _annotation_redraw_pending = true;
                     ESP_LOGW(TAG, "annotation fetch failed range=%s error=%s",
                              result->annotation.range.c_str(), result->error.c_str());
@@ -2792,7 +2800,7 @@ private:
             }
         } else if (!resolve_footnote_content(ref, &_footnote_popup_text)) {
             _footnote_popup_text = _footnote_popup_annotation
-                ? "Comments for this underline are unavailable."
+                ? ui_locale::text(ui_locale::TextId::CommentsUnavailable)
                 : ui_locale::text(ui_locale::TextId::FootnoteUnavailable);
         }
         _footnote_popup_page = 0;
@@ -2938,7 +2946,7 @@ private:
         gfx.fillRect(0, 0, w, TOP_H, TFT_WHITE);
         gfx.setTextColor(TFT_BLACK, TFT_WHITE);
 
-        std::string title = _ok ? short_title(g_epub.title) : "Document open failed";
+        std::string title = _ok ? short_title(g_epub.title) : ui_locale::text(ui_locale::TextId::DocumentOpenFailed);
         system_font::draw_center(gfx, system_font::ellipsize(title, w - 180), w / 2, 3);
 
         if (_ok) {
@@ -3264,7 +3272,9 @@ private:
                 }
                 if (!ok) {
                     draw_image_placeholder(gfx, draw_x, draw_y, draw_w, draw_h,
-                                           image.jpg_progressive ? "Progressive JPEG too large" : "Image decode failed");
+                        ui_locale::text(image.jpg_progressive
+                            ? ui_locale::TextId::ProgressiveJpegTooLarge
+                            : ui_locale::TextId::ImageDecodeFailed));
                     ESP_LOGW(TAG,
                              "image draw failed href=%s ext=%s src=%dx%d draw=%dx%d scale=%.3f progressive=%d",
                              item.resource.c_str(),
@@ -3298,8 +3308,8 @@ private:
     void draw_content(int w, int h)
     {
         if (!_ok) {
-            std::string error = g_epub.last_error();
-            if (error.empty()) error = "Could not parse document.";
+            std::string error = ui_locale::localize_message(g_epub.last_error());
+            if (error.empty()) error = ui_locale::text(ui_locale::TextId::DocumentParseFailed);
             system_font::draw_left(M5.Display, system_font::ellipsize(error, M5.Display.width() - 40),
                                    20, header_height() + 18);
             return;

@@ -8,7 +8,9 @@ MyPaperP4 是一套面向自定义 **ESP32-P4 单色墨水屏设备**的阅读�
 
 ### 阅读
 
-- TXT、Markdown、EPUB、FB2 与无 DRM MOBI/PRC/AZW/AZW3 阅读。
+- TXT、Markdown、EPUB、FB2、DOCX 与无 DRM MOBI/PRC/AZW/AZW3 阅读。
+- DOCX 正文、标题目录、粗体/斜体、列表、嵌入图片与脚注/尾注重排；表格线性化阅读，不还原 Word 原始分页布局，不支持加密 DOCX。
+- ZIP/CBZ 图片漫画阅读：支持 JPG/JPEG、PNG、BMP 和子目录，按文件名自然排序，每张图片一页，复用图片预解码、居中显示、阅读进度及计时，不需整包解压；不支持加密 ZIP、ZIP64 或 RAR/CBR。
 - TXT 支持 UTF-8、UTF-16LE、GBK 和 Latin-1 回退。
 - EPUB2/EPUB3 目录、封面、正文图片和阅读进度。
 - EPUB ZIP 索引与元数据持久化缓存，加快再次打开速度。

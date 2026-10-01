@@ -55,7 +55,8 @@ static bool is_supported(const char *n, bool is_dir) {
             strcasecmp(ext, ".markdown") == 0 || strcasecmp(ext, ".epub") == 0 ||
             strcasecmp(ext, ".mobi") == 0 || strcasecmp(ext, ".prc") == 0 ||
             strcasecmp(ext, ".azw") == 0 || strcasecmp(ext, ".azw3") == 0 ||
-            strcasecmp(ext, ".fb2") == 0 ||
+            strcasecmp(ext, ".fb2") == 0 || strcasecmp(ext, ".docx") == 0 ||
+            strcasecmp(ext, ".zip") == 0 || strcasecmp(ext, ".cbz") == 0 ||
             strcasecmp(ext, ".bmp") == 0 || strcasecmp(ext, ".png") == 0 ||
             strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0 ||
             strcasecmp(ext, ".ttf") == 0 ||
@@ -69,9 +70,10 @@ static bool is_font_file(const char *n) {
                    strcasecmp(ext, ".bin") == 0);
 }
 
-static bool is_epub_file(const char *n) {
+static bool is_zip_reflow_file(const char *n) {
     const char *ext = strrchr(n, '.');
-    return ext && strcasecmp(ext, ".epub") == 0;
+    return ext && (strcasecmp(ext, ".epub") == 0 || strcasecmp(ext, ".docx") == 0 ||
+                   strcasecmp(ext, ".zip") == 0 || strcasecmp(ext, ".cbz") == 0);
 }
 
 static bool is_mobi_file(const char *n) {
@@ -296,7 +298,7 @@ public:
         if (full.size() > 4 && strcasecmp(full.c_str() + full.size() - 4, ".txt") == 0) {
             extern void launch_reader(const char*);
             launch_reader(full.c_str());
-        } else if (is_epub_file(full.c_str())) {
+        } else if (is_zip_reflow_file(full.c_str())) {
             extern void launch_epub_reader(const char*);
             launch_epub_reader(full.c_str());
         } else if (is_mobi_file(full.c_str())) {

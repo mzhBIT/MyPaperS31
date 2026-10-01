@@ -3,6 +3,7 @@
 #include "input/touch_input.h"
 #include "storage/storage_sdcard.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include "usb/usb_transfer_boot.h"
 
 #include <M5Unified.h>
@@ -49,12 +50,12 @@ const char *usb_speed_text(tusb_speed_t speed)
 const char *state_text(UiState state)
 {
     switch (state) {
-    case UiState::Waiting: return "Waiting for computer";
-    case UiState::Connected: return "Connected - SD card is owned by PC";
-    case UiState::Ejected: return "Safely ejected - you may exit";
-    case UiState::Error: return s_error[0] ? s_error : "USB storage error";
+    case UiState::Waiting: return ui_locale::text(ui_locale::TextId::UsbWaitingForComputer);
+    case UiState::Connected: return ui_locale::text(ui_locale::TextId::UsbConnectedPcOwnsSd);
+    case UiState::Ejected: return ui_locale::text(ui_locale::TextId::UsbSafelyEjected);
+    case UiState::Error: return s_error[0] ? s_error : ui_locale::text(ui_locale::TextId::UsbStorageError);
     }
-    return "USB storage";
+    return ui_locale::text(ui_locale::TextId::UsbTransfer);
 }
 
 void set_state(UiState state)
@@ -96,7 +97,7 @@ void storage_event(tinyusb_msc_storage_handle_t, tinyusb_msc_event_t *event, voi
     } else if (event->id == TINYUSB_MSC_EVENT_MOUNT_FAILED ||
                event->id == TINYUSB_MSC_EVENT_FORMAT_REQUIRED ||
                event->id == TINYUSB_MSC_EVENT_FORMAT_FAILED) {
-        std::snprintf(s_error, sizeof(s_error), "SD card mount error (%d)", (int)event->id);
+        std::snprintf(s_error, sizeof(s_error), ui_locale::text(ui_locale::TextId::SdMountErrorFormat), (int)event->id);
         set_state(UiState::Error);
     }
 }
@@ -114,26 +115,26 @@ void draw_page()
     M5.Display.setEpdMode(epd_mode_t::epd_text);
     M5.Display.fillScreen(TFT_WHITE);
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-    system_font::draw_center(M5.Display, "USB Transfer", w / 2, 28, TFT_BLACK);
+    system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::UsbTransfer), w / 2, 28, TFT_BLACK);
     M5.Display.drawFastHLine(0, 28 + line_h + 12, w, TFT_BLACK);
 
     system_font::draw_center(M5.Display, state_text(s_state.load(std::memory_order_acquire)),
                              w / 2, 170, TFT_BLACK);
-    system_font::draw_center(M5.Display, "MyPaperP4 SD Card", w / 2, 240, TFT_BLACK);
+    system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::DeviceSdCard), w / 2, 240, TFT_BLACK);
     if (s_exit_confirmation.load(std::memory_order_acquire)) {
-        system_font::draw_center(M5.Display, "The computer has not safely ejected the drive.",
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::UsbNotSafelyEjected),
                                  w / 2, 350, TFT_BLACK);
-        system_font::draw_center(M5.Display, "Tap Exit again to force a restart.", w / 2,
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::UsbForceRestartHint), w / 2,
                                  350 + line_h + 8, TFT_BLACK);
     } else {
-        system_font::draw_center(M5.Display, "Safely eject the drive on your computer", w / 2,
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::UsbEjectOnComputer), w / 2,
                                  350, TFT_BLACK);
-        system_font::draw_center(M5.Display, "before leaving this mode.", w / 2,
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::UsbBeforeLeaving), w / 2,
                                  350 + line_h + 8, TFT_BLACK);
     }
 
     M5.Display.drawRect(30, button_y, w - 60, button_h, TFT_BLACK);
-    system_font::draw_center(M5.Display, "Exit USB Transfer", w / 2,
+    system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ExitUsbTransfer), w / 2,
                              button_y + (button_h - line_h) / 2, TFT_BLACK);
     M5.Display.display();
     M5.Display.endWrite();
@@ -229,7 +230,7 @@ extern "C" esp_err_t usb_msc_mode_run(void)
 
     esp_err_t ret = start_msc();
     if (ret != ESP_OK) {
-        std::snprintf(s_error, sizeof(s_error), "USB start failed: %s", esp_err_to_name(ret));
+        std::snprintf(s_error, sizeof(s_error), ui_locale::text(ui_locale::TextId::UsbStartFailedFormat), esp_err_to_name(ret));
         set_state(UiState::Error);
         draw_page();
     }

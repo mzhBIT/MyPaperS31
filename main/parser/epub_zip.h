@@ -10,6 +10,7 @@ class EpubZip {
 public:
     struct Entry {
         uint16_t method = 0;
+        uint16_t flags = 0;
         uint32_t compressed_size = 0;
         uint32_t uncompressed_size = 0;
         uint32_t local_header_offset = 0;
@@ -19,6 +20,7 @@ public:
     void close();
     bool has_entry(const std::string &name) const;
     bool entry_info(const std::string &name, Entry *entry) const;
+    std::vector<std::string> entry_names() const;
     bool read_entry_to_string(const std::string &name, std::string *out, bool trailing_null = false);
     bool read_entry_prefix(const std::string &name, std::vector<uint8_t> *out,
                            size_t max_bytes = 64 * 1024);

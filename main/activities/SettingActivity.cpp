@@ -96,7 +96,7 @@ public:
             if (_result_success) ActivityManager::instance().pop();
             else {
                 _view = View::Keyboard;
-                _keyboard_message = "Check the password and try again";
+                _keyboard_message = ui_locale::text(ui_locale::TextId::CheckPasswordHint);
                 draw_keyboard();
             }
             return true;
@@ -564,7 +564,7 @@ private:
         M5.Display.endWrite();
         M5.Display.waitDisplay();
         DeepSeekClientResult result = DeepSeekClient::validate(config);
-        _message = result.success ? result.content : result.error;
+        _message = ui_locale::localize_message(result.success ? result.content : result.error);
         draw(false);
     }
 
@@ -689,7 +689,7 @@ private:
         M5.Display.endWrite();
         M5.Display.waitDisplay();
         ZhihuHotListResult result = ZhihuClient::fetch_hot_list(config, 1, true);
-        _message = result.success ? ui_locale::text(ui_locale::TextId::ConnectionSuccessful) : result.error;
+        _message = result.success ? ui_locale::text(ui_locale::TextId::ConnectionSuccessful) : ui_locale::localize_message(result.error);
         draw(false);
     }
 

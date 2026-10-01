@@ -153,6 +153,30 @@ bool ReflowBook::open(const char *path)
         }
         return true;
     }
+    if (ext == ".zip" || ext == ".cbz") {
+        if (!_comic.open(path)) { _last_error = _comic.last_error(); return false; }
+        _format = Format::ComicZip;
+        title = file_stem(path);
+        for (const auto &page : _comic.pages()) {
+            const int index = static_cast<int>(_sections.size());
+            _sections.push_back({"comic-" + std::to_string(index), page.href, "application/xhtml+xml", 0});
+            _toc.push_back({page.title, page.href, index, 0});
+        }
+        _cover_href = _comic.pages().front().image_href;
+        return true;
+    }
+    if (ext == ".docx") {
+        if (!_docx.open(path)) { _last_error = _docx.last_error(); return false; }
+        _format = Format::Docx;
+        title = _docx.title();
+        for (const auto &section : _docx.sections()) {
+            const int index = static_cast<int>(_sections.size());
+            _sections.push_back({"docx-" + std::to_string(index), section.href,
+                                 "application/xhtml+xml", static_cast<uint32_t>(section.html.size())});
+            _toc.push_back({section.title, section.href, index, section.depth});
+        }
+        return !_sections.empty();
+    }
     if (ext == ".fb2") {
         if (!_fb2.open(path)) {
             _last_error = _fb2.last_error();
@@ -219,6 +243,8 @@ void ReflowBook::close()
     _epub.close();
     _mobi.close();
     _fb2.close();
+    _docx.close();
+    _comic.close();
     _weread_epub.close();
     _format = Format::None;
     _path.clear();
@@ -241,6 +267,8 @@ bool ReflowBook::read_item_to_string(const std::string &href, std::string *out)
 {
     if (_format == Format::Mobi) return _mobi.read_section_to_string(href, out);
     if (_format == Format::Fb2) return _fb2.read_section_to_string(href, out);
+    if (_format == Format::Docx) return _docx.read_section(href, out);
+    if (_format == Format::ComicZip) return _comic.read_page(href, out);
     if (_format == Format::Epub) return _epub.read_item_to_string(href, out);
     if (_format == Format::Markdown) return read_regular_file(_path, out);
     if (_format == Format::Weread) {
@@ -305,6 +333,8 @@ bool ReflowBook::extract_item_to_file(const std::string &href, const std::string
         return _mobi.extract_resource_to_file(_mobi.normalize_resource_href(href), out_path);
     }
     if (_format == Format::Fb2) return _fb2.extract_resource_to_file(href, out_path);
+    if (_format == Format::Docx) return _docx.extract_resource(href, out_path);
+    if (_format == Format::ComicZip) return _comic.extract_resource(href, out_path);
     if (_format == Format::Epub) return _epub.extract_item_to_file(href, out_path);
     if (_format == Format::Markdown) return copy_regular_file(href, out_path);
     if (_format == Format::Weread) {
@@ -338,6 +368,8 @@ bool ReflowBook::read_resource_prefix(const std::string &href,
     if (_format == Format::Epub) return _epub.read_item_prefix(href, out, max_bytes);
     if (_format == Format::Mobi) return _mobi.read_resource_prefix(href, out, max_bytes);
     if (_format == Format::Fb2) return _fb2.read_resource_prefix(href, out, max_bytes);
+    if (_format == Format::Docx) return _docx.read_prefix(href, out, max_bytes);
+    if (_format == Format::ComicZip) return _comic.read_prefix(href, out, max_bytes);
     if (_format == Format::Markdown) return read_regular_file_bytes(href, out, max_bytes, true);
     if (_format == Format::Weread && href == _cover_href) {
         return read_regular_file_bytes(href, out, max_bytes, true);
@@ -355,6 +387,8 @@ bool ReflowBook::read_resource_to_memory(const std::string &href,
     if (_format == Format::Epub) return _epub.read_item_to_memory(href, out, max_size);
     if (_format == Format::Mobi) return _mobi.read_resource_to_memory(href, out, max_size);
     if (_format == Format::Fb2) return _fb2.read_resource_to_memory(href, out, max_size);
+    if (_format == Format::Docx) return _docx.read_resource(href, out, max_size);
+    if (_format == Format::ComicZip) return _comic.read_resource(href, out, max_size);
     if (_format == Format::Markdown) return read_regular_file_bytes(href, out, max_size, false);
     if (_format == Format::Weread && href == _cover_href) {
         return read_regular_file_bytes(href, out, max_size, false);

@@ -59,7 +59,7 @@ static void go_radio()   { launch_radio(); }
 static void go_rss()     { launch_rss_reader(); }
 static void go_transfer(){ launch_transfer(); }
 static void go_settings(){ launch_settings(); }
-static void go_clock()   { ActivityManager::instance().push(new PlaceholderActivity("Clock")); }
+static void go_clock()   { ActivityManager::instance().push(new PlaceholderActivity(ui_locale::text(ui_locale::TextId::Clock))); }
 static void go_music()   { launch_music(); }
 static void go_images()  { launch_file_browser("/sdcard"); }
 static void go_deepseek(){ launch_deepseek(); }
@@ -426,7 +426,7 @@ private:
         if (index < 0 || index >= (int)m_books.size()) return;
         const RecentBook &book = m_books[index];
         ESP_LOGI(TAG, "open bookshelf item: %s", book.path.c_str());
-        if (book.type == "epub") launch_epub_reader(book.path.c_str());
+        if (book.type == "epub" || book.type == "docx" || book.type == "comic") launch_epub_reader(book.path.c_str());
         else if (book.type == "mobi") launch_mobi_reader(book.path.c_str());
         else if (book.type == "fb2") launch_fb2_reader(book.path.c_str());
         else if (book.type == "markdown") launch_markdown_reader(book.path.c_str());
@@ -452,7 +452,7 @@ private:
         M5.Display.drawRoundRect(x, y, w, h, 3, TFT_BLACK);
         int spine_x = x + std::max(7, w / 7);
         M5.Display.drawLine(spine_x, y, spine_x, y + h, TFT_BLACK);
-        std::string type = book.type == "epub" ? "EPUB" :
+        std::string type = book.type == "comic" ? "CBZ" : book.type == "docx" ? "DOCX" : book.type == "epub" ? "EPUB" :
                            (book.type == "mobi" ? "MOBI" :
                             (book.type == "fb2" ? "FB2" :
                              (book.type == "markdown" ? "MD" : "TXT")));
@@ -503,22 +503,24 @@ private:
         int text_w = std::max(40, text_right - text_x);
         std::string title = system_font::ellipsize(book.title, text_w);
         int line_h = system_font::line_height();
-        int line_count = has_chapters ? 3 : 2;
+        int line_count = has_chapters ? 4 : 3;
         int gap = std::max(1, (h - line_h * line_count) / (line_count + 1));
         int title_y = y + gap;
         system_font::draw_left(M5.Display, title, text_x, title_y, fg);
 
         int progress_y = title_y + line_h + gap;
         if (has_chapters) {
-            char chapter_text[40];
-            std::snprintf(chapter_text, sizeof(chapter_text), "Chapter %d / %d",
+            char chapter_text[64];
+            std::snprintf(chapter_text, sizeof(chapter_text), "%s %d / %d",
+                          ui_locale::text(ui_locale::TextId::Chapter),
                           progress.chapter, progress.chapter_count);
             system_font::draw_left(M5.Display, chapter_text, text_x, progress_y, fg);
             progress_y += line_h + gap;
         }
 
-        char progress_text[32];
-        std::snprintf(progress_text, sizeof(progress_text), "Progress %d%%", progress.percent);
+        char progress_text[64];
+        std::snprintf(progress_text, sizeof(progress_text), "%s %d%%",
+                      ui_locale::text(ui_locale::TextId::Progress), progress.percent);
         system_font::draw_left(M5.Display, progress_text, text_x, progress_y, fg);
 
         int bar_x = text_x + system_font::measure(progress_text) + 24;
@@ -529,6 +531,14 @@ private:
             int filled = (int)(((int64_t)bar_w * progress.percent + 50) / 100);
             if (filled > 0) M5.Display.fillRect(bar_x, bar_y, filled, 4, fg);
         }
+        char reading_time[128];
+        const uint64_t seconds = progress.reading_seconds;
+        std::snprintf(reading_time, sizeof(reading_time),
+                      ui_locale::text(ui_locale::TextId::ReadingTimeFormat),
+                      (unsigned long long)(seconds / 3600),
+                      (unsigned long long)((seconds / 60) % 60));
+        system_font::draw_left(M5.Display, system_font::ellipsize(reading_time, text_w),
+                               text_x, progress_y + line_h + gap, fg);
     }
 
     void redraw()

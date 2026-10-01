@@ -197,6 +197,7 @@ static void draw_content(int w, int h) {
 
 class ReaderActivity : public Activity {
     bool m_seen_show = false;
+    BookReadingTimer m_reading_timer;
     ReaderOverlay m_overlay;
     int m_non_quality_refresh_count = 0;
 public:
@@ -207,14 +208,23 @@ public:
         chapters.seek = overlay_seek_progress;
         m_overlay.set_chapters(chapters);
         m_overlay.set_book_path(path);
-        if (g_book.open(path)) recent_book_save(path, "txt", g_book.title.c_str());
+        if (g_book.open(path)) {
+            recent_book_save(path, "txt", g_book.title.c_str());
+            m_reading_timer.configure(path);
+        }
         g_history.clear();
         g_offset = g_book.load_progress(&g_history);
         g_page = g_book.read_page(g_offset);
     }
-    ~ReaderActivity() { g_book.save_progress(g_page.start_offset, g_history); }
+    ~ReaderActivity() {
+        m_reading_timer.finish();
+        g_book.save_progress(g_page.start_offset, g_history);
+    }
+
+    void on_hide() override { m_reading_timer.pause(); }
 
     void on_show() override {
+        m_reading_timer.resume();
         if (!m_seen_show) {
             m_seen_show = true;
             return;

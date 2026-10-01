@@ -19,7 +19,7 @@
 
 static const char *TAG = "EPUB_ZIP";
 static const uint32_t ZIP_INDEX_MAGIC = 0x58495A45; // EZIX
-static const uint32_t ZIP_INDEX_VERSION = 1;
+static const uint32_t ZIP_INDEX_VERSION = 2; // includes general-purpose flags
 static const uint32_t ZIP_INDEX_MAX_BYTES = 8 * 1024 * 1024;
 // The task watchdog is 5 seconds and FreeRTOS runs at 100 Hz, so an
 // unconditional vTaskDelay(1) costs about 10 ms. Work in reasonably large
@@ -188,6 +188,14 @@ bool EpubZip::extract_unique_suffix_to_file(const std::string &name,
     return matched && extract_entry_to_file(*matched, out_path, max_size);
 }
 
+std::vector<std::string> EpubZip::entry_names() const
+{
+    std::vector<std::string> names;
+    names.reserve(_entries.size());
+    for (const auto &entry : _entries) names.push_back(entry.first);
+    return names;
+}
+
 bool EpubZip::load_central_directory(FILE *fp)
 {
     if (std::fseek(fp, 0, SEEK_END) != 0) return false;
@@ -213,6 +221,10 @@ bool EpubZip::load_central_directory(FILE *fp)
     uint16_t entry_count = rd16(p + 10);
     uint32_t central_size = rd32(p + 12);
     uint32_t central_offset = rd32(p + 16);
+    // Classic single-disk ZIP only. Do not interpret ZIP64 sentinel offsets.
+    if (rd16(p + 4) || rd16(p + 6) || rd16(p + 8) != entry_count ||
+        entry_count == UINT16_MAX || central_size == UINT32_MAX || central_offset == UINT32_MAX)
+        return false;
     if (central_offset == 0 || central_size == 0) return false;
 
     if (std::fseek(fp, (long)central_offset, SEEK_SET) != 0) return false;
@@ -225,6 +237,7 @@ bool EpubZip::load_central_directory(FILE *fp)
             if (std::fread(hdr, 1, sizeof(hdr), fp) != sizeof(hdr) || rd32(hdr) != 0x02014b50) return false;
             Entry entry;
             entry.method = rd16(hdr + 10);
+            entry.flags = rd16(hdr + 8);
             entry.compressed_size = rd32(hdr + 20);
             entry.uncompressed_size = rd32(hdr + 24);
             uint16_t name_len = rd16(hdr + 28);
@@ -251,6 +264,7 @@ bool EpubZip::load_central_directory(FILE *fp)
 
         Entry entry;
         entry.method = rd16(hdr + 10);
+        entry.flags = rd16(hdr + 8);
         entry.compressed_size = rd32(hdr + 20);
         entry.uncompressed_size = rd32(hdr + 24);
         uint16_t name_len = rd16(hdr + 28);
@@ -326,11 +340,12 @@ bool EpubZip::load_index_cache(const char *source_path)
         if (pos + 2 > data.size()) return false;
         uint16_t name_len = rd16(data.data() + pos);
         pos += 2;
-        if (name_len == 0 || pos + name_len + 14 > data.size()) return false;
+        if (name_len == 0 || pos + name_len + 16 > data.size()) return false;
         std::string name((const char *)data.data() + pos, name_len);
         pos += name_len;
         Entry entry;
         entry.method = rd16(data.data() + pos); pos += 2;
+        entry.flags = rd16(data.data() + pos); pos += 2;
         entry.compressed_size = rd32(data.data() + pos); pos += 4;
         entry.uncompressed_size = rd32(data.data() + pos); pos += 4;
         entry.local_header_offset = rd32(data.data() + pos); pos += 4;
@@ -362,6 +377,7 @@ void EpubZip::save_index_cache(const char *source_path) const
         append16(&data, (uint16_t)item.first.size());
         data.insert(data.end(), item.first.begin(), item.first.end());
         append16(&data, item.second.method);
+        append16(&data, item.second.flags);
         append32(&data, item.second.compressed_size);
         append32(&data, item.second.uncompressed_size);
         append32(&data, item.second.local_header_offset);
@@ -388,6 +404,7 @@ bool EpubZip::read_entry_data_offset(FILE *fp, const Entry &entry, uint32_t *off
     if (std::fseek(fp, (long)entry.local_header_offset, SEEK_SET) != 0) return false;
     if (std::fread(hdr, 1, sizeof(hdr), fp) != sizeof(hdr)) return false;
     if (rd32(hdr) != 0x04034b50) return false;
+    if ((entry.flags | rd16(hdr + 6)) & 1) return false; // encrypted payload
 
     uint16_t name_len = rd16(hdr + 26);
     uint16_t extra_len = rd16(hdr + 28);

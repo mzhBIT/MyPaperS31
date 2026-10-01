@@ -2,6 +2,7 @@
 
 #include <nvs.h>
 #include <cstddef>
+#include <cstring>
 
 namespace ui_locale {
 namespace {
@@ -521,6 +522,152 @@ constexpr Translation kText[] = {
     {"Time sync failed", "校时失败", "校時失敗"},
     {"Time not set", "时间未设置", "時間未設定"},
     {"App settings", "应用配置", "應用設定"},
+    {"Text input", "文本输入", "文字輸入"},
+    {"Check the password and try again", "请检查密码后重试", "請檢查密碼後重試"},
+    {"Unable to start the comment loader.", "无法启动评论加载。", "無法啟動評論載入。"},
+    {"Document open failed", "文档打开失败", "文件開啟失敗"},
+    {"Could not parse document.", "无法解析文档。", "無法解析文件。"},
+    {"Progressive JPEG too large", "渐进式 JPEG 图片过大", "漸進式 JPEG 圖片過大"},
+    {"Describe this image.", "请描述这张图片。", "請描述這張圖片。"},
+    {"No uploads yet", "暂无上传记录", "暫無上傳紀錄"},
+    {"TL", "左上", "左上"},
+    {"TR", "右上", "右上"},
+    {"IT Home", "IT之家", "IT之家"},
+    {"Zaobao China", "联合早报·中国", "聯合早報·中國"},
+    {"Zaobao World", "联合早报·国际", "聯合早報·國際"},
+    {"The Paper", "澎湃新闻", "澎湃新聞"},
+    {"Fortune China", "财富中文网", "財富中文網"},
+    {"Bing Wallpaper", "必应壁纸", "必應桌布"},
+    {"Wallstreetcn Global", "华尔街见闻·全球", "華爾街見聞·全球"},
+    {"Waiting for computer", "等待连接电脑", "等待連接電腦"},
+    {"Connected - SD card is owned by PC", "已连接，SD 卡由电脑使用", "已連接，SD 卡由電腦使用"},
+    {"Safely ejected - you may exit", "已安全弹出，可以退出", "已安全退出，可以離開"},
+    {"USB storage error", "USB 存储错误", "USB 儲存錯誤"},
+    {"SD card mount error (%d)", "SD 卡挂载错误（%d）", "SD 卡掛載錯誤（%d）"},
+    {"USB start failed: %s", "USB 启动失败：%s", "USB 啟動失敗：%s"},
+    {"MyPaperP4 SD Card", "MyPaperP4 SD 卡", "MyPaperP4 SD 卡"},
+    {"The computer has not safely ejected the drive.", "电脑尚未安全弹出磁盘。", "電腦尚未安全退出磁碟。"},
+    {"Tap Exit again to force a restart.", "再次点击退出将强制重启。", "再次點選離開將強制重新啟動。"},
+    {"Safely eject the drive on your computer", "请先在电脑上安全弹出磁盘", "請先在電腦上安全退出磁碟"},
+    {"before leaving this mode.", "再退出此模式。", "再離開此模式。"},
+    {"Exit USB Transfer", "退出 USB 传输", "離開 USB 傳輸"},
+    {"Smart upload", "自动分类上传", "自動分類上傳"},
+    {"SD file manager", "SD 文件管理", "SD 檔案管理"},
+    {"Supported files are sorted into books, images, fonts, music, or the input-method directory automatically.", "支持的文件会自动分类到书籍、图片、字体、音乐或输入法目录。", "支援的檔案會自動分類至書籍、圖片、字體、音樂或輸入法目錄。"},
+    {"Upload and sort", "上传并分类", "上傳並分類"},
+    {"Up", "上一级", "上一層"},
+    {"Refresh", "刷新", "重新整理"},
+    {"New folder", "新建文件夹", "新增資料夾"},
+    {"Upload here", "上传到当前目录", "上傳至目前目錄"},
+    {"Loading...", "正在加载…", "正在載入…"},
+    {"Ready.", "就绪。", "就緒。"},
+    {"Network error", "网络错误", "網路錯誤"},
+    {"Uploading ", "正在上传 ", "正在上傳 "},
+    {"OK: ", "成功：", "成功："},
+    {"ERR", "错误", "錯誤"},
+    {"DIR  ", "目录  ", "目錄  "},
+    {"Download", "下载", "下載"},
+    {"Empty directory", "空目录", "空目錄"},
+    {"Folder name", "文件夹名称", "資料夾名稱"},
+    {"New name", "新名称", "新名稱"},
+    {"Delete ", "删除 ", "刪除 "},
+    {"Invalid path", "无效路径", "無效路徑"},
+    {"Directory not found", "目录不存在", "目錄不存在"},
+    {"Invalid action or path", "无效操作或路径", "無效操作或路徑"},
+    {"Invalid folder name", "无效文件夹名称", "無效資料夾名稱"},
+    {"Invalid new name", "无效的新名称", "無效的新名稱"},
+    {"Destination already exists", "目标已存在", "目標已存在"},
+    {"Cannot delete SD root", "无法删除 SD 卡根目录", "無法刪除 SD 卡根目錄"},
+    {"File not found", "文件不存在", "檔案不存在"},
+    {"Not found", "未找到", "找不到"},
+    {"Unknown action", "未知操作", "未知操作"},
+    {"Delete failed; folders must be empty", "删除失败，文件夹必须为空", "刪除失敗，資料夾必須為空"},
+    {"File operation failed", "文件操作失败", "檔案操作失敗"},
+    {"Operation complete", "操作完成", "操作完成"},
+    {"Invalid file path", "无效文件路径", "無效檔案路徑"},
+    {"Open failed", "打开失败", "開啟失敗"},
+    {"Download buffer unavailable", "无法分配下载缓冲区", "無法配置下載緩衝區"},
+    {"Invalid destination path", "无效目标路径", "無效目標路徑"},
+    {"Unsupported file type", "不支持的文件类型", "不支援的檔案類型"},
+    {"Destination directory unavailable", "目标目录不可用", "目標目錄無法使用"},
+    {"Failed to create file", "创建文件失败", "建立檔案失敗"},
+    {"SD DMA buffer allocation failed", "SD DMA 缓冲区分配失败", "SD DMA 緩衝區配置失敗"},
+    {"SD write buffer setup failed", "SD 写入缓冲区设置失败", "SD 寫入緩衝區設定失敗"},
+    {"Upload buffer allocation failed", "上传缓冲区分配失败", "上傳緩衝區配置失敗"},
+    {"Upload receive failed", "接收上传数据失败", "接收上傳資料失敗"},
+    {"SD write failed", "SD 卡写入失败", "SD 卡寫入失敗"},
+    {"SD final flush failed", "SD 卡最终写入失败", "SD 卡最後寫入失敗"},
+    {"Failed to preserve previous file", "保留原文件失败", "保留原檔案失敗"},
+    {"Failed to commit uploaded file", "保存上传文件失败", "儲存上傳檔案失敗"},
+    {"Saved %s (%u bytes)", "已保存 %s（%u 字节）", "已儲存 %s（%u 位元組）"},
+    {"Attached image cannot be opened", "无法打开附件图片", "無法開啟附件圖片"},
+    {"Attached image exceeds the 4 MiB device limit", "附件图片超过 4 MiB 上限", "附件圖片超過 4 MiB 上限"},
+    {"Attached image cannot be read", "无法读取附件图片", "無法讀取附件圖片"},
+    {"Attached image read failed", "读取附件图片失败", "讀取附件圖片失敗"},
+    {"Failed to create HTTPS client", "创建 HTTPS 连接失败", "建立 HTTPS 連線失敗"},
+    {"HTTPS request failed: ", "HTTPS 请求失败：", "HTTPS 請求失敗："},
+    {"API key is valid, but Flash or Pro is unavailable", "API Key 有效，但 Flash 或 Pro 不可用", "API Key 有效，但 Flash 或 Pro 無法使用"},
+    {"Conversation is empty", "对话为空", "對話為空"},
+    {"WiFi was not prepared before starting the chat task", "对话开始前网络尚未就绪", "對話開始前網路尚未就緒"},
+    {"DeepSeek stream display was interrupted", "DeepSeek 流式显示已中断", "DeepSeek 串流顯示已中斷"},
+    {"DeepSeek response was interrupted", "DeepSeek 回复已中断", "DeepSeek 回覆已中斷"},
+    {"DeepSeek returned an empty response", "DeepSeek 返回了空回复", "DeepSeek 傳回了空回覆"},
+    {"Hot list response has no Data field", "热榜响应缺少 Data 字段", "熱榜回應缺少 Data 欄位"},
+    {"Hot list response has no Items field", "热榜响应缺少 Items 字段", "熱榜回應缺少 Items 欄位"},
+    {"Zhihu returned an empty hot list", "知乎返回了空热榜", "知乎傳回了空熱榜"},
+    {"Failed to create Zhihu HTTPS client", "创建知乎 HTTPS 连接失败", "建立知乎 HTTPS 連線失敗"},
+    {"Zhihu HTTPS request failed: ", "知乎 HTTPS 请求失败：", "知乎 HTTPS 請求失敗："},
+    {"Zhihu HTTP error ", "知乎 HTTP 错误 ", "知乎 HTTP 錯誤 "},
+    {"Zhihu page HTTP error ", "知乎页面 HTTP 错误 ", "知乎頁面 HTTP 錯誤 "},
+    {"Zhihu API ", "知乎 API ", "知乎 API "},
+    {"Invalid Zhihu content URL", "无效的知乎内容链接", "無效的知乎內容連結"},
+    {"Failed to create content HTTPS client", "创建正文 HTTPS 连接失败", "建立正文 HTTPS 連線失敗"},
+    {"Content request failed: ", "正文请求失败：", "正文請求失敗："},
+    {"No readable body found in Zhihu page", "知乎页面没有可读正文", "知乎頁面沒有可讀正文"},
+    {"API key valid: V4 Flash and V4 Pro available", "API Key 有效：V4 Flash 和 V4 Pro 均可用", "API Key 有效：V4 Flash 和 V4 Pro 均可使用"},
+    {"login response has no uid", "登录响应缺少用户标识", "登入回應缺少使用者識別碼"},
+    {"invalid login uid", "无效登录标识", "無效登入識別碼"},
+    {"failed to save login session", "保存登录会话失败", "儲存登入工作階段失敗"},
+    {"HTTP client is unavailable", "HTTP 客户端不可用", "HTTP 用戶端無法使用"},
+    {"WeRead login is required", "请先登录微信读书", "請先登入微信讀書"},
+    {"API key response has no key", "响应未返回 API Key", "回應未傳回 API Key"},
+    {"failed to save API key", "保存 API Key 失败", "儲存 API Key 失敗"},
+    {"login expired", "登录已过期", "登入已過期"},
+    {"shelf has no books", "书架响应缺少书籍数据", "書架回應缺少書籍資料"},
+    {"chapterInfos has no data", "章节响应缺少数据", "章節回應缺少資料"},
+    {"book has no readable chapters", "书籍没有可读章节", "書籍沒有可讀章節"},
+    {"review/list has no reviews", "评论响应缺少评论数据", "評論回應缺少評論資料"},
+    {"WeRead official API key is unavailable", "微信读书官方 API Key 不可用", "微信讀書官方 API Key 無法使用"},
+    {"readreviews response has no matching range", "评论响应没有匹配的划线范围", "評論回應沒有符合的劃線範圍"},
+    {"readreviews returned an unrecognized or empty comment page", "评论页面为空或无法识别", "評論頁面為空或無法辨識"},
+    {"reader page has no psvts", "阅读会话信息不完整，请重新登录", "閱讀工作階段資訊不完整，請重新登入"},
+    {"Web Reader login is incomplete (dangerMode). Reopen WeRead and scan again.", "网页登录信息不完整，请重新打开微信读书并扫码。", "網頁登入資訊不完整，請重新開啟微信讀書並掃碼。"},
+    {"Login session expired. Tap to scan the QR code again.", "登录会话已过期，请重新扫码。", "登入工作階段已過期，請重新掃碼。"},
+    {"EPUB PSRAM allocation failed", "EPUB 内存分配失败", "EPUB 記憶體配置失敗"},
+    {"chapter is not cached and WiFi connection failed", "章节未缓存，且网络连接失败", "章節尚未快取，且網路連線失敗"},
+    {"failed to save EPUB payload", "保存 EPUB 内容失败", "儲存 EPUB 內容失敗"},
+    {"failed to save chapter cache", "保存章节缓存失败", "儲存章節快取失敗"},
+    {"chapter download failed", "章节下载失败", "章節下載失敗"},
+    {"EPUB chapter extraction failed", "EPUB 章节提取失败", "EPUB 章節擷取失敗"},
+    {"chapter cache read failed", "章节缓存读取失败", "章節快取讀取失敗"},
+    {"empty shard payload", "章节分片内容为空", "章節分片內容為空"},
+    {"PSRAM allocation failed", "PSRAM 内存分配失败", "PSRAM 記憶體配置失敗"},
+    {"shard MD5 mismatch", "章节分片校验失败", "章節分片驗證失敗"},
+    {"empty encoded content", "编码内容为空", "編碼內容為空"},
+    {"invalid base64 content", "Base64 内容无效", "Base64 內容無效"},
+    {"decoded PSRAM allocation failed", "解码内存分配失败", "解碼記憶體配置失敗"},
+    {"base64 decode failed", "Base64 解码失败", "Base64 解碼失敗"},
+    {"HTTP client allocation failed", "HTTP 客户端内存分配失败", "HTTP 用戶端記憶體配置失敗"},
+    {"response exceeds PSRAM limit", "响应内容超过内存上限", "回應內容超過記憶體上限"},
+    {"network time synchronization failed", "网络校时失败", "網路校時失敗"},
+    {"Read time %llu h %02llu m", "已读 %llu时%02llu分", "已讀 %llu時%02llu分"},
+    {"Could not open DOCX package", "无法打开 DOCX 文件（不支持加密文件）", "無法開啟 DOCX 檔案（不支援加密檔案）"},
+    {"DOCX main document missing or too large", "DOCX 正文缺失或超过大小限制", "DOCX 正文缺失或超過大小限制"},
+    {"DOCX has no readable content or is malformed", "DOCX 没有可读内容或格式损坏", "DOCX 沒有可讀內容或格式損壞"},
+    {"Could not open ZIP comic (ZIP64 is unsupported)", "无法打开 ZIP 漫画（不支持 ZIP64）", "無法開啟 ZIP 漫畫（不支援 ZIP64）"},
+    {"ZIP comic contains encrypted or unsupported images", "ZIP 漫画包含加密图片或不支持的压缩方式", "ZIP 漫畫包含加密圖片或不支援的壓縮方式"},
+    {"ZIP comic image exceeds 12 MiB limit", "ZIP 漫画单张图片超过 12 MiB 限制", "ZIP 漫畫單張圖片超過 12 MiB 限制"},
+    {"ZIP comic has no JPG, PNG or BMP images", "ZIP 漫画内没有 JPG、PNG 或 BMP 图片", "ZIP 漫畫內沒有 JPG、PNG 或 BMP 圖片"},
 };
 static_assert(sizeof(kText) / sizeof(kText[0]) == static_cast<size_t>(TextId::Count));
 
@@ -577,6 +724,27 @@ const char *text(TextId id)
     const char *selected = s_language == Language::SimplifiedChinese ? value.zh_hans
                          : s_language == Language::TraditionalChinese ? value.zh_hant : value.en;
     return selected && selected[0] ? selected : value.en;
+}
+
+std::string localize_message(const std::string &message)
+{
+    if (get() == Language::English || message.empty()) return message;
+    for (size_t i = 0; i < static_cast<size_t>(TextId::Count); ++i) {
+        if (message == kText[i].en) return text(static_cast<TextId>(i));
+    }
+    // Prefixes retain the transport status or ESP-IDF error after the label.
+    size_t matched = 0;
+    TextId matched_id = TextId::Count;
+    for (size_t i = 0; i < static_cast<size_t>(TextId::Count); ++i) {
+        const char *prefix = kText[i].en;
+        const size_t length = std::strlen(prefix);
+        if (length <= matched || prefix[length - 1] != ' ') continue;
+        if (message.compare(0, length, prefix) == 0) {
+            matched = length;
+            matched_id = static_cast<TextId>(i);
+        }
+    }
+    return matched ? std::string(text(matched_id)) + message.substr(matched) : message;
 }
 
 const char *native_name(Language language)

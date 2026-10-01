@@ -2,6 +2,7 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "ui/SystemFont.h"
+#include "ui/UiLocale.h"
 #include <M5Unified.h>
 
 /** Simple placeholder — shows a label, tap to pop back. */
@@ -14,7 +15,7 @@ public:
         M5.Display.fillScreen(TFT_WHITE);
         M5.Display.setTextColor(TFT_BLACK);
         system_font::draw_center(M5.Display, _label, M5.Display.width()/2, M5.Display.height()/2 - 48);
-        system_font::draw_center(M5.Display, "Tap to go back", M5.Display.width()/2, M5.Display.height()/2 + 12);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::TapToReturn), M5.Display.width()/2, M5.Display.height()/2 + 12);
         M5.Display.display();
         M5.Display.endWrite();
     }
