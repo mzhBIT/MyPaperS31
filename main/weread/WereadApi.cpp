@@ -4,7 +4,7 @@
 #include "wifi/wifi_setting.h"
 
 #include <esp_log.h>
-#include <esp_netif_sntp.h>
+#include "time/network_time.h"
 #include <esp_random.h>
 #include <freertos/FreeRTOS.h>
 #include <mbedtls/sha256.h>
@@ -36,12 +36,7 @@ bool ensure_signed_request_time(std::string *error)
 
     ESP_LOGI(TAG, "system clock invalid (%lld), synchronizing SNTP",
              static_cast<long long>(now));
-    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("ntp.aliyun.com");
-    esp_err_t result = esp_netif_sntp_init(&config);
-    if (result == ESP_OK) {
-        result = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(10000));
-        esp_netif_sntp_deinit();
-    }
+    esp_err_t result = network_time_sync(10000);
     now = std::time(nullptr);
     if (result == ESP_OK && now >= MIN_VALID_UNIX_TIME) {
         ESP_LOGI(TAG, "SNTP synchronized unix=%lld", static_cast<long long>(now));

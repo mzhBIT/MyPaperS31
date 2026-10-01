@@ -1,4 +1,5 @@
 #include "wifi_setting.h"
+#include "time/network_time.h"
 
 #include <stdbool.h>
 #include <string.h>
@@ -107,6 +108,7 @@ static void wifi_setting_connect_event_handler(void *arg,
             s_sta_netif != NULL) {
             (void)esp_netif_set_default_netif(s_sta_netif);
         }
+        network_time_on_connected();
         if (s_wifi_event_group != NULL) {
             xEventGroupSetBits(s_wifi_event_group, WIFI_SETTING_CONNECTED_BIT);
         }

@@ -21,6 +21,7 @@
 #include "iot_usbh_rndis.h"
 #include "modem/ml307_sms.h"
 #include "wifi/wifi_setting.h"
+#include "time/network_time.h"
 
 static const char *TAG = "USB_MODEM_PROBE";
 
@@ -191,6 +192,7 @@ static void rndis_event_handler(void *arg, esp_event_base_t event_base,
             ESP_LOGI(TAG, "ML307A DNS: " IPSTR, IP2STR(&dns.ip.u_addr.ip4));
         }
         s_rndis_online = true;
+        network_time_on_connected();
     }
 }
 

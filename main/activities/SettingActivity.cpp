@@ -23,7 +23,7 @@
 #include <esp_err.h>
 #include <esp_log.h>
 #include <esp_timer.h>
-#include <esp_netif_sntp.h>
+#include "time/network_time.h"
 #include <sdkconfig.h>
 
 #include <algorithm>
@@ -1454,12 +1454,7 @@ private:
         const bool was_connected = wifi_setting_is_connected();
         esp_err_t ret = was_connected ? ESP_OK : wifi_setting_connect_saved(15000);
         if (ret == ESP_OK) {
-            esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("ntp.aliyun.com");
-            ret = esp_netif_sntp_init(&config);
-            if (ret == ESP_OK) {
-                ret = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(10000));
-                esp_netif_sntp_deinit();
-            }
+            ret = network_time_sync(10000);
             if (ret == ESP_OK && !time_basis_system_clock_valid()) ret = ESP_ERR_INVALID_RESPONSE;
         }
         if (!was_connected && wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_WIFI) {

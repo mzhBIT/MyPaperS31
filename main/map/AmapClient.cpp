@@ -6,7 +6,7 @@
 #include <esp_crt_bundle.h>
 #include <esp_http_client.h>
 #include <esp_log.h>
-#include <esp_netif_sntp.h>
+#include "time/network_time.h"
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -44,12 +44,7 @@ bool ensure_request_time(std::string *error)
     std::time_t now = std::time(nullptr);
     if (now >= MIN_VALID_UNIX_TIME) return true;
     ESP_LOGI(TAG, "system clock invalid, synchronizing SNTP");
-    esp_sntp_config_t config = ESP_NETIF_SNTP_DEFAULT_CONFIG("ntp.aliyun.com");
-    esp_err_t result = esp_netif_sntp_init(&config);
-    if (result == ESP_OK) {
-        result = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(10000));
-        esp_netif_sntp_deinit();
-    }
+    esp_err_t result = network_time_sync(10000);
     now = std::time(nullptr);
     if (result == ESP_OK && now >= MIN_VALID_UNIX_TIME) return true;
     if (error) *error = "Network time synchronization failed";

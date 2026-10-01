@@ -7,6 +7,7 @@ set(srcs
     "usb/usb_modem_probe.c"
     "modem/ml307_sms.cpp"
     "time/time_basis.cpp"
+    "time/network_time.cpp"
     "input/adc_keys.cpp"
     "input/touch_input.cpp"
     "ime/PinyinEngine.cpp"
