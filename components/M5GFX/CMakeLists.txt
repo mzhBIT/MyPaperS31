@@ -18,6 +18,9 @@ file(GLOB SRCS
      src/lgfx/v1/touch/*.cpp
      )
 set(COMPONENT_SRCS ${SRCS})
+if (IDF_TARGET STREQUAL "esp32s31")
+    list(FILTER COMPONENT_SRCS EXCLUDE REGEX "/(Bus_SPI|Light_PWM|Bus_EPD_V7|Panel_M5HDMI)\\.cpp$")
+endif()
 
 if (IDF_VERSION_MAJOR GREATER_EQUAL 5)
     set(COMPONENT_REQUIRES nvs_flash efuse driver esp_driver_rmt esp_timer esp_lcd esp_mm)
@@ -28,6 +31,9 @@ else()
 endif()
 
 ### If you use arduino-esp32 components, please activate next comment line.
+if (IDF_TARGET STREQUAL "esp32s31")
+    list(APPEND COMPONENT_REQUIRES esp_driver_spi esp_driver_i2c)
+endif()
 # list(APPEND COMPONENT_REQUIRES arduino-esp32)
 
 

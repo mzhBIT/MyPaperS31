@@ -1,5 +1,7 @@
 set(srcs
     "main.cpp"
+    "boards/Board.cpp"
+    "boards/MyPaperP4/BoardP4.cpp"
     "usb/usb_transfer_boot.c"
     "usb/usb_msc_mode.cpp"
     "usb/usb_modem_probe.c"

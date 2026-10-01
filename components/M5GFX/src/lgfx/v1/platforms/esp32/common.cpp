@@ -218,7 +218,7 @@ namespace lgfx
     if (conf.freq_mhz >= 80){
       return 80 * 1000000;
     }
-    #if defined ( CONFIG_IDF_TARGET_ESP32P4 )
+    #if defined ( CONFIG_IDF_TARGET_ESP32P4 ) || defined(CONFIG_IDF_TARGET_ESP32S31)
       return (conf.source_freq_mhz * 1000000) / conf.div.integer;
     #else
       return (conf.source_freq_mhz * 1000000) / conf.div;
@@ -360,6 +360,15 @@ namespace lgfx
 
   void pinMode(int_fast16_t pin, pin_mode_t mode)
   {
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    if (pin < 0 || pin >= GPIO_NUM_MAX) return;
+    gpio_config_t cfg = {};
+    cfg.pin_bit_mask = 1ULL << pin;
+    cfg.mode = mode == pin_mode_t::output ? GPIO_MODE_OUTPUT : GPIO_MODE_INPUT;
+    cfg.pull_up_en = mode == pin_mode_t::input_pullup ? GPIO_PULLUP_ENABLE : GPIO_PULLUP_DISABLE;
+    cfg.pull_down_en = mode == pin_mode_t::input_pulldown ? GPIO_PULLDOWN_ENABLE : GPIO_PULLDOWN_DISABLE;
+    gpio_config(&cfg);
+#else
     auto gpio_num = (gpio_num_t)pin;
     if ((size_t)gpio_num >= GPIO_NUM_MAX) return;
 
@@ -416,6 +425,7 @@ namespace lgfx
     *gpio_en_reg = 1u << (pin & 31);
 
     set_gpio_func_out_sel(GPIO.func_out_sel_cfg[pin], SIG_GPIO_OUT_IDX);
+#endif
   }
 
 //----------------------------------------------------------------------------
@@ -545,6 +555,7 @@ namespace lgfx
 
 //----------------------------------------------------------------------------
 
+#if !defined(CONFIG_IDF_TARGET_ESP32S31)
   namespace spi
   {
 
@@ -1978,6 +1989,7 @@ namespace lgfx
 
   }
 
+#endif // legacy SPI/I2C register backends; S31 uses IDF master driver
 //----------------------------------------------------------------------------
  }
 }

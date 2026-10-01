@@ -1,5 +1,14 @@
 ﻿#pragma once
 
+// S31 starts without phase producers until real-board transfer tests pass.
+// 304 bytes/row at 20 MHz plus 22 porch clocks needs more than 16 us.
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+#define MYPAPER_EPD_2D_GC16_PIPELINE 0
+#define MYPAPER_EPD_2D_DU4_PIPELINE 0
+#define MYPAPER_EPD_2D_LINE_PERIOD_US 17u
+#define MYPAPER_EPD_2D_CKV_HIGH_DUS 163u
+#endif
+
 // Skip PSRAM state reads for inactive 16-pixel groups. The original full-row
 // blitter remains available as an allocation/self-test fallback.
 #ifndef MYPAPER_EPD_USE_ACTIVE_GROUP_MAP
@@ -243,15 +252,24 @@
 
 #if MYPAPER_EPD_PANEL == MYPAPER_EPD_PANEL_E0470A01
 #define MYPAPER_EPD_PANEL_NAME "E0470A01-AF-S"
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+#define MYPAPER_EPD_BUS_WIDTH 8
+#else
 #define MYPAPER_EPD_BUS_WIDTH 16
+#endif
 #define MYPAPER_EPD_LINE_PADDING 10
 #define MYPAPER_EPD_MEMORY_WIDTH 1216
 #define MYPAPER_EPD_PANEL_WIDTH 1216
 #define MYPAPER_EPD_MEMORY_HEIGHT 684
 #define MYPAPER_EPD_PANEL_HEIGHT 684
 #define MYPAPER_EPD_OFFSET_ROTATION 3
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+#define MYPAPER_EPD_VCOM_MV 1200
+#define MYPAPER_EPD_OUTPUT_PERMUTE 0
+#else
 #define MYPAPER_EPD_VCOM_MV 1050
 #define MYPAPER_EPD_OUTPUT_PERMUTE 1
+#endif
 
 #elif MYPAPER_EPD_PANEL == MYPAPER_EPD_PANEL_ED052TC4
 #define MYPAPER_EPD_PANEL_NAME "ED052TC4"

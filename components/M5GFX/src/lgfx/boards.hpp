@@ -39,6 +39,7 @@ namespace lgfx // This should not be changed to "m5gfx"
     , board_M5StopWatch
     , board_MyPaperS3
     , board_MyPaperP4
+    , board_MyPaperS31
 
 /// non display boards
     , board_M5AtomLite = 128

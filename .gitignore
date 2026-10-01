@@ -19,6 +19,8 @@
 # Build artifacts and directories
 **/build/
 build/
+/build-p4/
+/build-s31/
 *.o
 *.a
 *.out

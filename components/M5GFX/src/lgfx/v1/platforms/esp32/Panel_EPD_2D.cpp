@@ -1,6 +1,6 @@
 #include "Panel_EPD_2D.hpp"
 
-#if SOC_LCD_I80_SUPPORTED && (defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32P4))
+#if SOC_LCD_I80_SUPPORTED && (defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32P4) || defined(CONFIG_IDF_TARGET_ESP32S31))
 
 #include "lgfx/v1/platforms/common.hpp"
 #include "lgfx/v1/platforms/esp32/MyPaper_EPD_Config.hpp"
@@ -1111,7 +1111,7 @@ namespace lgfx
         heap_caps_aligned_alloc(16, frame_bytes, MALLOC_CAP_SPIRAM));
     _target_buf = static_cast<uint8_t*>(
         heap_caps_aligned_alloc(16, frame_bytes, MALLOC_CAP_SPIRAM));
-#if defined(CONFIG_IDF_TARGET_ESP32P4) \
+#if (defined(CONFIG_IDF_TARGET_ESP32P4) || defined(CONFIG_IDF_TARGET_ESP32S31)) \
  && MYPAPER_EPD_USE_2D_ENGINE && MYPAPER_EPD_2D_CONTINUOUS_SCAN
     _scan_frame_bytes_2d = (memory_w >> 2) * memory_h;
     _scan_frame_2d = static_cast<uint8_t*>(heap_caps_aligned_alloc(
@@ -1142,7 +1142,7 @@ namespace lgfx
 #endif
 
     if (_buf == nullptr || _physical_buf == nullptr || _target_buf == nullptr
-#if defined(CONFIG_IDF_TARGET_ESP32P4) \
+#if (defined(CONFIG_IDF_TARGET_ESP32P4) || defined(CONFIG_IDF_TARGET_ESP32S31)) \
  && MYPAPER_EPD_USE_2D_ENGINE && MYPAPER_EPD_2D_CONTINUOUS_SCAN
      || _scan_frame_2d == nullptr
 #else
@@ -1155,7 +1155,7 @@ namespace lgfx
                _dma_bufs_2d[0], _dma_bufs_2d[1], _scan_frame_2d);
       return false;
     }
-#if defined(CONFIG_IDF_TARGET_ESP32P4) \
+#if (defined(CONFIG_IDF_TARGET_ESP32P4) || defined(CONFIG_IDF_TARGET_ESP32S31)) \
  && MYPAPER_EPD_USE_2D_ENGINE && MYPAPER_EPD_2D_CONTINUOUS_SCAN
     memset(_scan_frame_2d, 0, _scan_frame_bytes_2d);
     if (_du4_pair_lut_2d == nullptr) {
@@ -1666,7 +1666,7 @@ namespace lgfx
       gc16_phase_pipeline_t gc16_pipeline = {};
       bool du4_pipeline_active = false;
       du4_phase_pipeline_t du4_pipeline = {};
-#if defined(CONFIG_IDF_TARGET_ESP32P4) \
+#if (defined(CONFIG_IDF_TARGET_ESP32P4) || defined(CONFIG_IDF_TARGET_ESP32S31)) \
  && MYPAPER_EPD_USE_2D_ENGINE && MYPAPER_EPD_2D_CONTINUOUS_SCAN \
  && MYPAPER_EPD_2D_PRECOMPUTE_WAVEFORM
       // DU skips the whole-phase cache only while the experimental line
@@ -2120,7 +2120,7 @@ namespace lgfx
       }
 
       bool scan_ok = true;
-#if defined(CONFIG_IDF_TARGET_ESP32P4) \
+#if (defined(CONFIG_IDF_TARGET_ESP32P4) || defined(CONFIG_IDF_TARGET_ESP32S31)) \
  && MYPAPER_EPD_USE_2D_ENGINE && MYPAPER_EPD_2D_CONTINUOUS_SCAN
       uint64_t scan_total_us = 0;
       uint32_t scan_min_us = UINT32_MAX;

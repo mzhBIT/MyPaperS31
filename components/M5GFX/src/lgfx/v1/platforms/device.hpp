@@ -59,6 +59,11 @@ Contributors:
   #include "esp32/Bus_Parallel8.hpp"
   #include "esp32/Panel_CVBS.hpp"
 
+ #elif defined (CONFIG_IDF_TARGET_ESP32S31)
+
+  #include "../Light.hpp"
+  #include "esp32/Bus_I2C.hpp"
+
  #elif defined (CONFIG_IDF_TARGET_ESP32H2)
 
   #include "esp32/Light_PWM.hpp"

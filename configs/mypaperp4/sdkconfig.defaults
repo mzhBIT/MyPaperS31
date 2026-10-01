@@ -1,0 +1,2 @@
+# Applied AFTER root sdkconfig.defaults, which remains the P4 baseline.
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="configs/mypaperp4/partitions.csv"

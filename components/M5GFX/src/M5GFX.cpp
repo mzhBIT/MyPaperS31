@@ -39,6 +39,12 @@
 
 static constexpr int_fast16_t in_i2c_port = I2C_NUM_1;
 
+
+#elif defined(CONFIG_IDF_TARGET_ESP32S31)
+#include "lgfx/v1/platforms/esp32/Bus_EPD_S31.hpp"
+#include "lgfx/v1/platforms/esp32/Panel_EPD_2D.hpp"
+#include "lgfx/v1/platforms/esp32/MyPaper_EPD_Config.hpp"
+
 #elif defined ( CONFIG_IDF_TARGET_ESP32S3 )
 
 #include "lgfx/v1/panel/Panel_ED2208.hpp"
@@ -756,6 +762,7 @@ namespace m5gfx
   }
 
   __attribute__ ((unused))
+#if !defined(CONFIG_IDF_TARGET_ESP32S31)
   static std::uint32_t _read_panel_id(lgfx::Bus_SPI* bus, std::int32_t pin_cs, std::uint32_t cmd = 0x04, std::uint8_t dummy_read_bit = 1) // 0x04 = RDDID command
   {
     bus->beginTransaction();
@@ -773,6 +780,7 @@ namespace m5gfx
     return res;
   }
 
+#endif
   void M5GFX::_set_backlight(lgfx::ILight* bl)
   {
 //  if (_light_last) { delete _light_last; }
@@ -782,6 +790,7 @@ namespace m5gfx
 
   void M5GFX::_set_pwm_backlight(std::int16_t pin, std::uint8_t ch, std::uint32_t freq, bool invert, uint8_t offset)
   {
+#if !defined(CONFIG_IDF_TARGET_ESP32S31)
     auto bl = new lgfx::Light_PWM();
     auto cfg = bl->config();
     cfg.pin_bl = pin;
@@ -791,6 +800,7 @@ namespace m5gfx
     cfg.invert = invert;
     bl->config(cfg);
     _set_backlight(bl);
+#endif
   }
 
   bool M5GFX::init_impl(bool use_reset, bool use_clear)
@@ -910,6 +920,7 @@ namespace m5gfx
 
   board_t M5GFX::autodetect(bool use_reset, board_t board)
   {
+#if !defined(CONFIG_IDF_TARGET_ESP32S31)
     auto bus_spi = new Bus_SPI();
     _bus_last.reset(bus_spi);
 
@@ -921,6 +932,7 @@ namespace m5gfx
     bus_cfg.freq_read  = 8000000;
     bus_cfg.spi_mode = 0;
     bus_cfg.use_lock = true;
+#endif
 
 #if !defined (CONFIG_IDF_TARGET) || defined (CONFIG_IDF_TARGET_ESP32)
 
@@ -2886,6 +2898,43 @@ The usage of each pin is as follows.
       }
     }
 
+#elif defined(CONFIG_IDF_TARGET_ESP32S31)
+  {
+    // Compile-time Board selection, never probe another board's cached pins.
+    board = board_t::board_MyPaperS31;
+    auto bus_epd = new lgfx::Bus_EPD_S31();
+    auto p = new lgfx::Panel_EPD_2D();
+    _bus_last.reset(bus_epd);
+    _panel_last.reset(p);
+    auto bc = bus_epd->config();
+    bc.bus_width = 8;
+    bc.bus_speed = 20000000;
+    for (int i = 0; i < 8; ++i) bc.pin_data[i] = 8 + i;
+    bc.pin_cl = 16; bc.pin_le = 17; bc.pin_oe = 18;
+    bc.pin_sph = 4; bc.pin_pwr = 19; bc.pin_ckv = 40; bc.pin_spv = 35;
+    bus_epd->config(bc);
+    p->setBus(bus_epd);
+    auto pc = p->config();
+    pc.memory_width = pc.panel_width = 1216;
+    pc.memory_height = pc.panel_height = 684;
+    pc.offset_rotation = 3;
+    pc.bus_shared = false;
+    p->config(pc);
+    auto detail = p->config_detail();
+    detail.line_padding = 0;
+    p->config_detail(detail);
+    auto t = new lgfx::Touch_FT5x06();
+    _touch_last.reset(t);
+    auto tc = t->config();
+    tc.pin_sda = 0; tc.pin_scl = 1; tc.pin_rst = -1; tc.pin_int = -1;
+    tc.i2c_port = 1; tc.i2c_addr = 0x38; tc.freq = 400000;
+    tc.x_min = 0; tc.x_max = 683; tc.y_min = 0; tc.y_max = 1215;
+    tc.offset_rotation = 0; tc.bus_shared = true;
+    t->config(tc);
+    p->touch(t);
+    ESP_LOGI(LIBRARY_NAME, "MyPaperS31: 8-bit EPD / FT6336U");
+    goto init_clear;
+  }
 #elif defined (CONFIG_IDF_TARGET_ESP32C6)
 
     bus_cfg.spi_host = SPI2_HOST;

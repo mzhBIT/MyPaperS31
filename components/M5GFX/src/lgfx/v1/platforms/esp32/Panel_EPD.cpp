@@ -17,7 +17,7 @@ Contributors:
 /----------------------------------------------------------------------------*/
 
 #include "Panel_EPD.hpp"
-#if SOC_LCD_I80_SUPPORTED && (defined (CONFIG_IDF_TARGET_ESP32S3) || defined (CONFIG_IDF_TARGET_ESP32P4))
+#if SOC_LCD_I80_SUPPORTED && (defined (CONFIG_IDF_TARGET_ESP32S3) || defined (CONFIG_IDF_TARGET_ESP32P4) || defined (CONFIG_IDF_TARGET_ESP32S31))
 
 #include "lgfx/v1/Bus.hpp"
 #include "lgfx/v1/platforms/common.hpp"

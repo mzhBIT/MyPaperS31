@@ -21,8 +21,8 @@
 #include "reader_font.h"
 #include "reader_style.h"
 #include "ui/UiLocale.h"
-#include "frontlight/frontlight.h"
 #include "wifi/wifi_setting.h"
+#include "boards/Board.h"
 
 extern void launch_home();
 
@@ -46,6 +46,7 @@ static void init_nvs()
 extern "C" void app_main(void)
 {
     init_nvs();
+    mypaper::board::log_profile();
 
     esp_err_t locale_ret = ui_locale::init();
     if (locale_ret != ESP_OK) {
@@ -64,41 +65,11 @@ extern "C" void app_main(void)
 
     const bool usb_transfer_mode = usb_transfer_boot_requested();
 
-    // The SD interface and EPD D9-D11 share the ESP32-P4 VDD_IO_5 domain.
-    // Mounting SD configures on-chip LDO channel 4 to 3.3 V. Do this before
-    // M5.begin(), otherwise the EPD bus starts while that domain is still at
-    // its default ~1.9 V level.
-    esp_err_t sd_ret = usb_transfer_mode
-                           ? storage_sdcard_init_usb_medium()
-                           : storage_sdcard_mount();
-    if (sd_ret == ESP_OK && !usb_transfer_mode) {
-        app_paths::ensure_data_dir();
-    } else if (sd_ret != ESP_OK) {
-        ESP_LOGW(TAG, "%s failed before display init: %s",
-                 usb_transfer_mode ? "SD raw-medium initialization" : "SD card mount",
-                 esp_err_to_name(sd_ret));
-    }
-
-    auto cfg = M5.config();
-    cfg.internal_imu = false;
-    cfg.external_imu = false;
-    cfg.internal_spk = false;
-    cfg.internal_rtc = false;
-    cfg.external_rtc = false;
-    // M5Unified normally clears the display during Display.init() and once
-    // again near the end of M5.begin(). Avoid those duplicate full refreshes;
-    // HomeActivity will submit the first real frame once initialization ends.
-    cfg.clear_display = false;
-    M5.begin(cfg);
-
-    if (!M5.Display.width() || !M5.Display.height()) {
+    const auto hardware = mypaper::board::initialize_hardware(usb_transfer_mode);
+    if (!hardware.display_ready) {
         ESP_LOGE(TAG, "Display init failed");
         esp_restart();
     }
-
-    // M5.begin() initializes the PCA9535/I2C bus used by the EPD. Restore
-    // frontlight only afterwards so its enable line cannot race bus setup.
-    frontlight_init();
 
     if (usb_transfer_mode) {
         touch_input_init();

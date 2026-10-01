@@ -105,6 +105,13 @@ if (_inited)
 
   size_t Touch_FT5x06::_read_data(uint8_t* readdata)
   {
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    const uint8_t reg = 0x02;
+    if (!lgfx::i2c::transactionWriteRead(_cfg.i2c_port, _cfg.i2c_addr,
+        &reg, 1, readdata, max_touch_points * 6 - 1, _cfg.freq)) return 0;
+    const auto points = std::min<uint_fast8_t>(max_touch_points, readdata[0] & 0x0F);
+    return points ? points * 6 - 1 : 1;
+#else
     /// 戻り値res: 通信に失敗した場合は0、通信に成功した場合はByte数
     size_t res = 0;
     if (lgfx::i2c::beginTransaction(_cfg.i2c_port, _cfg.i2c_addr, _cfg.freq, false))
@@ -134,6 +141,7 @@ if (_inited)
       lgfx::i2c::endTransaction(_cfg.i2c_port).has_value();
     }
     return res;
+#endif
   }
 
   uint_fast8_t Touch_FT5x06::getTouchRaw(touch_point_t *tp, uint_fast8_t count)
