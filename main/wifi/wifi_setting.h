@@ -54,6 +54,8 @@ esp_err_t wifi_setting_scan(wifi_setting_ap_t *records,
 esp_err_t wifi_setting_connect(const char *ssid, const char *password, int timeout_ms);
 esp_err_t wifi_setting_connect_saved(int timeout_ms);
 bool wifi_setting_is_connected(void);
+// Actual Wi-Fi radio state, independent of the selected Wi-Fi/4G uplink.
+bool wifi_setting_is_enabled(void);
 wifi_setting_network_mode_t wifi_setting_get_network_mode(void);
 esp_err_t wifi_setting_set_network_mode(wifi_setting_network_mode_t mode);
 bool wifi_setting_load_credentials(char *ssid,

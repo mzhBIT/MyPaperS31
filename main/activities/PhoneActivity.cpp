@@ -8,6 +8,7 @@
 #include "modem/ml307_voice.h"
 #include "time/time_basis.h"
 #include "ui/SystemFont.h"
+#include "ui/HeaderLayout.h"
 #include "ui/UiLocale.h"
 
 #include <M5Unified.h>
@@ -30,7 +31,7 @@
 namespace {
 
 constexpr const char *TAG = "PHONE_UI";
-constexpr int HEADER_H = 78;
+constexpr int HEADER_H = header_layout::height;
 constexpr int TAB_BOTTOM = 148;
 constexpr int KEYPAD_TOP = 390;
 constexpr int KEYPAD_BOTTOM_MARGIN = 132;
@@ -321,7 +322,7 @@ public:
     bool on_touch(const TouchEvent &event) override
     {
         if (event.type == TouchEventType::Back ||
-            (event.type == TouchEventType::Tap && event.y < HEADER_H && event.x < 120)) {
+            (event.type == TouchEventType::Tap && header_layout::left_hit(event.x, event.y, 120))) {
             if (!_busy && _state == ML307_CALL_IDLE) ActivityManager::instance().pop();
             return true;
         }
@@ -573,9 +574,9 @@ private:
         M5.Display.setDither(false);
         M5.Display.setEpdMode(epd_mode_t::epd_text);
         M5.Display.fillScreen(TFT_WHITE);
-        system_font::draw_left(M5.Display, "<", pad, 14, TFT_BLACK);
-        system_font::draw_center(M5.Display, text(TextId::Phone), w / 2, 14, TFT_BLACK);
-        M5.Display.drawFastHLine(pad, HEADER_H - 1, w - pad * 2, TFT_BLACK);
+        system_font::draw_left(M5.Display, "<", pad, header_layout::text_y(), TFT_BLACK);
+        system_font::draw_center(M5.Display, text(TextId::Phone), w / 2, header_layout::text_y(), TFT_BLACK);
+        header_layout::draw_separator(M5.Display);
         system_font::draw_center(M5.Display, text(TextId::Dial), w / 4, HEADER_H + 14,
                                  _show_history ? TFT_DARKGRAY : TFT_BLACK);
         system_font::draw_center(M5.Display, text(TextId::CallHistory), w * 3 / 4,

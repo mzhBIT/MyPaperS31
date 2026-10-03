@@ -87,6 +87,28 @@ struct ReaderStyleV1 {
 };
 
 static ReaderStyle s_style;
+static ReaderStyle s_rss_style;
+static bool s_rss_initialized = false;
+
+static void ensure_rss_style()
+{
+    if (s_rss_initialized) return;
+    s_rss_initialized = true;
+    s_rss_style = s_style;
+    nvs_handle_t h;
+    if (nvs_open("rss_reader", NVS_READONLY, &h) == ESP_OK) {
+        ReaderStyle saved;
+        size_t len = sizeof(saved);
+        if (nvs_get_blob(h, "style_v7", &saved, &len) == ESP_OK && len == sizeof(saved)) {
+            s_rss_style = reader_style_clamp(saved);
+            nvs_close(h);
+            return;
+        }
+        nvs_close(h);
+    }
+    // Snapshot once: subsequent book setting changes do not change RSS defaults.
+    reader_style_save(ReaderProfile::Rss);
+}
 
 static bool load_style_from_sd(ReaderStyle *out)
 {
@@ -385,26 +407,30 @@ void reader_style_init()
     ESP_LOGI(TAG, "using default reader style");
 }
 
-ReaderStyle reader_style_get()
+ReaderStyle reader_style_get(ReaderProfile profile)
 {
+    if (profile == ReaderProfile::Rss) { ensure_rss_style(); return s_rss_style; }
     return s_style;
 }
 
-void reader_style_set(const ReaderStyle &style)
+void reader_style_set(const ReaderStyle &style, ReaderProfile profile)
 {
-    s_style = reader_style_clamp(style);
+    if (profile == ReaderProfile::Rss) { ensure_rss_style(); s_rss_style = reader_style_clamp(style); }
+    else s_style = reader_style_clamp(style);
 }
 
-bool reader_style_save()
+bool reader_style_save(ReaderProfile profile)
 {
+    if (profile == ReaderProfile::Rss) ensure_rss_style();
+    const ReaderStyle &selected = profile == ReaderProfile::Rss ? s_rss_style : s_style;
     nvs_handle_t h;
-    esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
+    esp_err_t err = nvs_open(profile == ReaderProfile::Rss ? "rss_reader" : NVS_NS, NVS_READWRITE, &h);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "cannot open NVS for reader style: %s", esp_err_to_name(err));
         return false;
     }
 
-    err = nvs_set_blob(h, NVS_KEY, &s_style, sizeof(s_style));
+    err = nvs_set_blob(h, NVS_KEY, &selected, sizeof(selected));
     if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
 

@@ -31,15 +31,15 @@ const char *base_name(const char *path)
 }
 
 void setting_text(int index, script_conversion::Mode script_mode, bool script_failed,
-                  reader_writing_mode::Mode writing_mode,
+                  reader_writing_mode::Mode writing_mode, ReaderProfile profile,
                   std::string *name, std::string *value)
 {
-    ReaderStyle style = reader_style_get();
+    ReaderStyle style = reader_style_get(profile);
     char buf[64] = {};
     switch (index) {
     case 0:
         *name = ui_locale::text(ui_locale::TextId::Font);
-        *value = base_name(reader_font_path());
+        *value = base_name(reader_font_path(profile));
         break;
     case 1:
         *name = ui_locale::text(ui_locale::TextId::FontSize);
@@ -93,9 +93,9 @@ void setting_text(int index, script_conversion::Mode script_mode, bool script_fa
     }
 }
 
-void beauty_text(int index, bool weread_mode, std::string *name, std::string *value)
+void beauty_text(int index, bool weread_mode, ReaderProfile profile, std::string *name, std::string *value)
 {
-    ReaderStyle style = reader_style_get();
+    ReaderStyle style = reader_style_get(profile);
     char buf[64] = {};
     if (weread_mode && index == 5) {
         *name = ui_locale::text(ui_locale::TextId::PublicComments);
@@ -127,14 +127,14 @@ void beauty_text(int index, bool weread_mode, std::string *name, std::string *va
         break;
     case 2:
         *name = ui_locale::text(ui_locale::TextId::Background);
-        *value = reader_background_enabled()
-                   ? base_name(reader_background_path())
+        *value = reader_background_enabled(profile)
+                   ? base_name(reader_background_path(profile))
                    : ui_locale::text(ui_locale::TextId::Off);
         break;
     case 3:
         *name = ui_locale::text(ui_locale::TextId::BookCover);
-        *value = reader_book_cover_enabled()
-                   ? base_name(reader_book_cover_path())
+        *value = reader_book_cover_enabled(profile)
+                   ? base_name(reader_book_cover_path(profile))
                    : ui_locale::text(ui_locale::TextId::Off);
         break;
     case 4:
@@ -290,7 +290,7 @@ bool ReaderOverlay::commit_pending_seek()
 
 void ReaderOverlay::adjust_setting(int delta)
 {
-    ReaderStyle style = reader_style_get();
+    ReaderStyle style = reader_style_get(m_profile);
     if (m_tab == Tab::Settings) {
         if (m_setting_focus == 0) return;
         if (m_setting_focus == 7) {
@@ -373,8 +373,8 @@ void ReaderOverlay::adjust_setting(int delta)
     } else {
         return;
     }
-    reader_style_set(style);
-    reader_style_save();
+    reader_style_set(style, m_profile);
+    reader_style_save(m_profile);
     m_settings_dirty = true;
 }
 
@@ -596,9 +596,9 @@ void ReaderOverlay::draw_settings(const Geometry &g)
 
         std::string name;
         std::string value;
-        if (m_tab == Tab::Beauty) beauty_text(index, m_weread_mode, &name, &value);
+        if (m_tab == Tab::Beauty) beauty_text(index, m_weread_mode, m_profile, &name, &value);
         else setting_text(index, m_script_mode, m_script_load_failed,
-                          m_writing_mode, &name, &value);
+                          m_writing_mode, m_profile, &name, &value);
         int text_y = row_y0 + std::max(1, (row_h - system_font::line_height()) / 2);
         const int max_name_w = std::max(40, w - STEP_BOX_W * 2 - STEP_BOX_GAP * 2 - VALUE_W - 32);
         system_font::draw_left(M5.Display, system_font::ellipsize(name, max_name_w), x + 12, text_y, fg);

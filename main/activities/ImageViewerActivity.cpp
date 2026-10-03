@@ -2,6 +2,7 @@
 #include "activities/ActivityManager.h"
 #include "renderer/TurboJpegDecoder.h"
 #include "ui/SystemFont.h"
+#include "ui/HeaderLayout.h"
 #include "ui/UiLocale.h"
 
 #include <M5Unified.h>
@@ -19,7 +20,7 @@
 #include <vector>
 
 static const char *TAG = "IMAGE_VIEW";
-static const int TOP_H = 50;
+static const int TOP_H = header_layout::height;
 
 static std::string short_name(const std::string &path)
 {
@@ -238,14 +239,14 @@ private:
         int w = M5.Display.width();
         M5.Display.fillRect(0, 0, w, TOP_H, TFT_WHITE);
         M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-        system_font::draw_left(M5.Display, "<", 8, 3, TFT_BLACK);
-        system_font::draw_center(M5.Display, system_font::ellipsize(short_name(_path), w - 170), w / 2, 3, TFT_BLACK);
+        system_font::draw_left(M5.Display, "<", 8, header_layout::text_y(), TFT_BLACK);
+        system_font::draw_center(M5.Display, system_font::ellipsize(short_name(_path), w - 170), w / 2, header_layout::text_y(), TFT_BLACK);
         if (_images.size() > 1) {
             char buf[24];
             std::snprintf(buf, sizeof(buf), "%d/%d", _index + 1, (int)_images.size());
-            system_font::draw_right(M5.Display, buf, w - 8, 3, TFT_BLACK);
+            system_font::draw_right(M5.Display, buf, w - 8, header_layout::text_y(), TFT_BLACK);
         }
-        M5.Display.drawFastHLine(0, TOP_H - 1, w, TFT_BLACK);
+        header_layout::draw_separator(M5.Display);
     }
 
     void draw_message(const char *msg)

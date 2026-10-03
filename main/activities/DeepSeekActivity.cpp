@@ -8,6 +8,7 @@
 #include "deepseek/DeepSeekConfig.h"
 #include "deepseek/DeepSeekSessionStore.h"
 #include "ui/SystemFont.h"
+#include "ui/HeaderLayout.h"
 #include "ui/TextInputOverlay.h"
 #include "ui/UiLocale.h"
 #include "wifi/wifi_setting.h"
@@ -29,7 +30,7 @@
 namespace {
 
 constexpr const char *TAG = "DEEPSEEK_UI";
-constexpr int HEADER_H = 76;
+constexpr int HEADER_H = header_layout::height;
 constexpr int PAD = 20;
 constexpr int SESSION_TOP = HEADER_H;
 constexpr int SESSION_ROW_H = 104;
@@ -54,16 +55,16 @@ void draw_header(const std::string &title)
 {
     int width = M5.Display.width();
     M5.Display.fillRect(0, 0, width, HEADER_H, TFT_WHITE);
-    system_font::draw_left(M5.Display, "<", 18, 12, TFT_BLACK);
+    system_font::draw_left(M5.Display, "<", 18, header_layout::text_y(), TFT_BLACK);
     system_font::draw_center(M5.Display,
                              system_font::ellipsize(title, width - 150),
-                             width / 2, 12, TFT_BLACK);
-    M5.Display.drawFastHLine(0, HEADER_H - 1, width, TFT_BLACK);
+                             width / 2, header_layout::text_y(), TFT_BLACK);
+    header_layout::draw_separator(M5.Display);
 }
 
 bool header_back_hit(const TouchEvent &event)
 {
-    return event.type == TouchEventType::Tap && event.x < 110 && event.y < HEADER_H;
+    return event.type == TouchEventType::Tap && header_layout::left_hit(event.x, event.y, 110);
 }
 
 size_t utf8_char_bytes(const std::string &text, size_t pos)

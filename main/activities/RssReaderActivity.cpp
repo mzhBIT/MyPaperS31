@@ -11,8 +11,10 @@
 #include "renderer/TurboJpegDecoder.h"
 #include "storage/app_paths.h"
 #include "ui/SystemFont.h"
+#include "ui/HeaderLayout.h"
 #include "ui/UiLocale.h"
 #include "ui/reader_background.h"
+#include "ui/reader_book_cover.h"
 #include "utils/CooperativeYield.h"
 #include "wifi/wifi_setting.h"
 
@@ -48,7 +50,8 @@
 
 static const char *TAG = "RSS";
 static const char *RSS_CONFIG_PATH = "/sdcard/rss.txt";
-static const int TOP_H = 50;
+static const int TOP_H = header_layout::height;
+static const int ARTICLE_TOP_H = 50;
 static const int FEED_ROW_H = 78;
 static const int NEWS_ROW_H = 150;
 static const int PAD = 12;
@@ -130,7 +133,7 @@ static document_layout::Pages g_article_pages;
 static std::string g_status;
 static RssItem g_external_article;
 
-extern void launch_reader_font_picker();
+extern void launch_reader_font_picker(ReaderProfile profile);
 
 RssCacheInfo rss_cache_info()
 {
@@ -200,7 +203,7 @@ bool clear_rss_cache(RssCacheInfo *removed)
 
 static epd_mode_t reader_epd_mode()
 {
-    switch (reader_style_get().refresh_mode) {
+    switch (reader_style_get(ReaderProfile::Rss).refresh_mode) {
     case 1:
         return epd_mode_t::epd_quality;
     case 2:
@@ -1090,6 +1093,12 @@ public:
 
     void on_create() override
     {
+        _reader_overlay.set_profile(ReaderProfile::Rss);
+        // Snapshot all preferences together on the first RSS visit.
+        reader_style_get(ReaderProfile::Rss);
+        reader_font_path(ReaderProfile::Rss);
+        reader_background_enabled(ReaderProfile::Rss);
+        reader_book_cover_enabled(ReaderProfile::Rss);
         _reader_overlay.set_chapters_enabled(false);
         _image_result_queue = xQueueCreate(1, sizeof(ArticleImageLoadResult *));
         if (_external_article) {
@@ -1191,7 +1200,9 @@ public:
             return true;
         }
 
-        if (event.type == TouchEventType::Tap && event.y < TOP_H && event.x < 140) {
+        if (event.type == TouchEventType::Tap &&
+            header_layout::left_hit(event.x, event.y, 140,
+                _view == View::Article ? article_header_height() : TOP_H)) {
             on_key(APP_KEY_BACK);
             return true;
         }
@@ -1295,15 +1306,15 @@ private:
     {
         if (action == ReaderOverlay::Action::None) return;
         if (action == ReaderOverlay::Action::OpenFont) {
-            launch_reader_font_picker();
+            launch_reader_font_picker(ReaderProfile::Rss);
             return;
         }
         if (action == ReaderOverlay::Action::OpenBackground) {
-            launch_reader_background_picker();
+            launch_reader_background_picker(ReaderProfile::Rss);
             return;
         }
         if (action == ReaderOverlay::Action::OpenBookCover) {
-            launch_reader_book_cover_picker();
+            launch_reader_book_cover_picker(ReaderProfile::Rss);
             return;
         }
 
@@ -1312,9 +1323,9 @@ private:
         _reader_overlay.close();
         if (apply_layout) {
             if (g_focus >= 0 && g_focus < (int)g_items.size()) {
-                if (reader_style_get().show_images && g_article_images.empty()) {
+                if (reader_style_get(ReaderProfile::Rss).show_images && g_article_images.empty()) {
                     prepare_article_image_placeholders(g_items[g_focus]);
-                } else if (!reader_style_get().show_images) {
+                } else if (!reader_style_get(ReaderProfile::Rss).show_images) {
                     clear_article_images();
                     _pending_image_refs.clear();
                 }
@@ -1805,21 +1816,23 @@ private:
 
     void draw_topbar(const char *title)
     {
-        M5.Display.fillRect(0, 0, M5.Display.width(), TOP_H, TFT_WHITE);
+        const int height = _view == View::Article ? ARTICLE_TOP_H : TOP_H;
+        const int text_y = _view == View::Article ? 3 : header_layout::text_y();
+        M5.Display.fillRect(0, 0, M5.Display.width(), height, TFT_WHITE);
         M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-        system_font::draw_left(M5.Display, "<", 12, 3, TFT_BLACK);
-        system_font::draw_center(M5.Display, title, M5.Display.width() / 2, 3, TFT_BLACK);
-        M5.Display.drawFastHLine(0, TOP_H - 1, M5.Display.width(), TFT_BLACK);
+        system_font::draw_left(M5.Display, "<", 12, text_y, TFT_BLACK);
+        system_font::draw_center(M5.Display, title, M5.Display.width() / 2, text_y, TFT_BLACK);
+        M5.Display.drawFastHLine(0, height - 1, M5.Display.width(), TFT_BLACK);
     }
 
     bool article_header_visible() const
     {
-        return reader_style_get().hide_header == 0;
+        return reader_style_get(ReaderProfile::Rss).hide_header == 0;
     }
 
     int article_header_height() const
     {
-        return article_header_visible() ? TOP_H : 0;
+        return article_header_visible() ? ARTICLE_TOP_H : 0;
     }
 
     int item_count() const
@@ -2091,7 +2104,7 @@ private:
         if (g_focus < 0 || g_focus >= (int)g_items.size()) return;
         if (_image_load_busy) _cancel_image_load = true;
         ++_article_generation;
-        if (reader_style_get().show_images) {
+        if (reader_style_get(ReaderProfile::Rss).show_images) {
             prepare_article_image_placeholders(g_items[g_focus]);
         } else {
             clear_article_images();
@@ -2115,13 +2128,13 @@ private:
     {
         if (g_focus < 0 || g_focus >= (int)g_items.size()) return;
         const RssItem &item = g_items[g_focus];
-        if (!reader_style_get().show_images) {
+        if (!reader_style_get(ReaderProfile::Rss).show_images) {
             clear_article_images();
             _pending_image_refs.clear();
         }
         ReaderTextStyle ts;
-        ts.font_path = reader_font_path();
-        ReaderStyle rs = reader_style_get();
+        ts.font_path = reader_font_path(ReaderProfile::Rss);
+        ReaderStyle rs = reader_style_get(ReaderProfile::Rss);
         ts.font_size = rs.font_size;
         ts.line_spacing = rs.line_spacing;
         ts.letter_spacing = rs.letter_spacing;
@@ -2214,9 +2227,9 @@ private:
             // to the same content block.
             image_block.resource = positioned.image->url;
             image_block.content_position = body_position + image_position;
-            // Allow tall article images to use most of a portrait page;
-            // the paginator still caps this to the available content height.
-            image_block.image_height = 960;
+            // No fixed image-height cap: the shared paginator fits the image
+            // to the current content area, respecting header/footer/margins
+            // and preserving its aspect ratio.
             image_block.blank_after = 0;
             blocks.push_back(std::move(image_block));
             body_cursor = image_position;
@@ -2266,7 +2279,7 @@ private:
 
     bool bing_wallpaper_mode() const
     {
-        return _current_feed_is_bing && reader_style_get().show_images && !g_article_images.empty();
+        return _current_feed_is_bing && reader_style_get(ReaderProfile::Rss).show_images && !g_article_images.empty();
     }
 
     bool draw_bing_wallpaper()
@@ -2465,7 +2478,7 @@ private:
 
     bool current_article_page_has_visible_image() const
     {
-        if (!reader_style_get().show_images) return false;
+        if (!reader_style_get(ReaderProfile::Rss).show_images) return false;
         if (g_page < 0 || g_page >= (int)g_article_pages.size()) return false;
         const auto &page = g_article_pages[(size_t)g_page];
         for (const auto &item : page) {
@@ -2479,7 +2492,7 @@ private:
 
     epd_mode_t select_article_refresh_mode()
     {
-        ReaderStyle style = reader_style_get();
+        ReaderStyle style = reader_style_get(ReaderProfile::Rss);
         epd_mode_t preferred = reader_epd_mode();
         // Do not bypass image-page Quality handling when HD is selected.
         if (preferred == epd_mode_t::epd_quality) {
@@ -2537,15 +2550,15 @@ private:
         epd_mode_t default_mode = reader_epd_mode();
         M5.Display.startWrite();
         M5.Display.setEpdMode(mode);
-        reader_background_draw(M5.Display, M5.Display.width(), M5.Display.height());
+        reader_background_draw(M5.Display, M5.Display.width(), M5.Display.height(), ReaderProfile::Rss);
         if (article_header_visible()) draw_topbar("RSS");
-        ReaderStyle rs = reader_style_get();
+        ReaderStyle rs = reader_style_get(ReaderProfile::Rss);
         int lh = reader_text_renderer().lineHeight();
         if (lh <= 0) lh = 48;
         int y = article_header_height() + rs.margin_top;
         const int content_width = std::max(100, (int)M5.Display.width() - rs.margin_left - rs.margin_right);
         auto draw_underline = [&](int ux, int uy, int uw) {
-            ReaderStyle style = reader_style_get();
+            ReaderStyle style = reader_style_get(ReaderProfile::Rss);
             if (style.underline_type <= 0 || uw <= 0) return;
             int underline_y = uy + std::max(1, lh - 5);
             if (style.underline_type == 1) {

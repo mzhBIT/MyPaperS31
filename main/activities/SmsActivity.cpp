@@ -6,6 +6,7 @@
 #include "modem/ml307_sms.h"
 #include "time/time_basis.h"
 #include "ui/SystemFont.h"
+#include "ui/HeaderLayout.h"
 #include "ui/TextInputOverlay.h"
 #include "ui/UiLocale.h"
 
@@ -33,7 +34,7 @@
 namespace {
 
 constexpr const char *TAG = "SMS_UI";
-constexpr int HEADER_H = 76;
+constexpr int HEADER_H = header_layout::height;
 constexpr int FOOTER_H = 86;
 constexpr int ROW_COUNT = 5;
 constexpr int SIDE_PAD = 22;
@@ -399,7 +400,7 @@ public:
     {
         if (_input.visible()) return _input.handle_touch(event);
         if (event.type == TouchEventType::Back ||
-            (event.type == TouchEventType::Tap && event.y < HEADER_H && event.x < 120)) {
+            (event.type == TouchEventType::Tap && header_layout::left_hit(event.x, event.y, 120))) {
             if (_detail >= 0) {
                 _detail = -1;
                 _selected_message = -1;
@@ -721,9 +722,9 @@ private:
     void draw_header(const char *title)
     {
         M5.Display.fillRect(0, 0, M5.Display.width(), HEADER_H, TFT_WHITE);
-        system_font::draw_left(M5.Display, "<", 24, 15, TFT_BLACK);
-        system_font::draw_center(M5.Display, title, M5.Display.width() / 2, 15, TFT_BLACK);
-        M5.Display.drawFastHLine(0, HEADER_H - 1, M5.Display.width(), TFT_BLACK);
+        system_font::draw_left(M5.Display, "<", 24, header_layout::text_y(), TFT_BLACK);
+        system_font::draw_center(M5.Display, title, M5.Display.width() / 2, header_layout::text_y(), TFT_BLACK);
+        header_layout::draw_separator(M5.Display);
     }
 
     void draw_footer(const char *left, const char *right)

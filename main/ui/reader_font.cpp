@@ -2,6 +2,7 @@
 #include "storage/app_paths.h"
 
 #include <esp_log.h>
+#include <nvs.h>
 #include <cstdio>
 #include <cstring>
 #include <sys/stat.h>
@@ -68,9 +69,37 @@ void reader_font_init()
     ESP_LOGI(TAG, "loaded font: %s", s_font_path);
 }
 
-const char *reader_font_path()
+static char s_rss_font_path[192] = {};
+static bool s_rss_font_initialized = false;
+
+static bool save_rss_font(const char *path)
 {
-    return s_font_path;
+    nvs_handle_t h;
+    if (nvs_open("rss_reader", NVS_READWRITE, &h) != ESP_OK) return false;
+    esp_err_t err = nvs_set_str(h, "font", path);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    return err == ESP_OK;
+}
+
+const char *reader_font_path(ReaderProfile profile)
+{
+    if (profile != ReaderProfile::Rss) return s_font_path;
+    if (!s_rss_font_initialized) {
+        s_rss_font_initialized = true;
+        snprintf(s_rss_font_path, sizeof(s_rss_font_path), "%s", s_font_path);
+        nvs_handle_t h;
+        bool loaded = false;
+        if (nvs_open("rss_reader", NVS_READONLY, &h) == ESP_OK) {
+            size_t len = sizeof(s_rss_font_path);
+            loaded = nvs_get_str(h, "font", s_rss_font_path, &len) == ESP_OK;
+            nvs_close(h);
+        }
+        if (!is_builtin_font_path(s_rss_font_path) && !file_exists(s_rss_font_path))
+            snprintf(s_rss_font_path, sizeof(s_rss_font_path), "%s", select_default_font_path());
+        if (!loaded) save_rss_font(s_rss_font_path);
+    }
+    return s_rss_font_path;
 }
 
 const char *reader_font_default_path()
@@ -78,9 +107,15 @@ const char *reader_font_default_path()
     return select_default_font_path();
 }
 
-bool reader_font_set(const char *path)
+bool reader_font_set(const char *path, ReaderProfile profile)
 {
     if (!path || !path[0]) return false;
+    if (profile == ReaderProfile::Rss) {
+        reader_font_path(profile);
+        if (!save_rss_font(path)) return false;
+        snprintf(s_rss_font_path, sizeof(s_rss_font_path), "%s", path);
+        return true;
+    }
 
     strncpy(s_font_path, path, sizeof(s_font_path) - 1);
     s_font_path[sizeof(s_font_path) - 1] = '\0';

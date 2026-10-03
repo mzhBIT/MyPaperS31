@@ -4,6 +4,7 @@
 #include "activities/ActivityManager.h"
 #include "activities/WifiTransferActivity.h"
 #include "ui/SystemFont.h"
+#include "ui/HeaderLayout.h"
 #include "ui/UiLocale.h"
 #include "usb/usb_transfer_boot.h"
 
@@ -13,7 +14,7 @@
 
 namespace {
 
-constexpr int HEADER_H = 76;
+constexpr int HEADER_H = header_layout::height;
 constexpr int PAD = 24;
 constexpr int ROW_H = 170;
 constexpr int ROW_GAP = 24;
@@ -31,7 +32,7 @@ public:
     bool on_touch(const TouchEvent &event) override
     {
         if (event.type == TouchEventType::Back ||
-            (event.type == TouchEventType::Tap && event.y < HEADER_H && event.x < 120)) {
+            (event.type == TouchEventType::Tap && header_layout::left_hit(event.x, event.y, 120))) {
             ActivityManager::instance().pop();
             return true;
         }
@@ -128,8 +129,8 @@ private:
         M5.Display.fillScreen(TFT_WHITE);
         system_font::draw_center(M5.Display, ui_locale::text(_confirm_usb ? ui_locale::TextId::EnterUsbTransfer
                                                                           : ui_locale::TextId::Transfer),
-                                 w / 2, 18, TFT_BLACK);
-        M5.Display.drawFastHLine(0, HEADER_H - 1, w, TFT_BLACK);
+                                 w / 2, header_layout::text_y(), TFT_BLACK);
+        header_layout::draw_separator(M5.Display);
 
         if (!_confirm_usb) {
             draw_row(FIRST_ROW_Y, ui_locale::text(ui_locale::TextId::UsbTransfer),

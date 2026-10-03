@@ -24,7 +24,12 @@ constexpr std::time_t MIN_VALID_UNIX_TIME = 1704067200;
 portMUX_TYPE s_rate_lock = portMUX_INITIALIZER_UNLOCKED;
 int64_t s_next_request_us = 0;
 
-void wait_for_request_slot()
+bool cancelled(const std::atomic<bool> *cancel)
+{
+    return cancel && cancel->load(std::memory_order_relaxed);
+}
+
+bool wait_for_request_slot(const std::atomic<bool> *cancel)
 {
     const int64_t now = esp_timer_get_time();
     int64_t scheduled = now;
@@ -35,8 +40,12 @@ void wait_for_request_slot()
     if (scheduled > now) {
         const int64_t delay_us = scheduled - now;
         ESP_LOGI(TAG, "rate limit wait=%lld ms", delay_us / 1000);
-        vTaskDelay(pdMS_TO_TICKS(static_cast<uint32_t>((delay_us + 999) / 1000)));
+        while (esp_timer_get_time() < scheduled) {
+            if (cancelled(cancel)) return false;
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
     }
+    return !cancelled(cancel);
 }
 
 bool ensure_request_time(std::string *error)
@@ -132,21 +141,7 @@ esp_err_t http_event(esp_http_client_event_t *event)
                  event->header_value ? event->header_value : "");
         return ESP_OK;
     }
-    if (event->event_id != HTTP_EVENT_ON_DATA || event->data_len <= 0 ||
-        !sink->file || !sink->write_ok) {
-        return ESP_OK;
-    }
-    const size_t count = static_cast<size_t>(event->data_len);
-    if (count > MAX_MAP_BYTES - sink->bytes) {
-        sink->overflow = true;
-        sink->write_ok = false;
-        return ESP_FAIL;
-    }
-    if (std::fwrite(event->data, 1, count, sink->file) != count) {
-        sink->write_ok = false;
-        return ESP_FAIL;
-    }
-    sink->bytes += count;
+    // Body reads are explicit so cancellation is checked between chunks.
     return ESP_OK;
 }
 
@@ -172,7 +167,8 @@ AmapImageFormat AmapClient::probe_image(const char *path)
 
 AmapMapResult AmapClient::fetch_static_map(const AmapConfig &config,
                                            int output_width,
-                                           int output_height)
+                                           int output_height,
+                                           const std::atomic<bool> *cancel)
 {
     AmapMapResult result;
     if (config.api_key.empty()) {
@@ -193,11 +189,12 @@ AmapMapResult AmapClient::fetch_static_map(const AmapConfig &config,
     const std::string temporary = std::string(app_paths::map_image_file()) + ".tmp";
     std::remove(temporary.c_str());
 
-    if (!ensure_request_time(&result.error)) return result;
+    if (cancelled(cancel) || !ensure_request_time(&result.error)) return result;
     DownloadSink sink;
     esp_err_t perform_error = ESP_FAIL;
     int64_t request_time_ms = 0;
     for (int attempt = 0; attempt < 2; ++attempt) {
+        if (cancelled(cancel)) break;
         std::remove(temporary.c_str());
         sink = DownloadSink{};
         sink.file = std::fopen(temporary.c_str(), "wb");
@@ -212,7 +209,7 @@ AmapMapResult AmapClient::fetch_static_map(const AmapConfig &config,
             esp_http_client_config_t http_config = {};
             http_config.url = url;
             http_config.method = HTTP_METHOD_GET;
-            http_config.timeout_ms = 25000;
+            http_config.timeout_ms = 3000;
             http_config.crt_bundle_attach = esp_crt_bundle_attach;
             http_config.user_agent = "MyPaperP4 Map";
             http_config.buffer_size = 4096;
@@ -240,7 +237,11 @@ AmapMapResult AmapClient::fetch_static_map(const AmapConfig &config,
             return result;
         }
 
-        wait_for_request_slot();
+        if (!wait_for_request_slot(cancel)) {
+            std::fclose(sink.file);
+            sink.file = nullptr;
+            break;
+        }
         ESP_LOGI(TAG,
                  "static map begin center=%.6f,%.6f zoom=%u request=%dx%d scale=%d "
                  "transport=%s attempt=%d",
@@ -248,7 +249,34 @@ AmapMapResult AmapClient::fetch_static_map(const AmapConfig &config,
                  request_width, request_height, server_scale,
                  reuse_attempt ? "reuse" : "new", attempt + 1);
         const int64_t started = esp_timer_get_time();
-        perform_error = esp_http_client_perform(client);
+        esp_http_client_set_timeout_ms(client, 3000);
+        perform_error = esp_http_client_open(client, 0);
+        if (perform_error == ESP_OK && !cancelled(cancel)) {
+            if (esp_http_client_fetch_headers(client) < 0) perform_error = ESP_FAIL;
+        }
+        uint8_t buffer[4096];
+        esp_http_client_set_timeout_ms(client, 1000);
+        while (perform_error == ESP_OK && !cancelled(cancel)) {
+            if (esp_timer_get_time() - started > 25000000) {
+                perform_error = ESP_ERR_TIMEOUT;
+                break;
+            }
+            const int count = esp_http_client_read(client, reinterpret_cast<char *>(buffer), sizeof(buffer));
+            if (count == -ESP_ERR_HTTP_EAGAIN) continue;
+            if (count < 0) { perform_error = ESP_FAIL; break; }
+            if (count == 0) {
+                if (!esp_http_client_is_complete_data_received(client)) perform_error = ESP_FAIL;
+                break;
+            }
+            if (static_cast<size_t>(count) > MAX_MAP_BYTES - sink.bytes) {
+                sink.overflow = true; perform_error = ESP_FAIL; break;
+            }
+            if (std::fwrite(buffer, 1, count, sink.file) != static_cast<size_t>(count)) {
+                sink.write_ok = false; perform_error = ESP_FAIL; break;
+            }
+            sink.bytes += count;
+        }
+        if (cancelled(cancel)) perform_error = ESP_ERR_INVALID_STATE;
         request_time_ms = (esp_timer_get_time() - started) / 1000;
         result.http_status = esp_http_client_get_status_code(client);
         result.bytes = sink.bytes;
@@ -264,6 +292,7 @@ AmapMapResult AmapClient::fetch_static_map(const AmapConfig &config,
 
         close();
         std::remove(temporary.c_str());
+        if (cancelled(cancel)) break;
         if (attempt == 0) {
             ESP_LOGW(TAG, "persistent connection failed, rebuilding once");
             continue;
@@ -271,6 +300,8 @@ AmapMapResult AmapClient::fetch_static_map(const AmapConfig &config,
     }
 
     if (perform_error != ESP_OK) {
+        std::remove(temporary.c_str());
+        if (cancelled(cancel)) { result.error = "Cancelled"; return result; }
         result.error = std::string("AMap connection failed: ") + esp_err_to_name(perform_error);
         return result;
     }
@@ -298,13 +329,8 @@ AmapMapResult AmapClient::fetch_static_map(const AmapConfig &config,
         return result;
     }
 
-    std::remove(app_paths::map_image_file());
-    if (std::rename(temporary.c_str(), app_paths::map_image_file()) != 0) {
-        std::remove(temporary.c_str());
-        result.error = "Failed to commit map cache file";
-        return result;
-    }
-    result.path = app_paths::map_image_file();
+    // The UI commits only the current generation; stale downloads stay temporary.
+    result.path = temporary;
     result.success = true;
     ESP_LOGI(TAG, "static map complete status=%d bytes=%u format=%s time=%lld ms",
              result.http_status, static_cast<unsigned>(result.bytes),

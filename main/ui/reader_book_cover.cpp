@@ -9,9 +9,10 @@
 #include <vector>
 
 namespace {
+struct Settings {
 
-constexpr const char *NVS_NAMESPACE = "reader_cover";
-constexpr const char *NVS_PATH_KEY = "path";
+const char *NVS_NAMESPACE = "reader_cover";
+static constexpr const char *NVS_PATH_KEY = "path";
 
 bool initialized = false;
 std::string selected_path;
@@ -63,7 +64,6 @@ void ensure_initialized()
     nvs_close(handle);
 }
 
-} // namespace
 
 bool reader_book_cover_enabled()
 {
@@ -123,4 +123,49 @@ void reader_book_cover_file_renamed(const char *old_path, const char *new_path)
 void reader_book_cover_file_deleted(const char *path)
 {
     if (reader_book_cover_matches(path)) reader_book_cover_clear();
+}
+
+Settings(bool rss = false) { if (rss) NVS_NAMESPACE = "rss_reader_cover"; }
+};
+Settings shared_settings;
+Settings rss_settings(true);
+bool rss_seeded = false;
+void seed_rss_settings()
+{
+    if (rss_seeded) return;
+    rss_settings.ensure_initialized();
+    nvs_handle_t h;
+    if (nvs_open(rss_settings.NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
+    uint8_t seeded = 0;
+    if (nvs_get_u8(h, "profile_v1", &seeded) != ESP_OK || !seeded) {
+        shared_settings.ensure_initialized();
+        rss_settings.selected_path = shared_settings.selected_path;
+        if (!rss_settings.save_path(rss_settings.selected_path)) { nvs_close(h); return; }
+        esp_err_t err = nvs_set_u8(h, "profile_v1", 1);
+        if (err == ESP_OK) err = nvs_commit(h);
+        if (err != ESP_OK) { nvs_close(h); return; }
+    }
+    nvs_close(h);
+    rss_seeded = true;
+}
+Settings &settings(ReaderProfile profile) {
+    if (profile == ReaderProfile::Rss) seed_rss_settings();
+    return profile == ReaderProfile::Rss ? rss_settings : shared_settings;
+}
+} // namespace
+
+bool reader_book_cover_enabled(ReaderProfile profile) { return settings(profile).reader_book_cover_enabled(); }
+const char *reader_book_cover_path(ReaderProfile profile) { return settings(profile).reader_book_cover_path(); }
+bool reader_book_cover_clear(ReaderProfile profile) { return settings(profile).reader_book_cover_clear(); }
+bool reader_book_cover_matches(const char *path) { return shared_settings.reader_book_cover_matches(path) || rss_settings.reader_book_cover_matches(path); }
+void reader_book_cover_file_renamed(const char *old_path, const char *new_path) {
+    shared_settings.reader_book_cover_file_renamed(old_path, new_path);
+    rss_settings.reader_book_cover_file_renamed(old_path, new_path);
+}
+void reader_book_cover_file_deleted(const char *path) {
+    shared_settings.reader_book_cover_file_deleted(path);
+    rss_settings.reader_book_cover_file_deleted(path);
+}
+bool reader_book_cover_set(const char *path, std::string *message, ReaderProfile profile) {
+    return settings(profile).reader_book_cover_set(path, message);
 }

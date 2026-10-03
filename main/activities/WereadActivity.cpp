@@ -6,6 +6,7 @@
 #include "renderer/CoverThumbnail.h"
 #include "storage/app_paths.h"
 #include "ui/SystemFont.h"
+#include "ui/HeaderLayout.h"
 #include "ui/UiLocale.h"
 #include "weread/WereadApi.h"
 #include "weread/WereadCrypto.h"
@@ -35,7 +36,7 @@ extern void launch_weread_reader(const char *path, int initial_spine);
 namespace {
 
 constexpr const char *TAG = "WEREAD_UI";
-constexpr int HEADER_H = 76;
+constexpr int HEADER_H = header_layout::height;
 constexpr int LIST_TOP = HEADER_H;
 constexpr int LIST_BOTTOM = 1124;
 constexpr int LIST_ROWS = 5;
@@ -410,10 +411,10 @@ void draw_header(const std::string &title)
 {
     const int width = M5.Display.width();
     M5.Display.fillRect(0, 0, width, HEADER_H, TFT_WHITE);
-    system_font::draw_left(M5.Display, "<", 18, 12, TFT_BLACK);
+    system_font::draw_left(M5.Display, "<", 18, header_layout::text_y(), TFT_BLACK);
     system_font::draw_center(M5.Display, system_font::ellipsize(title, width - 150),
-                             width / 2, 12, TFT_BLACK);
-    M5.Display.drawFastHLine(0, HEADER_H - 1, width, TFT_BLACK);
+                             width / 2, header_layout::text_y(), TFT_BLACK);
+    header_layout::draw_separator(M5.Display);
 }
 
 size_t utf8_char_bytes(const std::string &text, size_t position)
@@ -678,7 +679,7 @@ public:
     {
         if (_book_menu_visible) return book_menu_touch(event);
         if (event.type == TouchEventType::Back ||
-            (event.type == TouchEventType::Tap && event.x < 110 && event.y < HEADER_H)) {
+            (event.type == TouchEventType::Tap && header_layout::left_hit(event.x, event.y, 110))) {
             go_back();
             return true;
         }

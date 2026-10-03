@@ -631,6 +631,11 @@ esp_err_t wifi_setting_clear_credentials(void)
     return ret;
 }
 
+bool wifi_setting_is_enabled(void)
+{
+    return s_wifi_started && !s_stopping;
+}
+
 bool wifi_setting_is_connected(void)
 {
     esp_netif_ip_info_t ip_info = {0};

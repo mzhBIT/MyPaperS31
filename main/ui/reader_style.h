@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ui/ReaderProfile.h"
+
 struct ReaderStyle {
     int font_size = 36;
     int line_spacing = 8;
@@ -18,9 +20,9 @@ struct ReaderStyle {
 };
 
 void reader_style_init();
-ReaderStyle reader_style_get();
-void reader_style_set(const ReaderStyle &style);
-bool reader_style_save();
+ReaderStyle reader_style_get(ReaderProfile profile = ReaderProfile::Shared);
+void reader_style_set(const ReaderStyle &style, ReaderProfile profile = ReaderProfile::Shared);
+bool reader_style_save(ReaderProfile profile = ReaderProfile::Shared);
 ReaderStyle reader_style_clamp(ReaderStyle style);
 const char *reader_style_refresh_mode_name(int mode);
 int reader_style_next_refresh_mode(int mode, int delta);

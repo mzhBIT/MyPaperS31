@@ -3,6 +3,7 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "ui/SystemFont.h"
+#include "ui/HeaderLayout.h"
 #include "ui/UiLocale.h"
 #include "ui/reader_background.h"
 #include "ui/reader_book_cover.h"
@@ -19,7 +20,7 @@
 
 namespace {
 
-constexpr int TOP_H = 56;
+constexpr int TOP_H = header_layout::height;
 constexpr int ROW_H = 72;
 constexpr int PAD = 18;
 constexpr const char *ROOT = "/sdcard";
@@ -40,19 +41,19 @@ bool is_image(const char *name)
 
 class ReaderBackgroundPickerActivity final : public Activity {
 public:
-    explicit ReaderBackgroundPickerActivity(bool book_cover = false)
-        : m_book_cover(book_cover)
+    explicit ReaderBackgroundPickerActivity(bool book_cover = false, ReaderProfile profile = ReaderProfile::Shared)
+        : m_profile(profile), m_book_cover(book_cover)
     {
     }
 
     void on_create() override
     {
         std::string initial = ROOT;
-        const bool enabled = m_book_cover ? reader_book_cover_enabled()
-                                          : reader_background_enabled();
+        const bool enabled = m_book_cover ? reader_book_cover_enabled(m_profile)
+                                          : reader_background_enabled(m_profile);
         if (enabled) {
-            initial = m_book_cover ? reader_book_cover_path()
-                                   : reader_background_path();
+            initial = m_book_cover ? reader_book_cover_path(m_profile)
+                                   : reader_background_path(m_profile);
             size_t slash = initial.find_last_of('/');
             initial = slash == std::string::npos || slash == 0
                         ? ROOT : initial.substr(0, slash);
@@ -101,7 +102,7 @@ public:
             return true;
         }
         if (event.type != TouchEventType::Tap) return false;
-        if (event.y < TOP_H && event.x < 120) {
+        if (header_layout::left_hit(event.x, event.y, 120)) {
             back();
             return true;
         }
@@ -113,6 +114,7 @@ public:
     }
 
 private:
+    ReaderProfile m_profile = ReaderProfile::Shared;
     bool m_book_cover = false;
     std::string m_path = ROOT;
     std::vector<Entry> m_entries;
@@ -184,8 +186,8 @@ private:
     {
         m_notice.clear();
         if (index == 0) {
-            const bool cleared = m_book_cover ? reader_book_cover_clear()
-                                              : reader_background_clear();
+            const bool cleared = m_book_cover ? reader_book_cover_clear(m_profile)
+                                              : reader_background_clear(m_profile);
             if (cleared) ActivityManager::instance().pop();
             else {
                 m_notice = ui_locale::text(m_book_cover ? ui_locale::TextId::DisableBookCoverFailed
@@ -202,9 +204,9 @@ private:
             return;
         }
         const bool selected = m_book_cover
-            ? reader_book_cover_set(full.c_str(), &m_notice)
+            ? reader_book_cover_set(full.c_str(), &m_notice, m_profile)
             : reader_background_set(full.c_str(), M5.Display.width(), M5.Display.height(),
-                                    &m_notice) == ReaderBackgroundResult::Ok;
+                                    &m_notice, m_profile) == ReaderBackgroundResult::Ok;
         if (selected) {
             ActivityManager::instance().pop();
         } else {
@@ -222,12 +224,12 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        system_font::draw_left(M5.Display, "<", 16, 7, TFT_BLACK);
+        system_font::draw_left(M5.Display, "<", 16, header_layout::text_y(), TFT_BLACK);
         system_font::draw_center(M5.Display,
                                  ui_locale::text(m_book_cover ? ui_locale::TextId::LockScreenBookCover
                                                               : ui_locale::TextId::ReadingBackground),
-                                 width / 2, 7, TFT_BLACK);
-        M5.Display.drawFastHLine(0, TOP_H - 1, width, TFT_BLACK);
+                                 width / 2, header_layout::text_y(), TFT_BLACK);
+        header_layout::draw_separator(M5.Display);
 
         int top = TOP_H;
         for (int row = 0; row < rows; ++row) {
@@ -267,12 +269,12 @@ private:
 
 } // namespace
 
-void launch_reader_background_picker()
+void launch_reader_background_picker(ReaderProfile profile)
 {
-    ActivityManager::instance().push(new ReaderBackgroundPickerActivity());
+    ActivityManager::instance().push(new ReaderBackgroundPickerActivity(false, profile));
 }
 
-void launch_reader_book_cover_picker()
+void launch_reader_book_cover_picker(ReaderProfile profile)
 {
-    ActivityManager::instance().push(new ReaderBackgroundPickerActivity(true));
+    ActivityManager::instance().push(new ReaderBackgroundPickerActivity(true, profile));
 }

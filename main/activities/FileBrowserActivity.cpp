@@ -6,6 +6,7 @@
 #include "audio/audio_file_formats.h"
 #include "reader_font.h"
 #include "ui/SystemFont.h"
+#include "ui/HeaderLayout.h"
 #include "ui/UiLocale.h"
 #include "ui/TextInputOverlay.h"
 #include "ui/reader_background.h"
@@ -23,7 +24,7 @@
 #include <esp_timer.h>
 
 static const char *TAG = "FILES";
-static const int TOP_BAR_H = 50;
+static const int TOP_BAR_H = header_layout::height;
 static const int ROW_H     = 72;
 static const int PAD       = 10;
 
@@ -61,6 +62,7 @@ static bool is_supported(const char *n, bool is_dir) {
             strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0 ||
             strcasecmp(ext, ".ttf") == 0 ||
             strcasecmp(ext, ".otf") == 0 || strcasecmp(ext, ".bin") == 0 ||
+            strcasecmp(ext, ".mpm") == 0 || strcasecmp(ext, ".mpc") == 0 ||
             audio_file_formats::is_supported(n));
 }
 
@@ -108,8 +110,8 @@ static void draw_topbar() {
     std::string show = g_path;
     if (system_font::measure(show) > M5.Display.width() - 40) show = "..." + show.substr(show.size() > 35 ? show.size() - 35 : 0);
     show = system_font::ellipsize(show, M5.Display.width() - 40);
-    system_font::draw_center(M5.Display, show, M5.Display.width() / 2, 3, TFT_BLACK);
-    M5.Display.drawFastHLine(0, TOP_BAR_H - 1, M5.Display.width(), TFT_BLACK);
+    system_font::draw_center(M5.Display, show, M5.Display.width() / 2, header_layout::text_y(), TFT_BLACK);
+    header_layout::draw_separator(M5.Display);
 }
 
 static void draw_list() {
@@ -216,7 +218,7 @@ static int hit_row(int ty) {
 }
 
 static bool hit_back(int tx, int ty) {
-    return (tx < 120 && ty < TOP_BAR_H);
+    return (header_layout::left_hit(tx, ty));
 }
 
 // ─── Activity ──────────────────────────────────────────────────────

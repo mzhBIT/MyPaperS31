@@ -9,9 +9,11 @@
 #include "deepseek/DeepSeekClient.h"
 #include "frontlight/frontlight.h"
 #include "map/AmapConfig.h"
+#include "activities/OfflineMapPickerActivity.h"
 #include "storage/app_paths.h"
 #include "time/time_basis.h"
 #include "ui/SystemFont.h"
+#include "ui/HeaderLayout.h"
 #include "ui/UiLocale.h"
 #include "ui/VirtualKeyboard.h"
 #include "ui/home_preferences.h"
@@ -35,7 +37,7 @@
 
 namespace {
 
-constexpr int HEADER_H = 76;
+constexpr int HEADER_H = header_layout::height;
 constexpr int PAD = 20;
 constexpr int SETTINGS_ROW_Y = HEADER_H;
 constexpr int SETTINGS_ROW_H = 110;
@@ -61,14 +63,14 @@ void draw_header(const char *title)
 {
     M5.Display.fillRect(0, 0, M5.Display.width(), HEADER_H, TFT_WHITE);
     system_font::draw_center(M5.Display, title, M5.Display.width() / 2,
-                             std::max(0, (HEADER_H - system_font::line_height()) / 2),
+                             header_layout::text_y(),
                              TFT_BLACK);
-    M5.Display.drawFastHLine(0, HEADER_H - 1, M5.Display.width(), TFT_BLACK);
+    header_layout::draw_separator(M5.Display);
 }
 
 bool header_back_hit(const TouchEvent &event)
 {
-    return event.type == TouchEventType::Tap && event.x < 120 && event.y < HEADER_H;
+    return event.type == TouchEventType::Tap && header_layout::left_hit(event.x, event.y, 120);
 }
 
 class WifiSettingsActivity final : public Activity {
@@ -749,14 +751,10 @@ public:
             return true;
         }
         if (event.type != TouchEventType::Tap) return false;
-        if (event.y >= HEADER_H && event.y < HEADER_H + 140) {
-            _focus = 0;
-            edit_api_key();
-            return true;
-        }
-        if (event.y >= HEADER_H + 160 && event.y < HEADER_H + 300) {
-            _focus = 1;
-            clear_cache();
+        if (event.y >= HEADER_H && event.y < HEADER_H + 640 &&
+            (event.y-HEADER_H)%160 < 140) {
+            _focus = (event.y-HEADER_H)/160;
+            activate();
             return true;
         }
         return false;
@@ -769,13 +767,12 @@ public:
             return true;
         }
         if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
-            _focus = 1 - _focus;
+            _focus = (_focus + (key == APP_KEY_UP ? 3 : 1)) % 4;
             draw(false);
             return true;
         }
         if (key == APP_KEY_OK) {
-            if (_focus == 0) edit_api_key();
-            else clear_cache();
+            activate();
             return true;
         }
         return false;
@@ -804,6 +801,19 @@ private:
         });
     }
 
+    void activate()
+    {
+        if (M5.Display.displayBusy()) return;
+        if (_focus == 0) {
+            AmapConfig c; amap_config_load(&c);
+            if (!amap_config_save_source(!c.offline)) _message = ui_locale::text(ui_locale::TextId::MapSaveFailed);
+            else _message.clear();
+            draw(false);
+        } else if (_focus == 1) launch_offline_map_picker();
+        else if (_focus == 2) edit_api_key();
+        else clear_cache();
+    }
+
     void clear_cache()
     {
         const int removed = std::remove(app_paths::map_image_file());
@@ -818,7 +828,7 @@ private:
         const uint16_t background = selected ? TFT_BLACK : TFT_WHITE;
         const uint16_t foreground = selected ? TFT_WHITE : TFT_BLACK;
         M5.Display.fillRoundRect(PAD, y, width - PAD * 2, 140, 8, background);
-        M5.Display.drawRoundRect(PAD, y, width - PAD * 2, 140, 8, TFT_BLACK);
+        M5.Display.drawFastHLine(PAD, y+139, width-PAD*2, TFT_BLACK);
         system_font::draw_left(M5.Display, title, PAD + 18, y + 14, foreground);
         system_font::draw_left(M5.Display,
                                system_font::ellipsize(detail, width - PAD * 2 - 80),
@@ -838,18 +848,24 @@ private:
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_text);
         M5.Display.fillScreen(TFT_WHITE);
         draw_header(ui_locale::text(ui_locale::TextId::MapSettings));
-        draw_row(HEADER_H, ui_locale::text(ui_locale::TextId::AmapApiKey),
+        draw_row(HEADER_H, ui_locale::text(ui_locale::TextId::MapSource),
+                 ui_locale::text(config.offline ? ui_locale::TextId::OfflineMap : ui_locale::TextId::OnlineMap),
+                 _focus == 0);
+        draw_row(HEADER_H+160, ui_locale::text(ui_locale::TextId::MapPackage),
+                 config.offline_path.empty() ? ui_locale::text(ui_locale::TextId::SelectMapPackage) : config.offline_path,
+                 _focus == 1);
+        draw_row(HEADER_H+320, ui_locale::text(ui_locale::TextId::AmapApiKey),
                  configured ? ui_locale::text(ui_locale::TextId::ConfiguredTapReplace)
                             : ui_locale::text(ui_locale::TextId::NotConfigured),
-                 _focus == 0);
-        draw_row(HEADER_H + 160, ui_locale::text(ui_locale::TextId::ClearMapCache),
+                 _focus == 2);
+        draw_row(HEADER_H + 480, ui_locale::text(ui_locale::TextId::ClearMapCache),
                  cached ? ui_locale::text(ui_locale::TextId::CachedMapAvailable)
                         : ui_locale::text(ui_locale::TextId::NoCachedMap),
-                 _focus == 1);
+                 _focus == 3);
         system_font::draw_center(M5.Display,
                                  _message.empty() ? ui_locale::text(ui_locale::TextId::ApiKeyNvsHint)
                                                   : _message,
-                                 M5.Display.width() / 2, HEADER_H + 370, TFT_BLACK);
+                                 M5.Display.width() / 2, HEADER_H + 660, TFT_BLACK);
         M5.Display.display();
         M5.Display.endWrite();
     }

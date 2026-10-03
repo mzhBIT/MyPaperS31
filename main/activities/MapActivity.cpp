@@ -6,10 +6,13 @@
 #include "map/AmapClient.h"
 #include "map/AmapConfig.h"
 #include "map/AmapImageProcessor.h"
+#include "map/OfflineMapSource.h"
+#include <esp_timer.h>
 #include "renderer/P4JpegDecoder.h"
 #include "renderer/TurboJpegDecoder.h"
 #include "storage/app_paths.h"
 #include "ui/SystemFont.h"
+#include "ui/HeaderLayout.h"
 #include "ui/UiLocale.h"
 #include "wifi/wifi_setting.h"
 
@@ -17,6 +20,10 @@
 #include <esp_err.h>
 #include <esp_log.h>
 #include <sdkconfig.h>
+#include <freertos/idf_additions.h>
+#include <esp_heap_caps.h>
+#include <atomic>
+#include <memory>
 
 #include <algorithm>
 #include <cmath>
@@ -26,7 +33,7 @@
 namespace {
 
 constexpr const char *TAG = "MAP";
-constexpr int HEADER_H = 76;
+constexpr int HEADER_H = header_layout::height;
 constexpr int CONTROL_X_PAD = 18;
 constexpr int CONTROL_W = 88;
 constexpr int CONTROL_H = 82;
@@ -35,6 +42,35 @@ constexpr int CONTROL_TOP = 110;
 constexpr int STATUS_H = 70;
 constexpr double MERCATOR_MAX_LATITUDE = 85.051129;
 constexpr double PI = 3.14159265358979323846;
+
+struct MapRequest {
+    AmapConfig config;
+    int width = 0, height = 0;
+    uint32_t generation = 0;
+    std::atomic<bool> cancel{false}, done{false};
+    AmapMapResult result;
+};
+
+void map_fetch_task(void *arg)
+{
+    std::unique_ptr<std::shared_ptr<MapRequest>> holder(static_cast<std::shared_ptr<MapRequest> *>(arg));
+    auto request = *holder;
+    {
+        AmapClient client;
+        const esp_err_t error = request->cancel.load() ? ESP_ERR_INVALID_STATE
+            : wifi_setting_connect_saved(CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS);
+        if (error == ESP_OK && !request->cancel.load()) {
+            request->result = client.fetch_static_map(request->config, request->width,
+                                                      request->height, &request->cancel);
+        } else request->result.error = esp_err_to_name(error);
+        // Release TLS before publishing completion and allowing Quality refresh.
+        client.close();
+    }
+    request->done.store(true, std::memory_order_release);
+    request.reset();
+    holder.reset();
+    vTaskDeleteWithCaps(nullptr);
+}
 
 bool file_exists(const char *path)
 {
@@ -82,12 +118,32 @@ class MapActivity final : public Activity {
 public:
     ~MapActivity() override
     {
-        wifi_setting_release();
+        if (_request) _request->cancel.store(true);
+        if (!_config.offline) wifi_setting_release();
     }
 
     void on_create() override
     {
         amap_config_load(&_config);
+        _display_config = _config;
+        if (_config.offline) {
+            if (_config.offline_path.empty()) {
+                _message = ui_locale::text(ui_locale::TextId::MapNoPackage);
+            } else if (!_offline.open(_config.offline_path.c_str())) {
+                _message = offline_error();
+            } else {
+                if (!_config.offline_viewport_saved || !_offline.supports(_config.zoom)) {
+                    _config.longitude = _offline.center_lon();
+                    _config.latitude = _offline.center_lat();
+                    _config.zoom = _offline.default_zoom();
+                }
+                _display_config = _config;
+                reload_map();
+            }
+            draw_status(_message, true);
+            _dirty = false;
+            return;
+        }
         _map_format = AmapClient::probe_image(app_paths::map_image_file());
         _has_map = _map_format != AmapImageFormat::Unknown;
         if (_has_map) {
@@ -99,23 +155,72 @@ public:
 
         if (_config.api_key.empty()) {
             _message = ui_locale::text(ui_locale::TextId::SetAmapKeyHint);
-            draw_current(false);
-            return;
-        }
-        if (!connect_wifi()) {
-            draw_current(false);
+            _dirty = true;
             return;
         }
         if (!_has_map) reload_map();
     }
 
+    bool allow_system_back() const override { return false; }
+
+    void loop() override
+    {
+        if (M5.Display.displayBusy()) return;
+        if (_request && _request->done.load(std::memory_order_acquire)) {
+            const bool current = !_exit && !_request->cancel.load() &&
+                                 _request->generation == _generation;
+            auto result = std::move(_request->result);
+            const AmapConfig completed = _request->config;
+            _request.reset();
+            if (current && result.success) {
+                std::remove(app_paths::map_image_file());
+                if (std::rename(result.path.c_str(), app_paths::map_image_file()) == 0) {
+                    _map_format = result.format;
+                    _has_map = true;
+                    _gray_frame.reset();
+                    _message.clear();
+                    amap_config_save_viewport(completed.longitude, completed.latitude, completed.zoom);
+                    _display_config = completed;
+                    _draw_quality = true;
+                } else _message = localized_map_error("Failed to commit map cache file");
+            } else if (current) {
+                _message = localized_map_error(result.error);
+                _config = _display_config;
+            }
+            if (!current) ESP_LOGI(TAG, "discarded stale/cancelled map response; latest generation=%lu",
+                                  static_cast<unsigned long>(_generation));
+            if (!result.path.empty()) std::remove(result.path.c_str());
+            _dirty = true;
+        }
+        if (_exit) {
+            if (!_request && !M5.Display.displayBusy()) {
+                ActivityManager::instance().pop();
+            }
+            return;
+        }
+        // No drawing, decode, TLS or Wi-Fi initialization alongside an EPD scan.
+        if (M5.Display.displayBusy() || _request) return;
+        if (_dirty) {
+            if (_has_map && !_draw_quality) draw_status_only();
+            else draw_current(_draw_quality);
+            _dirty = false;
+            _draw_quality = false;
+            return;
+        }
+        if (_pending) {
+            if (_config.offline) render_offline();
+            else start_request();
+        }
+    }
+
     bool on_touch(const TouchEvent &event) override
     {
         if (event.type == TouchEventType::Back ||
-            (event.type == TouchEventType::Tap && event.y < HEADER_H && event.x < 120)) {
-            ActivityManager::instance().pop();
+            (event.type == TouchEventType::Tap && header_layout::left_hit(event.x, event.y, 120))) {
+            back();
             return true;
         }
+        if (_exit) return true;
         if (event.type == TouchEventType::Tap) {
             const int x = M5.Display.width() - CONTROL_X_PAD - CONTROL_W;
             if (event.x >= x && event.y >= CONTROL_TOP &&
@@ -146,9 +251,10 @@ public:
     bool on_key(int key) override
     {
         if (key == APP_KEY_BACK) {
-            ActivityManager::instance().pop();
+            back();
             return true;
         }
+        if (_exit) return true;
         if (key == APP_KEY_UP) {
             change_zoom(1);
             return true;
@@ -166,38 +272,37 @@ public:
 
 private:
     AmapConfig _config;
-    AmapClient _client;
+    AmapConfig _display_config;
+    std::shared_ptr<MapRequest> _request;
+    uint32_t _generation = 0;
+    bool _pending = false, _exit = false, _dirty = false, _draw_quality = false;
     AmapGrayFrame _gray_frame;
+    OfflineMapSource _offline;
     AmapImageFormat _map_format = AmapImageFormat::Unknown;
     bool _has_map = false;
     std::string _message;
 
-    bool connect_wifi()
+    void back()
     {
-        if (wifi_setting_is_connected()) return true;
-        _message = ui_locale::text(ui_locale::TextId::ConnectingWifi);
-        draw_current(false);
-        M5.Display.waitDisplay();
-        const esp_err_t error =
-            wifi_setting_connect_saved(CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS);
-        if (error == ESP_OK) {
-            _message.clear();
-            ESP_LOGI(TAG, "WiFi ready for map session");
-            return true;
-        }
-        _message = std::string(ui_locale::text(ui_locale::TextId::WifiFailedPrefix)) +
-                   esp_err_to_name(error);
-        ESP_LOGW(TAG, "WiFi connection failed: %s", esp_err_to_name(error));
-        return false;
+        _exit = true;
+        _pending = false;
+        if (_request) _request->cancel.store(true);
+        ESP_LOGI(TAG, "cancel requested; waiting for network worker cleanup");
+        // Keep the Activity alive until its worker releases USB/Wi-Fi/TLS objects.
+        // This avoids shutting down a network transport underneath a blocked read.
     }
 
     void change_zoom(int delta)
     {
-        const int target = std::max(1, std::min(17, static_cast<int>(_config.zoom) + delta));
+        int target = static_cast<int>(_config.zoom) + delta;
+        if (_config.offline) {
+            while (target >= _offline.min_zoom() && target <= _offline.max_zoom() &&
+                   !_offline.supports(static_cast<uint8_t>(target))) target += delta;
+            if (target < _offline.min_zoom() || target > _offline.max_zoom()) return;
+        } else target = std::max(1, std::min(17, target));
         if (target == _config.zoom) return;
-        const AmapConfig old = _config;
         _config.zoom = static_cast<uint8_t>(target);
-        if (!reload_map()) _config = old;
+        reload_map();
     }
 
     void pan(const TouchEvent &event)
@@ -217,8 +322,9 @@ private:
         double world_y = (1.0 - std::log(std::tan(radians) + 1.0 / std::cos(radians)) /
                                   PI) * 0.5 * world_size;
         // scale=2 doubles response pixels while preserving the logical viewport.
-        world_x -= static_cast<double>(dx) / 2.0;
-        world_y -= static_cast<double>(dy) / 2.0;
+        const double scale = _config.offline ? 1.0 : 2.0;
+        world_x -= static_cast<double>(dx) / scale;
+        world_y -= static_cast<double>(dy) / scale;
         world_x = std::fmod(world_x, world_size);
         if (world_x < 0.0) world_x += world_size;
         world_y = std::max(0.0, std::min(world_size, world_y));
@@ -226,50 +332,109 @@ private:
         const double longitude = world_x / world_size * 360.0 - 180.0;
         const double mercator = PI * (1.0 - 2.0 * world_y / world_size);
         const double new_latitude = std::atan(std::sinh(mercator)) * 180.0 / PI;
-        const AmapConfig old = _config;
         _config.longitude = longitude;
         _config.latitude = new_latitude;
-        if (!reload_map()) _config = old;
+        reload_map();
     }
 
     bool reload_map()
     {
-        if (_config.api_key.empty()) {
-            _message = ui_locale::text(ui_locale::TextId::SetAmapKeyHint);
-            draw_current(false);
+        if (_config.offline && !_offline.is_open()) {
+            _message = ui_locale::text(_config.offline_path.empty() ?
+                ui_locale::TextId::MapNoPackage : ui_locale::TextId::MapPackInvalid);
+            _dirty = true;
             return false;
         }
-        M5.Display.waitDisplay();
-        if (!connect_wifi()) {
-            draw_current(false);
+        if (!_config.offline && _config.api_key.empty()) {
+            _message = ui_locale::text(ui_locale::TextId::SetAmapKeyHint);
+            _dirty = true;
             return false;
         }
         _message = ui_locale::text(ui_locale::TextId::LoadingMap);
-        draw_current(false);
-        M5.Display.waitDisplay();
-        AmapMapResult result = _client.fetch_static_map(
-            _config, M5.Display.width(), M5.Display.height());
-        // The AMap static-map endpoint currently replies with
-        // `Connection: close`, so retaining the HTTP/TLS client cannot keep
-        // the socket alive. Release all network-side buffers before PNG
-        // decoding and the memory-sensitive GC16 refresh pipeline start.
-        _client.close();
-        if (!result.success) {
-            _message = localized_map_error(result.error);
-            draw_current(false);
-            return false;
-        }
-        _map_format = result.format;
-        _has_map = true;
-        _gray_frame.reset();
-        _message.clear();
-        amap_config_save_viewport(_config.longitude, _config.latitude, _config.zoom);
-        draw_map(true, "");
+        ++_generation;
+        _pending = true;
+        _dirty = true;
+        if (_request) _request->cancel.store(true);
         return true;
+    }
+
+    void start_request()
+    {
+        _request = std::make_shared<MapRequest>();
+        _request->config = _config;
+        _request->generation = _generation;
+        _request->width = M5.Display.width();
+        _request->height = M5.Display.height();
+        auto *context = new std::shared_ptr<MapRequest>(_request);
+        // NVS/Wi-Fi initialization can disable flash cache: keep the stack internal.
+        if (xTaskCreatePinnedToCoreWithCaps(map_fetch_task, "amap_fetch", 16384, context,
+                                          1, nullptr, 0,
+                                          MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) != pdPASS) {
+            delete context;
+            _request.reset();
+            _message = localized_map_error("AMap connection failed: ESP_ERR_NO_MEM");
+            _dirty = true;
+        }
+        _pending = false;
+        ESP_LOGI(TAG, "request queued generation=%lu", static_cast<unsigned long>(_generation));
+    }
+
+    std::string offline_error() const
+    {
+        using ui_locale::TextId;
+        TextId id = TextId::MapPackInvalid;
+        switch (_offline.error()) {
+        case OfflineMap::Error::Io: id = TextId::MapReadFailed; break;
+        case OfflineMap::Error::Memory: id = TextId::MapOutOfMemory; break;
+        case OfflineMap::Error::Range: id = TextId::MapOutOfRange; break;
+        case OfflineMap::Error::Missing: id = TextId::MapMissingTiles; break;
+        default: break;
+        }
+        return ui_locale::text(id);
+    }
+
+    void render_offline()
+    {
+        _pending = false;
+        const int64_t begin = esp_timer_get_time();
+        if (_offline.render(_config.longitude, _config.latitude, _config.zoom,
+                            M5.Display.width(), M5.Display.height())) {
+            _has_map = true;
+            _display_config = _config;
+            _message.clear();
+            amap_config_save_viewport(_config.longitude, _config.latitude, _config.zoom, true);
+            _draw_quality = true;
+        } else {
+            _message = offline_error();
+            _config = _display_config;
+        }
+        const auto stats = _offline.stats();
+        ESP_LOGI(TAG, "offline viewport z=%u tiles_read=%lu cache_hits=%lu time=%lld us pack=%s",
+                 unsigned(_config.zoom), static_cast<unsigned long>(stats.read),
+                 static_cast<unsigned long>(stats.hits),
+                 static_cast<long long>(esp_timer_get_time()-begin), _offline.active_path());
+        _dirty = true;
     }
 
     bool draw_image()
     {
+        if (_config.offline) {
+            const auto *data = _offline.frame();
+            if (!data) return false;
+            auto *panel = M5.Display.getPanel();
+            if (panel && panel->writeNativeGrayscale4(data, M5.Display.width(), M5.Display.height())) return true;
+            // Generic backend fallback preserves all 16 gray levels.
+            const int width = M5.Display.width();
+            for (int y = 0; y < M5.Display.height(); ++y) {
+                for (int x = 0; x < width; ++x) {
+                    const size_t n = size_t(y)*width+x;
+                    const uint8_t g = ((data[n/2] >> ((n&1) ? 0 : 4)) & 15)*17;
+                    M5.Display.drawPixel(x, y, M5.Display.color565(g,g,g));
+                }
+                if (y % 64 == 63) vTaskDelay(1);
+            }
+            return true;
+        }
         const char *path = app_paths::map_image_file();
         if (!file_exists(path)) return false;
         if (_map_format == AmapImageFormat::Png) {
@@ -320,9 +485,9 @@ private:
     {
         const int width = M5.Display.width();
         M5.Display.fillRect(0, 0, width, HEADER_H, TFT_WHITE);
-        system_font::draw_left(M5.Display, "<", 18, 12, TFT_BLACK);
-        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Map), width / 2, 12, TFT_BLACK);
-        M5.Display.drawFastHLine(0, HEADER_H - 1, width, TFT_BLACK);
+        system_font::draw_left(M5.Display, "<", 18, header_layout::text_y(), TFT_BLACK);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Map), width / 2, header_layout::text_y(), TFT_BLACK);
+        header_layout::draw_separator(M5.Display);
     }
 
     void draw_controls()
@@ -348,13 +513,25 @@ private:
         char position[96] = {};
         if (message.empty()) {
             std::snprintf(position, sizeof(position), "%.5f, %.5f    Z%u",
-                          _config.longitude, _config.latitude,
-                          static_cast<unsigned>(_config.zoom));
+                          _display_config.longitude, _display_config.latitude,
+                          static_cast<unsigned>(_display_config.zoom));
         }
         system_font::draw_center(M5.Display,
                                  system_font::ellipsize(message.empty() ? position : message,
                                                         width - 30),
                                  width / 2, y + 11, TFT_BLACK);
+    }
+
+    void draw_status_only()
+    {
+        // Keep the existing gray map untouched while showing loading/error text.
+        // Importing the whole map for a Text status update would quantize it again.
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
+        draw_status_bar(_message);
+        M5.Display.display(0, M5.Display.height() - STATUS_H,
+                           M5.Display.width(), STATUS_H);
+        M5.Display.endWrite();
     }
 
     void draw_map(bool quality, const std::string &message)
@@ -370,6 +547,11 @@ private:
         }
         draw_header();
         draw_controls();
+        if (_config.offline) {
+            const int y = M5.Display.height()-STATUS_H-system_font::line_height()-4;
+            M5.Display.fillRect(0, y, M5.Display.width(), system_font::line_height()+4, TFT_WHITE);
+            system_font::draw_left(M5.Display, "© OpenStreetMap contributors", 12, y, TFT_BLACK);
+        }
         draw_status_bar(message);
         M5.Display.display();
         M5.Display.endWrite();
@@ -400,6 +582,7 @@ private:
 
 void launch_map()
 {
-    if (!ensure_wifi_configured_or_show_guide()) return;
+    AmapConfig config; amap_config_load(&config);
+    if (!config.offline && !ensure_wifi_configured_or_show_guide()) return;
     ActivityManager::instance().push(new MapActivity());
 }

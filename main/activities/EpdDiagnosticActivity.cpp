@@ -3,6 +3,7 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "ui/SystemFont.h"
+#include "ui/HeaderLayout.h"
 #include "ui/UiLocale.h"
 #include "waveforms/my_waveform.h"
 
@@ -18,7 +19,7 @@
 
 namespace {
 
-constexpr int HEADER_H = 76;
+constexpr int HEADER_H = header_layout::height;
 constexpr int PAD = 20;
 constexpr int MENU_TOP = HEADER_H;
 constexpr int MENU_ROW_H = 70;
@@ -47,14 +48,14 @@ void draw_header(const char *title)
 {
     M5.Display.fillRect(0, 0, M5.Display.width(), HEADER_H, TFT_WHITE);
     system_font::draw_center(M5.Display, title, M5.Display.width() / 2,
-                             std::max(0, (HEADER_H - system_font::line_height()) / 2),
+                             header_layout::text_y(),
                              TFT_BLACK);
-    M5.Display.drawFastHLine(0, HEADER_H - 1, M5.Display.width(), TFT_BLACK);
+    header_layout::draw_separator(M5.Display);
 }
 
 bool header_back_hit(const TouchEvent &event)
 {
-    return event.type == TouchEventType::Tap && event.x < 120 && event.y < HEADER_H;
+    return event.type == TouchEventType::Tap && header_layout::left_hit(event.x, event.y, 120);
 }
 
 void draw_center_fit(const char *text, int y, uint16_t color = TFT_BLACK)

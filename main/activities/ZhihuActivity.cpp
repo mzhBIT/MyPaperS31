@@ -5,6 +5,7 @@
 #include "activities/RssReaderActivity.h"
 #include "activities/SettingActivity.h"
 #include "ui/SystemFont.h"
+#include "ui/HeaderLayout.h"
 #include "ui/UiLocale.h"
 #include "zhihu/ZhihuClient.h"
 #include "zhihu/ZhihuConfig.h"
@@ -19,7 +20,7 @@
 namespace {
 
 constexpr const char *TAG = "ZHIHU";
-constexpr int HEADER_H = 76;
+constexpr int HEADER_H = header_layout::height;
 constexpr int LIST_TOP = HEADER_H;
 constexpr int FOOTER_H = 72;
 constexpr int SIDE_PAD = 18;
@@ -57,10 +58,10 @@ void draw_header()
 {
     const int width = M5.Display.width();
     M5.Display.fillRect(0, 0, width, HEADER_H, TFT_WHITE);
-    system_font::draw_left(M5.Display, "<", 18, 12, TFT_BLACK);
-    system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ZhihuHotList), width / 2, 12, TFT_BLACK);
-    system_font::draw_right(M5.Display, ui_locale::text(ui_locale::TextId::RefreshAction), width - 16, 12, TFT_BLACK);
-    M5.Display.drawFastHLine(0, HEADER_H - 1, width, TFT_BLACK);
+    system_font::draw_left(M5.Display, "<", 18, header_layout::text_y(), TFT_BLACK);
+    system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ZhihuHotList), width / 2, header_layout::text_y(), TFT_BLACK);
+    system_font::draw_right(M5.Display, ui_locale::text(ui_locale::TextId::RefreshAction), width - 16, header_layout::text_y(), TFT_BLACK);
+    header_layout::draw_separator(M5.Display);
 }
 
 class ZhihuHotListActivity final : public Activity {
@@ -87,12 +88,12 @@ public:
             return false;
         }
         if (event.type == TouchEventType::Back ||
-            (event.type == TouchEventType::Tap && event.y < HEADER_H && event.x < 120)) {
+            (event.type == TouchEventType::Tap && header_layout::left_hit(event.x, event.y, 120))) {
             ActivityManager::instance().pop();
             return true;
         }
-        if (event.type == TouchEventType::Tap && event.y < HEADER_H &&
-            event.x > M5.Display.width() - 180) {
+        if (event.type == TouchEventType::Tap &&
+            header_layout::right_hit(event.x, event.y, M5.Display.width(), 180)) {
             reload(true);
             return true;
         }

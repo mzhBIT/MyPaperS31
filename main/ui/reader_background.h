@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ui/ReaderProfile.h"
+
 #include <M5GFX.h>
 
 #include <string>
@@ -13,17 +15,19 @@ enum class ReaderBackgroundResult {
     SaveFailed,
 };
 
-bool reader_background_enabled();
-const char *reader_background_path();
+bool reader_background_enabled(ReaderProfile profile = ReaderProfile::Shared);
+const char *reader_background_path(ReaderProfile profile = ReaderProfile::Shared);
 ReaderBackgroundResult reader_background_set(const char *path,
                                              int screen_width,
                                              int screen_height,
-                                             std::string *message = nullptr);
-bool reader_background_clear();
+                                             std::string *message = nullptr,
+                                             ReaderProfile profile = ReaderProfile::Shared);
+bool reader_background_clear(ReaderProfile profile = ReaderProfile::Shared);
 bool reader_background_matches(const char *path);
 void reader_background_file_renamed(const char *old_path, const char *new_path);
 void reader_background_file_deleted(const char *path);
 
 // Clears the target to white, then draws the configured image with cover
 // scaling and center cropping. Returns true when a background was drawn.
-bool reader_background_draw(lgfx::LGFXBase &gfx, int width, int height);
+bool reader_background_draw(lgfx::LGFXBase &gfx, int width, int height,
+                            ReaderProfile profile = ReaderProfile::Shared);

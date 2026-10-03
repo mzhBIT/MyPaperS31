@@ -3,6 +3,7 @@
 #include "map/AmapConfig.h"
 
 #include <string>
+#include <atomic>
 
 enum class AmapImageFormat {
     Unknown = 0,
@@ -30,7 +31,8 @@ public:
     static AmapImageFormat probe_image(const char *path);
     AmapMapResult fetch_static_map(const AmapConfig &config,
                                    int output_width,
-                                   int output_height);
+                                   int output_height,
+                                   const std::atomic<bool> *cancel = nullptr);
     void close();
 
 private:

@@ -3,6 +3,7 @@
 #include "reader_font.h"
 #include "reader_style.h"
 #include "ui/SystemFont.h"
+#include "ui/HeaderLayout.h"
 #include "ui/UiLocale.h"
 
 #include <M5Unified.h>
@@ -15,7 +16,7 @@
 #include <sys/stat.h>
 #include <vector>
 
-static const int TOP_H = 56;
+static const int TOP_H = header_layout::height;
 static const int ROW_H = 72;
 static const int PAD = 18;
 
@@ -39,11 +40,15 @@ static void draw_header(const char *title)
     int w = M5.Display.width();
     M5.Display.fillRect(0, 0, w, TOP_H, TFT_WHITE);
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-    system_font::draw_center(M5.Display, title, w / 2, 6, TFT_BLACK);
-    M5.Display.drawFastHLine(0, TOP_H - 1, w, TFT_BLACK);
+    system_font::draw_center(M5.Display, title, w / 2, header_layout::text_y(), TFT_BLACK);
+    header_layout::draw_separator(M5.Display);
 }
 
 class FontPickerActivity : public Activity {
+    ReaderProfile m_profile = ReaderProfile::Shared;
+public:
+    explicit FontPickerActivity(ReaderProfile profile = ReaderProfile::Shared) : m_profile(profile) {}
+private:
     std::vector<std::string> m_fonts;
     int m_focus = 0;
     int m_scroll = 0;
@@ -69,7 +74,7 @@ class FontPickerActivity : public Activity {
 
     void focus_current_font()
     {
-        const char *current = reader_font_path();
+        const char *current = reader_font_path(m_profile);
         if (!current || !current[0] || m_fonts.empty()) return;
 
         int found = -1;
@@ -156,7 +161,7 @@ class FontPickerActivity : public Activity {
     void select_focused()
     {
         if (m_fonts.empty()) return;
-        reader_font_set(m_fonts[m_focus].c_str());
+        reader_font_set(m_fonts[m_focus].c_str(), m_profile);
         ActivityManager::instance().pop();
     }
 
@@ -191,7 +196,7 @@ public:
             return true;
         }
         if (key == APP_KEY_OK) {
-            reader_font_set(m_fonts[m_focus].c_str());
+            reader_font_set(m_fonts[m_focus].c_str(), m_profile);
             ActivityManager::instance().pop();
             return true;
         }
@@ -233,4 +238,9 @@ public:
 void launch_reader_font_picker()
 {
     ActivityManager::instance().push(new FontPickerActivity());
+}
+
+void launch_reader_font_picker(ReaderProfile profile)
+{
+    ActivityManager::instance().push(new FontPickerActivity(profile));
 }

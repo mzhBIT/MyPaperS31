@@ -1,6 +1,7 @@
 #pragma once
 
 #include "activities/Activity.h"
+#include "ui/ReaderProfile.h"
 
 #include <string>
 #include "ui/script_conversion.h"
@@ -34,6 +35,7 @@ public:
         ChapterOpened,
     };
 
+    void set_profile(ReaderProfile profile) { m_profile = profile; }
     void set_chapters(const ReaderOverlayChapters &chapters);
     void set_chapters_enabled(bool enabled);
     void set_weread_mode(bool enabled);
@@ -95,6 +97,7 @@ private:
     void draw_chapters(const Geometry &g);
     void draw_tabs(const Geometry &g);
 
+    ReaderProfile m_profile = ReaderProfile::Shared;
     ReaderOverlayChapters m_chapters;
     bool m_chapters_enabled = true;
     bool m_weread_mode = false;

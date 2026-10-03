@@ -3,6 +3,7 @@
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "ui/SystemFont.h"
+#include "ui/HeaderLayout.h"
 #include "ui/UiLocale.h"
 
 #include <M5Unified.h>
@@ -18,7 +19,7 @@
 namespace {
 
 constexpr const char *ROOT = "/sdcard";
-constexpr int HEADER_H = 76;
+constexpr int HEADER_H = header_layout::height;
 constexpr int ROW_H = 82;
 constexpr int PAD = 20;
 
@@ -42,7 +43,7 @@ public:
     bool on_touch(const TouchEvent &event) override
     {
         if (event.type == TouchEventType::Back ||
-            (event.type == TouchEventType::Tap && event.x < 110 && event.y < HEADER_H)) {
+            (event.type == TouchEventType::Tap && header_layout::left_hit(event.x, event.y, 110))) {
             back();
             return true;
         }
@@ -135,9 +136,9 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        system_font::draw_left(M5.Display, "<", 18, 12, TFT_BLACK);
-        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ChooseImage), width / 2, 12, TFT_BLACK);
-        M5.Display.drawFastHLine(0, HEADER_H - 1, width, TFT_BLACK);
+        system_font::draw_left(M5.Display, "<", 18, header_layout::text_y(), TFT_BLACK);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ChooseImage), width / 2, header_layout::text_y(), TFT_BLACK);
+        header_layout::draw_separator(M5.Display);
         for (int row = 0; row < rows; ++row) {
             const int index = _scroll + row;
             if (index >= static_cast<int>(_entries.size())) break;

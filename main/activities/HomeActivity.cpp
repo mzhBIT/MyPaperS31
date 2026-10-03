@@ -5,6 +5,8 @@
 #include "activities/MapActivity.h"
 #include "activities/SmsActivity.h"
 #include "activities/PhoneActivity.h"
+#include "activities/StocksActivity.h"
+#include "activities/CalculatorActivity.h"
 #include "activities/PlaceholderActivity.h"
 #include "activities/RadioActivity.h"
 #include "activities/SettingActivity.h"
@@ -17,9 +19,12 @@
 #include "renderer/P4JpegDecoder.h"
 #include "renderer/TurboJpegDecoder.h"
 #include "ui/home_icons_1bpp.h"
+#include "ui/home_status_icons.h"
+#include "wifi/wifi_setting.h"
 #include "ui/home_preferences.h"
 #include "ui/UiLocale.h"
 #include "ui/SystemFont.h"
+#include "ui/HeaderLayout.h"
 #include "time/time_basis.h"
 #include <M5Unified.h>
 #include <algorithm>
@@ -42,7 +47,7 @@ extern void launch_markdown_reader(const char *path);
 
 static const char *TAG = "HOME";
 
-static const int HEADER_H = 80;
+static const int HEADER_H = header_layout::height;
 static const int COVER_H  = 260;
 static const int ROW_H    = 80;
 static const int ROW_GAP  = 8;
@@ -68,6 +73,8 @@ static void go_zhihu()   { launch_zhihu(); }
 static void go_map()     { launch_map(); }
 static void go_sms()     { launch_sms(); }
 static void go_phone()   { launch_phone(); }
+static void go_stocks()  { launch_stocks(); }
+static void go_calculator() { launch_calculator(); }
 
 static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
     {
@@ -88,7 +95,7 @@ static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
         {ui_locale::TextId::Zhihu, go_zhihu},
         {ui_locale::TextId::Messages, go_sms},
         {ui_locale::TextId::Phone, go_phone},
-        {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
+        {ui_locale::TextId::Stocks, go_stocks}, {ui_locale::TextId::Calculator, go_calculator},
         {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
         {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
         {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
@@ -123,7 +130,7 @@ static const HomeIconId g_icons[HOME_PAGE_CNT][MENU_CNT] = {
     },
     {
         HomeIconId::ZhiHu, HomeIconId::Messages, HomeIconId::Phone,
-        HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
+        HomeIconId::Stocks, HomeIconId::Calculator, HomeIconId::Count,
         HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
         HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
     },
@@ -276,7 +283,7 @@ static bool draw_epub_cover_image(const RecentBook &recent, int x, int y, int w,
     return ok;
 }
 
-static constexpr int RECENT_HEADER_H = 76;
+static constexpr int RECENT_HEADER_H = header_layout::height;
 static constexpr int RECENT_PAGE_SIZE = 4;
 static constexpr int RECENT_PAD = 22;
 static constexpr int RECENT_GAP = 10;
@@ -328,7 +335,7 @@ public:
             return true;
         }
         if (event.type != TouchEventType::Tap) return false;
-        if (event.y < RECENT_HEADER_H && event.x < 140) {
+        if (header_layout::left_hit(event.x, event.y, 140)) {
             ActivityManager::instance().pop();
             return true;
         }
@@ -437,13 +444,13 @@ private:
     {
         int w = M5.Display.width();
         M5.Display.fillRect(0, 0, w, RECENT_HEADER_H, TFT_WHITE);
-        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Bookshelf), w / 2, 12, TFT_BLACK);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Bookshelf), w / 2, header_layout::text_y(), TFT_BLACK);
         if (!m_books.empty()) {
             char count[24];
             std::snprintf(count, sizeof(count), "%d / %d", current_page() + 1, page_count());
-            system_font::draw_right(M5.Display, count, w - 20, 12, TFT_BLACK);
+            system_font::draw_right(M5.Display, count, w - 20, header_layout::text_y(), TFT_BLACK);
         }
-        M5.Display.drawFastHLine(0, RECENT_HEADER_H - 1, w, TFT_BLACK);
+        header_layout::draw_separator(M5.Display);
     }
 
     void draw_placeholder_cover(const RecentBook &book, int x, int y, int w, int h)
@@ -575,25 +582,31 @@ static void go_bookshelf() { ActivityManager::instance().push(new RecentBooksAct
 // ─── Drawing ───────────────────────────────────────────────────────
 
 static void draw_home_clock() {
-    const int w = M5.Display.width();
-    constexpr int clock_width = 204;
-    M5.Display.fillRect(w - clock_width, 0, clock_width, HEADER_H - 2, TFT_WHITE);
     char clock[24] = "--:--";
     if (time_basis_system_clock_valid()) {
         time_basis_format_clock(std::time(nullptr), clock, sizeof(clock));
     }
-    system_font::draw_right(M5.Display, clock, w - 10, 18, TFT_BLACK);
+    const int text_y = header_layout::text_y();
+    system_font::draw_left(M5.Display, clock, SIDE_PAD, text_y, TFT_BLACK);
 }
 
 static void draw_header() {
     int w = M5.Display.width();
 
     M5.Display.fillRect(0, 0, w, HEADER_H, TFT_WHITE);
-    M5.Display.drawLine(0, HEADER_H - 2, w, HEADER_H - 2, TFT_BLACK);
+    header_layout::draw_separator(M5.Display);
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-    system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::HomeTitle), w / 2, 18);
-
     draw_home_clock();
+    constexpr int icon_size = 48;
+    constexpr int icon_gap = 12;
+    const int icon_y = header_layout::item_y(icon_size);
+    const int battery_x = w - SIDE_PAD - icon_size;
+    const int wifi_x = battery_x - icon_gap - icon_size;
+    const uint8_t *wifi_icon = wifi_setting_is_enabled()
+        ? home_status_icons::wifi : home_status_icons::wifi_off;
+    M5.Display.drawBitmap(wifi_x, icon_y, wifi_icon, icon_size, icon_size, TFT_BLACK, TFT_WHITE);
+    M5.Display.drawBitmap(battery_x, icon_y, home_status_icons::battery,
+                          icon_size, icon_size, TFT_BLACK, TFT_WHITE);
 }
 
 [[maybe_unused]] static void draw_cover() {
@@ -762,6 +775,7 @@ class HomeActivity : public Activity {
     int64_t m_clock_minute = -1;
     int m_clock_offset = 0;
     bool m_clock_24_hour = true;
+    bool m_wifi_enabled = false;
 
 public:
     void on_create() override {
@@ -797,11 +811,14 @@ public:
         const int64_t minute = time_basis_system_clock_valid() ? now / 60 : -1;
         const int offset = time_basis_get_offset_minutes();
         const bool hour24 = time_basis_use_24_hour();
+        const bool wifi_enabled = wifi_setting_is_enabled();
         if (minute == m_clock_minute && offset == m_clock_offset &&
-            hour24 == m_clock_24_hour) return;
+            hour24 == m_clock_24_hour && wifi_enabled == m_wifi_enabled) return;
+        if (M5.Display.displayBusy()) return;
         m_clock_minute = minute;
         m_clock_offset = offset;
         m_clock_24_hour = hour24;
+        m_wifi_enabled = wifi_enabled;
         M5.Display.startWrite();
         M5.Display.setDither(false);
         M5.Display.setEpdMode(epd_mode_t::epd_text);
@@ -889,6 +906,7 @@ private:
         m_clock_minute = time_basis_system_clock_valid() ? now / 60 : -1;
         m_clock_offset = time_basis_get_offset_minutes();
         m_clock_24_hour = time_basis_use_24_hour();
+        m_wifi_enabled = wifi_setting_is_enabled();
     }
     static int menu_count(int page) {
         int count = 0;

@@ -18,15 +18,16 @@
 #include <vector>
 
 namespace {
+struct Settings {
 
-constexpr const char *NVS_NAMESPACE = "reader_bg";
-constexpr const char *NVS_PATH_KEY = "path";
-constexpr const char *CACHE_PATH = "/sdcard/.reader/reader_background.g4";
-constexpr const char *CACHE_TEMP_PATH = "/sdcard/.reader/reader_background.g4.tmp";
-constexpr const char *TAG = "READER_BG";
-constexpr uint32_t CACHE_MAGIC = 0x34474252; // RBG4
-constexpr uint32_t CACHE_VERSION = 2;
-constexpr lgfx::bgr888_t GRAYSCALE_PALETTE[16] = {
+const char *NVS_NAMESPACE = "reader_bg";
+static constexpr const char *NVS_PATH_KEY = "path";
+const char *CACHE_PATH = "/sdcard/.reader/reader_background.g4";
+const char *CACHE_TEMP_PATH = "/sdcard/.reader/reader_background.g4.tmp";
+static constexpr const char *TAG = "READER_BG";
+static constexpr uint32_t CACHE_MAGIC = 0x34474252; // RBG4
+static constexpr uint32_t CACHE_VERSION = 2;
+static constexpr lgfx::bgr888_t GRAYSCALE_PALETTE[16] = {
     {0x00, 0x00, 0x00}, {0x11, 0x11, 0x11},
     {0x22, 0x22, 0x22}, {0x33, 0x33, 0x33},
     {0x44, 0x44, 0x44}, {0x55, 0x55, 0x55},
@@ -414,7 +415,6 @@ void ensure_initialized()
     nvs_close(handle);
 }
 
-} // namespace
 
 bool reader_background_enabled()
 {
@@ -537,4 +537,62 @@ bool reader_background_draw(lgfx::LGFXBase &gfx, int width, int height)
              width, height, (unsigned)background_cache_size,
              (esp_timer_get_time() - started) / 1000);
     return true;
+}
+
+Settings(bool rss = false) {
+    if (rss) {
+        NVS_NAMESPACE = "rss_reader_bg";
+        CACHE_PATH = "/sdcard/.reader/rss_background.g4";
+        CACHE_TEMP_PATH = "/sdcard/.reader/rss_background.g4.tmp";
+    }
+}
+};
+Settings shared_settings;
+Settings rss_settings(true);
+bool rss_seeded = false;
+void seed_rss_settings()
+{
+    if (rss_seeded) return;
+    rss_settings.ensure_initialized();
+    nvs_handle_t h;
+    if (nvs_open(rss_settings.NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) return;
+    uint8_t seeded = 0;
+    if (nvs_get_u8(h, "profile_v1", &seeded) != ESP_OK || !seeded) {
+        shared_settings.ensure_initialized();
+        rss_settings.background_path = shared_settings.background_path;
+        rss_settings.background_ext = shared_settings.background_ext;
+        rss_settings.background_width = shared_settings.background_width;
+        rss_settings.background_height = shared_settings.background_height;
+        rss_settings.background_progressive = shared_settings.background_progressive;
+        if (!rss_settings.save_path(rss_settings.background_path)) { nvs_close(h); return; }
+        esp_err_t err = nvs_set_u8(h, "profile_v1", 1);
+        if (err == ESP_OK) err = nvs_commit(h);
+        if (err != ESP_OK) { nvs_close(h); return; }
+    }
+    nvs_close(h);
+    rss_seeded = true;
+}
+Settings &settings(ReaderProfile profile) {
+    if (profile == ReaderProfile::Rss) seed_rss_settings();
+    return profile == ReaderProfile::Rss ? rss_settings : shared_settings;
+}
+} // namespace
+
+bool reader_background_enabled(ReaderProfile profile) { return settings(profile).reader_background_enabled(); }
+const char *reader_background_path(ReaderProfile profile) { return settings(profile).reader_background_path(); }
+bool reader_background_clear(ReaderProfile profile) { return settings(profile).reader_background_clear(); }
+bool reader_background_matches(const char *path) { return shared_settings.reader_background_matches(path) || rss_settings.reader_background_matches(path); }
+void reader_background_file_renamed(const char *old_path, const char *new_path) {
+    shared_settings.reader_background_file_renamed(old_path, new_path);
+    rss_settings.reader_background_file_renamed(old_path, new_path);
+}
+void reader_background_file_deleted(const char *path) {
+    shared_settings.reader_background_file_deleted(path);
+    rss_settings.reader_background_file_deleted(path);
+}
+ReaderBackgroundResult reader_background_set(const char *path, int width, int height, std::string *message, ReaderProfile profile) {
+    return settings(profile).reader_background_set(path, width, height, message);
+}
+bool reader_background_draw(lgfx::LGFXBase &gfx, int width, int height, ReaderProfile profile) {
+    return settings(profile).reader_background_draw(gfx, width, height);
 }
