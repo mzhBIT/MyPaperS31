@@ -1,5 +1,7 @@
 #include "map/AmapClient.h"
+#include "map/AmapRoute.h"
 #include "map/AmapImageProcessor.h"
+#include "map/MapScale.h"
 
 #include "storage/app_paths.h"
 
@@ -14,6 +16,10 @@
 #include <algorithm>
 #include <cstdio>
 #include <ctime>
+#include <cmath>
+#include <cstdlib>
+#include <memory>
+#include <esp_heap_caps.h>
 
 namespace {
 
@@ -165,6 +171,131 @@ AmapImageFormat AmapClient::probe_image(const char *path)
     return probe_image_format(path);
 }
 
+AmapSearchResult AmapClient::search_places(const AmapConfig &config,
+                                           const std::string &keyword,
+                                           const std::atomic<bool> *cancel)
+{
+    AmapSearchResult result;
+    if (config.api_key.empty()) { result.error = "AMap API key is not configured"; return result; }
+    if (keyword.empty() || keyword.size() > 240) { result.error = "Invalid search keyword"; return result; }
+    auto encode = [](const std::string &text) {
+        const char hex[] = "0123456789ABCDEF";
+        std::string out;
+        for (unsigned char c : text) {
+            if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.' || c == '~') out += c;
+            else { out += '%'; out += hex[c >> 4]; out += hex[c & 15]; }
+        }
+        return out;
+    };
+    const std::string url = "https://restapi.amap.com/v5/place/text?keywords=" + encode(keyword) +
+        "&page_size=10&page_num=1&output=json&key=" + encode(config.api_key);
+    return fetch_place_json(config, url, 0, cancel);
+}
+
+AmapSearchResult AmapClient::lookup_location(const AmapConfig &config, bool ip,
+                                             const std::atomic<bool> *cancel)
+{
+    AmapSearchResult result;
+    if (config.api_key.empty()) { result.error = "AMap API key is not configured"; return result; }
+    // Keys are provisioned as ASCII alphanumerics; reject control/query injection.
+    if (config.api_key.find_first_not_of("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ") != std::string::npos) {
+        result.error = "AMap API key is invalid or expired"; return result;
+    }
+    if (!std::isfinite(config.longitude) || !std::isfinite(config.latitude) ||
+        std::abs(config.longitude) > 180 || std::abs(config.latitude) > 85.051129) {
+        result.error = "Invalid location response"; return result;
+    }
+    char position[96];
+    std::snprintf(position, sizeof(position), "location=%.6f,%.6f&extensions=base&radius=1000&", config.longitude, config.latitude);
+    const std::string url = std::string("https://restapi.amap.com") +
+        (ip ? "/v3/ip?" : "/v3/geocode/regeo?") + (ip ? "" : position) +
+        "output=json&key=" + config.api_key;
+    return fetch_place_json(config, url, ip ? 1 : 2, cancel);
+}
+
+AmapSearchResult AmapClient::fetch_place_json(const AmapConfig &config, const std::string &url,
+                                             int kind, const std::atomic<bool> *cancel)
+{
+    AmapSearchResult result;
+    fetch_json(url,32768,cancel,[&](std::string_view body) {
+        auto parsed = kind == 0 ? parse_search_response(body)
+            : parse_location_response(body,kind == 1,config.longitude,config.latitude);
+        result = std::move(parsed);
+    },result.error);
+    return result;
+}
+
+bool AmapClient::fetch_json(const std::string &url, size_t capacity, const std::atomic<bool> *cancel,
+                           const std::function<void(std::string_view)> &parse, std::string &error)
+{
+    if (cancelled(cancel) || !ensure_request_time(&error) || !wait_for_request_slot(cancel)) return false;
+    const size_t CAP = capacity;
+    std::unique_ptr<char, decltype(&std::free)> body(
+        static_cast<char *>(heap_caps_malloc(CAP+1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)), &std::free);
+    if (!body) { error = "Not enough memory for map"; return false; }
+    esp_http_client_config_t cfg = {};
+    cfg.url = url.c_str(); cfg.timeout_ms = 3000; cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.buffer_size = 2048; cfg.user_agent = "MyPaper Map";
+    close();
+    auto client = esp_http_client_init(&cfg); _client = client;
+    if (!client) { error = "Failed to create AMap HTTPS client"; return false; }
+    ESP_LOGI(TAG, "map JSON query begin cap=%u", unsigned(capacity)); // Never log the URL/API key.
+    const int64_t begin = esp_timer_get_time();
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err == ESP_OK && esp_http_client_fetch_headers(client) < 0) err = ESP_FAIL;
+    const int status = esp_http_client_get_status_code(client);
+    size_t used = 0;
+    esp_http_client_set_timeout_ms(client, 1000);
+    while (err == ESP_OK && !cancelled(cancel)) {
+        if (esp_timer_get_time()-begin > 15000000) { err = ESP_ERR_TIMEOUT; break; }
+        char chunk[1024];
+        const int n = esp_http_client_read(client, chunk, sizeof(chunk));
+        if (n == -ESP_ERR_HTTP_EAGAIN) continue;
+        if (n < 0) { err = ESP_FAIL; break; }
+        if (n == 0) { if (!esp_http_client_is_complete_data_received(client)) err = ESP_FAIL; break; }
+        if (size_t(n) > CAP-used) { err = ESP_ERR_INVALID_SIZE; break; }
+        std::copy(chunk, chunk+n, body.get()+used); used += n;
+    }
+    close(); // Release transport before parsing and before UI publication.
+    if (cancelled(cancel)) return false;
+    if (err != ESP_OK) { error = std::string("AMap connection failed: ")+esp_err_to_name(err); return false; }
+    if (status != 200) { error = "AMap HTTP error " + std::to_string(status); return false; }
+    body.get()[used] = 0;
+    parse(std::string_view(body.get(),used));
+    ESP_LOGI(TAG,"map JSON query complete bytes=%u time=%lld ms",unsigned(used),(esp_timer_get_time()-begin)/1000);
+    return true;
+}
+
+AmapRoute AmapClient::plan_route(const AmapConfig &config, const AmapPlace &origin,
+                                 const AmapPlace &destination, AmapTravelMode mode,
+                                 const std::atomic<bool> *cancel)
+{
+    AmapRoute result;
+    if (config.api_key.empty()) { result.error="AMap API key is not configured"; return result; }
+    if (config.api_key.find_first_not_of("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")!=std::string::npos) {
+        result.error="AMap API key is invalid or expired"; return result;
+    }
+    for (const auto *p : {&origin,&destination}) {
+        if (!std::isfinite(p->longitude) || !std::isfinite(p->latitude) ||
+            std::abs(p->longitude)>180 || std::abs(p->latitude)>85.051129) {
+            result.error="Invalid route endpoints"; return result;
+        }
+    }
+    if (origin.longitude==destination.longitude && origin.latitude==destination.latitude) {
+        result.error="Start and destination are the same"; return result;
+    }
+    const char *type=mode==AmapTravelMode::Driving ? "driving" : mode==AmapTravelMode::Walking ? "walking" : "bicycling";
+    char position[160];
+    std::snprintf(position,sizeof(position),"?origin=%.6f,%.6f&destination=%.6f,%.6f&show_fields=cost,polyline&",
+                  origin.longitude,origin.latitude,destination.longitude,destination.latitude);
+    const std::string url=std::string("https://restapi.amap.com/v5/direction/")+type+position+
+        (mode==AmapTravelMode::Driving ? "strategy=0&" : "")+"key="+config.api_key;
+    fetch_json(url,256*1024,cancel,[&](std::string_view body) { result=parse_amap_route(body); },result.error);
+    result.origin=origin; result.destination=destination; result.mode=mode;
+    return result;
+}
+
 AmapMapResult AmapClient::fetch_static_map(const AmapConfig &config,
                                            int output_width,
                                            int output_height,
@@ -178,11 +309,12 @@ AmapMapResult AmapClient::fetch_static_map(const AmapConfig &config,
     const int request_width = std::max(1, std::min(1024, (output_width + 1) / 2));
     const int request_height = std::max(1, std::min(1024, (output_height + 1) / 2));
     constexpr int server_scale = MYPAPER_AMAP_LOW_RES_PIPELINE ? 1 : 2;
+    const uint8_t request_zoom=map_scale::request_zoom(config.zoom);
     char url[512] = {};
     std::snprintf(url, sizeof(url),
                   "https://restapi.amap.com/v3/staticmap?location=%.6f,%.6f"
                   "&zoom=%u&size=%d*%d&scale=%d&key=%s",
-                  config.longitude, config.latitude, static_cast<unsigned>(config.zoom),
+                  config.longitude, config.latitude, static_cast<unsigned>(request_zoom),
                   request_width, request_height, server_scale, config.api_key.c_str());
 
     app_paths::ensure_dir(app_paths::map_cache_dir());
@@ -243,9 +375,10 @@ AmapMapResult AmapClient::fetch_static_map(const AmapConfig &config,
             break;
         }
         ESP_LOGI(TAG,
-                 "static map begin center=%.6f,%.6f zoom=%u request=%dx%d scale=%d "
+                 "static map begin center=%.6f,%.6f display_z=%u request_z=%u request=%dx%d scale=%d "
                  "transport=%s attempt=%d",
                  config.longitude, config.latitude, static_cast<unsigned>(config.zoom),
+                 static_cast<unsigned>(request_zoom),
                  request_width, request_height, server_scale,
                  reuse_attempt ? "reuse" : "new", attempt + 1);
         const int64_t started = esp_timer_get_time();

@@ -9,12 +9,13 @@ struct AmapConfig {
     double latitude = 30.344269032816978;
     uint8_t zoom = 12;
     bool offline = false;
+    bool hybrid = false; // offline through Z16, online at display Z17..Z19.
     std::string offline_path;
     bool offline_viewport_saved = false;
 };
 
 bool amap_config_load(AmapConfig *config);
 bool amap_config_save_api_key(const std::string &api_key);
-bool amap_config_save_viewport(double longitude, double latitude, uint8_t zoom, bool offline = false);
-bool amap_config_save_source(bool offline);
+bool amap_config_save_viewport(double longitude, double latitude, uint8_t zoom, bool offline = false, bool hybrid = false);
+bool amap_config_save_source(uint8_t source); // 0 online, 1 offline, 2 hybrid.
 bool amap_config_save_offline_path(const std::string &path);

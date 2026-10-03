@@ -52,6 +52,7 @@ const char *weread_books_dir() { return WEREAD_BOOKS_DIR; }
 const char *weread_covers_dir() { return WEREAD_COVERS_DIR; }
 const char *zhihu_hot_list_file() { return ZHIHU_HOT_LIST_FILE; }
 const char *map_cache_dir() { return MAP_CACHE_DIR; }
+const char *map_viewport_cache_dir() { return "/sdcard/.reader/map/viewports"; }
 const char *map_image_file() { return MAP_IMAGE_FILE; }
 const char *system_dir() { return SYSTEM_DIR; }
 const char *ime_dir() { return IME_DIR; }

@@ -9,6 +9,7 @@
 #include "deepseek/DeepSeekClient.h"
 #include "frontlight/frontlight.h"
 #include "map/AmapConfig.h"
+#include "map/MapCache.h"
 #include "activities/OfflineMapPickerActivity.h"
 #include "storage/app_paths.h"
 #include "time/time_basis.h"
@@ -806,7 +807,8 @@ private:
         if (M5.Display.displayBusy()) return;
         if (_focus == 0) {
             AmapConfig c; amap_config_load(&c);
-            if (!amap_config_save_source(!c.offline)) _message = ui_locale::text(ui_locale::TextId::MapSaveFailed);
+            const uint8_t source=c.hybrid?2:c.offline?1:0;
+            if (!amap_config_save_source((source+1)%3)) _message = ui_locale::text(ui_locale::TextId::MapSaveFailed);
             else _message.clear();
             draw(false);
         } else if (_focus == 1) launch_offline_map_picker();
@@ -816,9 +818,14 @@ private:
 
     void clear_cache()
     {
-        const int removed = std::remove(app_paths::map_image_file());
-        _message = removed == 0 ? ui_locale::text(ui_locale::TextId::MapCacheCleared)
-                                : ui_locale::text(ui_locale::TextId::MapCacheEmpty);
+        MapCache cache(app_paths::map_viewport_cache_dir());
+        bool ok = cache.clear();
+        for (const auto &path : {std::string(app_paths::map_image_file()),
+                                 std::string(app_paths::map_image_file())+".tmp"}) {
+            FILE *file = std::fopen(path.c_str(), "rb");
+            if (file) { std::fclose(file); if (std::remove(path.c_str())) ok = false; }
+        }
+        _message = ui_locale::text(ok ? ui_locale::TextId::MapCacheCleared : ui_locale::TextId::MapReadFailed);
         draw(false);
     }
 
@@ -841,7 +848,9 @@ private:
         AmapConfig config;
         const bool configured = amap_config_load(&config);
         FILE *cache = std::fopen(app_paths::map_image_file(), "rb");
-        const bool cached = cache != nullptr;
+        MapCache viewports(app_paths::map_viewport_cache_dir());
+        const auto usage = viewports.usage();
+        const bool cached = cache != nullptr || usage.entries != 0;
         if (cache) std::fclose(cache);
 
         M5.Display.startWrite();
@@ -849,7 +858,7 @@ private:
         M5.Display.fillScreen(TFT_WHITE);
         draw_header(ui_locale::text(ui_locale::TextId::MapSettings));
         draw_row(HEADER_H, ui_locale::text(ui_locale::TextId::MapSource),
-                 ui_locale::text(config.offline ? ui_locale::TextId::OfflineMap : ui_locale::TextId::OnlineMap),
+                 ui_locale::text(config.hybrid ? ui_locale::TextId::HybridMap : config.offline ? ui_locale::TextId::OfflineMap : ui_locale::TextId::OnlineMap),
                  _focus == 0);
         draw_row(HEADER_H+160, ui_locale::text(ui_locale::TextId::MapPackage),
                  config.offline_path.empty() ? ui_locale::text(ui_locale::TextId::SelectMapPackage) : config.offline_path,
