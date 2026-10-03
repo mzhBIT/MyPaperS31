@@ -110,9 +110,10 @@ void beauty_text(int index, bool weread_mode, ReaderProfile profile, std::string
         1, // Hide header
         2, // Background
         3, // Book cover
+        7, // Auto page
     };
     const int ordered_index = weread_mode && index > 5 ? index - 1 : index;
-    const int base_index = ordered_index >= 0 && ordered_index < 7
+    const int base_index = ordered_index >= 0 && ordered_index < 8
         ? kBeautyOrder[ordered_index]
         : -1;
     switch (base_index) {
@@ -150,6 +151,16 @@ void beauty_text(int index, bool weread_mode, ReaderProfile profile, std::string
         snprintf(buf, sizeof(buf), "%d", style.full_refresh_pages);
         *value = buf;
         break;
+    case 7: {
+        *name = ui_locale::text(ui_locale::TextId::AutoPage);
+        const int seconds = reader_auto_page_seconds(profile);
+        if (seconds == 0) *value = ui_locale::text(ui_locale::TextId::Off);
+        else {
+            snprintf(buf, sizeof(buf), "%d%s", seconds, ui_locale::text(ui_locale::TextId::SecondsShort));
+            *value = buf;
+        }
+        break;
+    }
     default:
         name->clear();
         value->clear();
@@ -187,10 +198,10 @@ void ReaderOverlay::set_book_path(const char *path)
 
 int ReaderOverlay::beauty_base_index(int index) const
 {
-    static constexpr int kBeautyOrder[] = {4, 6, 5, 0, 1, 2, 3};
+    static constexpr int kBeautyOrder[] = {4, 6, 5, 0, 1, 2, 3, 7};
     if (m_weread_mode && index == 5) return -1;
     const int ordered_index = m_weread_mode && index > 5 ? index - 1 : index;
-    return ordered_index >= 0 && ordered_index < 7
+    return ordered_index >= 0 && ordered_index < 8
         ? kBeautyOrder[ordered_index]
         : -1;
 }
@@ -367,6 +378,9 @@ void ReaderOverlay::adjust_setting(int delta)
         case 6:
             style.full_refresh_pages += delta * 5;
             break;
+        case 7:
+            reader_auto_page_set_seconds(reader_auto_page_seconds(m_profile) + delta * 5, m_profile);
+            return; // Timing-only setting: no text repagination needed.
         default:
             return;
         }

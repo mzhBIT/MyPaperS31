@@ -89,6 +89,39 @@ struct ReaderStyleV1 {
 static ReaderStyle s_style;
 static ReaderStyle s_rss_style;
 static bool s_rss_initialized = false;
+static int s_auto_page_seconds[2] = {};
+static bool s_auto_page_loaded[2] = {};
+
+int reader_auto_page_seconds(ReaderProfile profile)
+{
+    const int index = profile == ReaderProfile::Rss ? 1 : 0;
+    if (!s_auto_page_loaded[index]) {
+        s_auto_page_loaded[index] = true;
+        nvs_handle_t h;
+        int32_t seconds = 0;
+        if (nvs_open(index ? "rss_reader" : NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+            nvs_get_i32(h, "auto_page_s", &seconds);
+            nvs_close(h);
+        }
+        s_auto_page_seconds[index] = reader_auto_page_clamp_seconds(int(seconds));
+    }
+    return s_auto_page_seconds[index];
+}
+
+bool reader_auto_page_set_seconds(int seconds, ReaderProfile profile)
+{
+    const int index = profile == ReaderProfile::Rss ? 1 : 0;
+    seconds = reader_auto_page_clamp_seconds(seconds);
+    nvs_handle_t h;
+    if (nvs_open(index ? "rss_reader" : NVS_NS, NVS_READWRITE, &h) != ESP_OK) return false;
+    esp_err_t err = nvs_set_i32(h, "auto_page_s", seconds);
+    if (err == ESP_OK) err = nvs_commit(h);
+    nvs_close(h);
+    if (err != ESP_OK) return false;
+    s_auto_page_seconds[index] = seconds;
+    s_auto_page_loaded[index] = true;
+    return true;
+}
 
 static void ensure_rss_style()
 {

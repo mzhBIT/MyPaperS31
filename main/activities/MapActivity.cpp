@@ -751,9 +751,17 @@ private:
             system_font::draw_center(M5.Display, name, cx, cy+18, TFT_BLACK);
         }
         if (_display_config.offline) {
-            const int y = M5.Display.height()-STATUS_H-system_font::line_height()-4;
-            M5.Display.fillRect(0, y, M5.Display.width(), system_font::line_height()+4, TFT_WHITE);
-            system_font::draw_left(M5.Display, "© OpenStreetMap contributors", 12, y, TFT_BLACK);
+            // Source attribution is an overlay, not a full-width footer.
+            constexpr const char *credit = "(c) OpenStreetMap contributors";
+            M5.Display.setTextSize(1);
+            const int w = M5.Display.textWidth(credit, &fonts::Font2);
+            const int h = M5.Display.fontHeight(&fonts::Font2);
+            const int x = 6;
+            const int y = M5.Display.height()-h-4;
+            M5.Display.fillRect(x-2, y-2, w+4, h+4, TFT_WHITE);
+            M5.Display.setTextDatum(textdatum_t::top_left);
+            M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+            M5.Display.drawString(credit, x, y, &fonts::Font2);
         }
         draw_status_bar(message);
         M5.Display.display();

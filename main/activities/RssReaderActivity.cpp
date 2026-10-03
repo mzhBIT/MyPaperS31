@@ -3,6 +3,7 @@
 #include "activities/RssReaderActivity.h"
 #include "activities/ReaderBackgroundPickerActivity.h"
 #include "activities/ReaderOverlay.h"
+#include "ui/ReaderAutoPage.h"
 #include "activities/SettingActivity.h"
 #include "reader_font.h"
 #include "reader_style.h"
@@ -1125,6 +1126,7 @@ public:
 
     void on_show() override
     {
+        _auto_page.reset();
         if (!_seen_show) {
             _seen_show = true;
             return;
@@ -1141,10 +1143,17 @@ public:
     void loop() override
     {
         poll_article_image_loader();
+        const bool allowed = _view == View::Article && !_reader_overlay.visible() &&
+            !_confirm_wallpaper_save && !M5.Display.displayBusy() &&
+            g_page + 1 < article_page_count();
+        if (_auto_page.due(esp_timer_get_time(), reader_auto_page_seconds(ReaderProfile::Rss), allowed)) {
+            next_article_page();
+        }
     }
 
     bool on_key(int key) override
     {
+        _auto_page.reset();
         if (_view == View::Article) return article_key(key);
         if (key == APP_KEY_BACK) {
             if (_view == View::Items) {
@@ -1180,6 +1189,7 @@ public:
 
     bool on_touch(const TouchEvent &event) override
     {
+        _auto_page.reset();
         if (_view == View::Article && _reader_overlay.visible()) {
             handle_reader_overlay_action(_reader_overlay.on_touch(event));
             return true;
@@ -1301,6 +1311,7 @@ private:
     uint32_t _image_load_generation = 0;
     std::vector<RssImageRef> _pending_image_refs;
     ReaderOverlay _reader_overlay;
+    ReaderAutoPage _auto_page;
 
     void handle_reader_overlay_action(ReaderOverlay::Action action)
     {

@@ -2,6 +2,7 @@
 #include "activities/ActivityManager.h"
 #include "activities/ReaderBackgroundPickerActivity.h"
 #include "activities/ReaderOverlay.h"
+#include "ui/ReaderAutoPage.h"
 #include "parser/epub_html.h"
 #include "parser/markdown_parser.h"
 #include "parser/reflow_book.h"
@@ -427,6 +428,7 @@ public:
 
     void on_show() override
     {
+        _auto_page.reset();
         if (_ok && !g_epub.is_weread()) {
             if (!_seen_show) _reading_timer.configure(g_epub.path().c_str());
             _reading_timer.resume();
@@ -443,10 +445,21 @@ public:
         redraw_all(epd_mode_t::epd_quality);
     }
 
-    void on_hide() override { _reading_timer.pause(); }
+    void on_hide() override { _reading_timer.pause(); _auto_page.reset(); }
 
     void loop() override
     {
+        const bool allowed = _ok && !_overlay.visible() && !_footnote_popup_visible &&
+            !M5.Display.displayBusy() &&
+            (_page_index + 1 < _page_count || _spine_index + 1 < g_epub.spine_count());
+        if (_auto_page.due(esp_timer_get_time(), reader_auto_page_seconds(), allowed)) {
+            const int old_spine = _spine_index, old_page = _page_index;
+            next_page();
+            if (_spine_index != old_spine || _page_index != old_page) {
+                mark_progress_dirty();
+                redraw(M5.Display.width(), M5.Display.height());
+            }
+        }
         tick_weread_active_time();
         poll_annotation_worker();
         start_pending_annotation_fetch();
@@ -456,6 +469,7 @@ public:
 
     bool on_key(int key) override
     {
+        _auto_page.reset();
         note_weread_reader_activity();
         int w = M5.Display.width();
         int h = M5.Display.height();
@@ -512,6 +526,7 @@ public:
 
     bool on_touch(const TouchEvent &event) override
     {
+        _auto_page.reset();
         note_weread_reader_activity();
         int w = M5.Display.width();
         int h = M5.Display.height();
@@ -3434,6 +3449,7 @@ private:
     }
 
     ReaderOverlay _overlay;
+    ReaderAutoPage _auto_page;
 };
 
 void launch_epub_reader(const char *path)

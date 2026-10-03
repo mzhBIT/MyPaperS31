@@ -28,3 +28,12 @@ const char *reader_style_refresh_mode_name(int mode);
 int reader_style_next_refresh_mode(int mode, int delta);
 const char *reader_style_underline_name(int type);
 int reader_style_next_underline_type(int type, int delta);
+// Separate NVS key preserves the existing style_v7 blob and RSS profile.
+constexpr int READER_AUTO_PAGE_MAX_SECONDS = 300;
+constexpr int reader_auto_page_clamp_seconds(int seconds)
+{
+    return (seconds < 0 ? 0 : seconds > READER_AUTO_PAGE_MAX_SECONDS
+        ? READER_AUTO_PAGE_MAX_SECONDS : seconds) / 5 * 5;
+}
+int reader_auto_page_seconds(ReaderProfile profile = ReaderProfile::Shared);
+bool reader_auto_page_set_seconds(int seconds, ReaderProfile profile = ReaderProfile::Shared);

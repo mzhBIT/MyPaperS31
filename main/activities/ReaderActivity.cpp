@@ -2,6 +2,7 @@
 #include "activities/ActivityManager.h"
 #include "activities/ReaderBackgroundPickerActivity.h"
 #include "activities/ReaderOverlay.h"
+#include "ui/ReaderAutoPage.h"
 #include "parser/txt_parser.h"
 #include "recent_books.h"
 #include "reader_style.h"
@@ -199,6 +200,7 @@ class ReaderActivity : public Activity {
     bool m_seen_show = false;
     BookReadingTimer m_reading_timer;
     ReaderOverlay m_overlay;
+    ReaderAutoPage m_auto_page;
     int m_non_quality_refresh_count = 0;
 public:
     ReaderActivity(const char *path) {
@@ -221,9 +223,10 @@ public:
         g_book.save_progress(g_page.start_offset, g_history);
     }
 
-    void on_hide() override { m_reading_timer.pause(); }
+    void on_hide() override { m_reading_timer.pause(); m_auto_page.reset(); }
 
     void on_show() override {
+        m_auto_page.reset();
         m_reading_timer.resume();
         if (!m_seen_show) {
             m_seen_show = true;
@@ -254,7 +257,15 @@ public:
         }
     }
 
+    void loop() override {
+        const bool allowed = !m_overlay.visible() && !M5.Display.displayBusy() && !g_page.eof;
+        if (m_auto_page.due(esp_timer_get_time(), reader_auto_page_seconds(), allowed)) {
+            next_page(M5.Display.width(), M5.Display.height());
+        }
+    }
+
     bool on_touch(const TouchEvent &event) override {
+        m_auto_page.reset();
         int w = M5.Display.width(), h = M5.Display.height();
 
         if (m_overlay.visible()) {
@@ -297,6 +308,7 @@ public:
     }
 
     bool on_key(int key) override {
+        m_auto_page.reset();
         int w = M5.Display.width(), h = M5.Display.height();
 
         if (m_overlay.visible()) {
