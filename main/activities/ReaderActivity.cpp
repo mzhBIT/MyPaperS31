@@ -8,6 +8,7 @@
 #include "recent_books.h"
 #include "reader_style.h"
 #include "renderer/TextRenderer.h"
+#include "renderer/ReaderPageBuffer.h"
 #include "ui/SystemFont.h"
 #include "ui/reader_background.h"
 #include "utils/CooperativeYield.h"
@@ -94,29 +95,35 @@ static void draw_text_underline(lgfx::LGFXBase &gfx, int x, int y, int width, in
     }
 }
 
-static void draw_content(int w, int h) {
-    const auto &text = g_page.text;
+static void draw_content(int w, int h, lgfx::LGFXBase &gfx = M5.Display,
+                         const TxtPage *cached_page = nullptr, size_t first = 0,
+                         int *cursor = nullptr) {
+    const TxtPage &page = cached_page ? *cached_page : g_page;
+    const auto &text = page.text;
     auto &renderer = reader_text_renderer();
     ReaderStyle style = reader_style_get();
 
     int x = style.margin_left;
-    int y = reader_header_height() + style.margin_top;
+    int y = cursor ? *cursor : reader_header_height() + style.margin_top;
     int max_y = h - style.margin_bottom;
     int line_h = renderer.lineHeight();
     if (line_h <= 0) line_h = 48;
     const int justify_width = std::max(100, w - style.margin_left - style.margin_right);
 
     int64_t t0 = esp_timer_get_time();
-    bool prepared = renderer.preparePage(text);
+    bool prepared = cursor || renderer.preparePage(text);
     if (!prepared) {
         ESP_LOGW(TAG, "TTF preparePage reported missing glyphs or render errors");
     }
     int64_t t_prepare = esp_timer_get_time();
-    if (g_page.vertical) {
-        int right = w - style.margin_right;
+    if (page.vertical) {
+        int right = cursor ? *cursor : w - style.margin_right;
+        y = reader_header_height() + style.margin_top;
         const std::vector<inline_style::Span> no_styles;
         int columns = 0;
-        for (const auto &page_line : g_page.lines) {
+        const size_t end = cursor ? std::min(page.lines.size(), first + 1) : page.lines.size();
+        for (size_t i = first; i < end; ++i) {
+            const auto &page_line = page.lines[i];
             if (right <= style.margin_left) break;
             const size_t start = page_line.text_offset;
             const size_t length = page_line.text_length;
@@ -125,15 +132,15 @@ static void draw_content(int w, int h) {
             if (!column.empty()) {
                 const int column_x = right - line_h;
                 const int column_y = y + page_line.x_offset;
-                renderer.drawStyledUtf8VerticalColumn(M5.Display, column, no_styles,
+                renderer.drawStyledUtf8VerticalColumn(gfx, column, no_styles,
                                                        column_x, column_y, line_h, TFT_BLACK);
                 if (style.underline_type > 0) {
                     const int length_px = renderer.measureUtf8Vertical(column);
                     if (style.underline_type == 1) {
-                        M5.Display.drawFastVLine(column_x - 2, column_y, length_px, TFT_BLACK);
+                        gfx.drawFastVLine(column_x - 2, column_y, length_px, TFT_BLACK);
                     } else {
                         for (int dy = 0; dy < length_px; dy += 20) {
-                            M5.Display.drawFastVLine(column_x - 2, column_y + dy,
+                            gfx.drawFastVLine(column_x - 2, column_y + dy,
                                 std::min(12, length_px - dy), TFT_BLACK);
                         }
                     }
@@ -142,7 +149,8 @@ static void draw_content(int w, int h) {
             right -= page_line.height > 0 ? page_line.height : line_h;
             ++columns;
         }
-        ESP_LOGI(TAG, "vertical draw: columns=%d prepare=%lld draw=%lld ms",
+        if (cursor) *cursor = right;
+        if (!cursor) ESP_LOGI(TAG, "vertical draw: columns=%d prepare=%lld draw=%lld ms",
                  columns, (t_prepare - t0) / 1000,
                  (esp_timer_get_time() - t_prepare) / 1000);
         return;
@@ -150,7 +158,9 @@ static void draw_content(int w, int h) {
     int line_count = 0;
     int char_count = 0;
     CooperativeYield cooperative_yield;
-    for (const auto &page_line : g_page.lines) {
+    const size_t end = cursor ? std::min(page.lines.size(), first + 1) : page.lines.size();
+    for (size_t i = first; i < end; ++i) {
+        const auto &page_line = page.lines[i];
         if (y >= max_y) break;
         ++line_count;
         cooperative_yield.ifDue();
@@ -172,18 +182,19 @@ static void draw_content(int w, int h) {
             int underline_w = page_line.justify
                             ? std::max(1, justify_width - (int)page_line.x_offset)
                             : renderer.measureUtf8(line);
-            renderer.drawUtf8Line(M5.Display, line, x + page_line.x_offset, y, TFT_BLACK,
+            renderer.drawUtf8Line(gfx, line, x + page_line.x_offset, y, TFT_BLACK,
                                   page_line.justify
                                       ? std::max(1, justify_width - (int)page_line.x_offset)
                                       : 0);
-            draw_text_underline(M5.Display, text_x, y, underline_w,
+            draw_text_underline(gfx, text_x, y, underline_w,
                                 page_line.height > 0 ? page_line.height : line_h);
         }
         y += page_line.height > 0 ? page_line.height : line_h;
     }
     int64_t t1 = esp_timer_get_time();
     auto stats = renderer.stats();
-    ESP_LOGI(TAG, "draw_content: prepare=%lld draw=%lld total=%lld ms, %d lines, %d chars, glyphs=%u pool=%u/%u missing=%u",
+    if (cursor) *cursor = y;
+    if (!cursor) ESP_LOGI(TAG, "draw_content: prepare=%lld draw=%lld total=%lld ms, %d lines, %d chars, glyphs=%u pool=%u/%u missing=%u",
              (t_prepare - t0) / 1000,
              (t1 - t_prepare) / 1000,
              (t1 - t0) / 1000,
@@ -203,6 +214,10 @@ class ReaderActivity : public Activity {
     ReaderOverlay m_overlay;
     ReaderAutoPage m_auto_page;
     int m_non_quality_refresh_count = 0;
+    ReaderFrameCache m_frame;
+    ReaderFrameHistory m_frames;
+    TxtPage m_next_page;
+    uint32_t m_frame_origin = UINT32_MAX;
 public:
     ReaderActivity(const char *path) {
         ReaderOverlayChapters chapters;
@@ -227,6 +242,9 @@ public:
     void on_hide() override { m_reading_timer.pause(); m_auto_page.reset(); }
 
     void on_show() override {
+        m_frame.reset();
+        m_frames.clear();
+        m_frame_origin = UINT32_MAX;
         m_auto_page.reset();
         m_reading_timer.resume();
         if (!m_seen_show) {
@@ -259,7 +277,9 @@ public:
     }
 
     void loop() override {
-        const bool allowed = !m_overlay.visible() && !M5.Display.displayBusy() && !g_page.eof;
+        run_prefetch();
+        const bool allowed = !m_overlay.visible() && !M5.Display.displayBusy() && !g_page.eof &&
+            (!m_frame.buffer || m_frame.ready || !cache_enabled());
         if (m_auto_page.due(esp_timer_get_time(), reader_auto_page_seconds(), allowed)) {
             next_page(M5.Display.width(), M5.Display.height());
         }
@@ -344,7 +364,8 @@ public:
             g_history.erase(g_history.begin(), g_history.begin() + (g_history.size() - 64));
         }
         g_offset = g_page.next_offset;
-        g_page = g_book.read_page(g_offset);
+        g_page = m_frame_origin == g_page.start_offset && m_next_page.start_offset == g_offset
+            ? m_next_page : g_book.read_page(g_offset);
         redraw(w, h, 1);
     }
 
@@ -363,12 +384,19 @@ public:
     }
 
     void redraw(int w, int h, int direction = 0) {
+        M5.Display.waitDisplay();
         int64_t t0 = esp_timer_get_time();
         epd_mode_t mode = select_page_refresh_mode();
         epd_mode_t default_mode = reader_epd_mode();
         M5.Display.startWrite();
         M5.Display.setEpdMode(mode);
-        if (reader_background_enabled()) {
+        const bool imported = cache_enabled() && (m_frame.import(M5.Display, g_page.start_offset) ||
+            m_frames.import(M5.Display, g_page.start_offset));
+        if (imported) ESP_LOGI(TAG, "redraw framebuffer hit offset=%lu vertical=%d",
+            (unsigned long)g_page.start_offset, g_page.vertical);
+        if (imported) {
+            if (reader_header_visible()) draw_topbar(w);
+        } else if (reader_background_enabled()) {
             reader_background_draw(M5.Display, w, h);
             if (reader_header_visible()) draw_topbar(w);
         } else if (mode == epd_mode_t::epd_quality
@@ -385,7 +413,7 @@ public:
             draw_page_number(w);
         }
         int64_t t2 = esp_timer_get_time();
-        draw_content(w, h);
+        if (!imported) draw_content(w, h);
         if (m_overlay.visible()) m_overlay.draw();
         int64_t t3 = esp_timer_get_time();
         reader_request_page_animation(m_overlay.visible() ? 0 : direction, mode);
@@ -400,6 +428,7 @@ public:
     }
 
     void redraw_all(int w, int h, epd_mode_t mode = reader_epd_mode()) {
+        M5.Display.waitDisplay();
         int64_t t0 = esp_timer_get_time();
         note_page_refresh_mode(mode);
         M5.Display.startWrite();
@@ -418,6 +447,37 @@ public:
     }
 
 private:
+    bool cache_enabled() const {
+        return MYPAPER_EPD_USE_2D_ENGINE && !M5.Display.getPanel()->getDither();
+    }
+    void run_prefetch() {
+#if MYPAPER_EPD_USE_2D_ENGINE
+        if (!cache_enabled() || M5.Display.displayBusy() || m_overlay.visible() || g_page.eof) return;
+        if (m_frame_origin != g_page.start_offset) {
+            m_frames.remember(m_frame);
+            m_frame.reset();
+            m_frame_origin = g_page.start_offset;
+            m_next_page = g_book.read_page(g_page.next_offset);
+            if (!reader_text_renderer().preparePage(m_next_page.text)) return;
+            const auto style = reader_style_get();
+            m_frame.begin(m_next_page.start_offset, m_next_page.vertical
+                ? M5.Display.width() - style.margin_right : reader_header_height() + style.margin_top);
+            if (!m_frame.buffer->createForPanel(*M5.Display.getPanel(), M5.Display.getRotation())) {
+                m_frame.reset(); return;
+            }
+            if (reader_background_enabled()) reader_background_draw(*m_frame.buffer, M5.Display.width(), M5.Display.height());
+            return;
+        }
+        if (!m_frame.buffer || m_frame.ready) return;
+        m_frame.buffer->startWrite();
+        draw_content(M5.Display.width(), M5.Display.height(), *m_frame.buffer,
+                     &m_next_page, m_frame.item++, &m_frame.cursor);
+        m_frame.buffer->endWrite();
+        m_frame.ready = m_frame.item >= m_next_page.lines.size();
+        if (m_frame.ready) ESP_LOGI(TAG, "prefetch framebuffer ready offset=%lu vertical=%d",
+            (unsigned long)m_next_page.start_offset, m_next_page.vertical);
+#endif
+    }
     static int overlay_progress(void *)
     {
         const uint32_t size = g_book.file_size();
@@ -485,6 +545,9 @@ private:
         }
 
         if (action == ReaderOverlay::Action::Close) m_overlay.commit_pending_seek();
+        m_frames.clear();
+        m_frame.reset();
+        m_frame_origin = UINT32_MAX;
         bool apply_layout = m_overlay.settings_dirty();
         m_overlay.close();
         if (apply_layout) {

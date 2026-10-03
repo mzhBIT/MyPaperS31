@@ -382,7 +382,10 @@ namespace lgfx
     _update_transferred_rect(xs, ys, xe, ye);
 
     uint8_t tile[16];
-    bool fast = _epd_mode == epd_mode_t::epd_fast || _epd_mode == epd_mode_t::epd_fastest;
+    // The 2D engine keeps a mode-independent gray4 drawing buffer. DU/A2
+    // quantization belongs to its refresh snapshot, not to drawing commands.
+    bool fast = !MYPAPER_EPD_USE_2D_ENGINE &&
+                (_epd_mode == epd_mode_t::epd_fast || _epd_mode == epd_mode_t::epd_fastest);
     if (fast) {
       for (int i = 0; i < 16; ++i) {
         int b = _dither ? Bayer[i] : 0;
@@ -516,7 +519,8 @@ namespace lgfx
     }
 
     const int w = _cfg.panel_width;
-    const bool fast = _epd_mode == epd_mode_t::epd_fast || _epd_mode == epd_mode_t::epd_fastest;
+    const bool fast = !MYPAPER_EPD_USE_2D_ENGINE &&
+                      (_epd_mode == epd_mode_t::epd_fast || _epd_mode == epd_mode_t::epd_fastest);
 
     uint8_t* readbuf = (uint8_t*)alloca(len * sizeof(grayscale_t));
     int16_t btbl[4];

@@ -16,6 +16,7 @@
 #include "ui/HeaderLayout.h"
 #include "ui/UiLocale.h"
 #include "ui/reader_background.h"
+#include "renderer/ReaderPageBuffer.h"
 #include "ui/reader_book_cover.h"
 #include "utils/CooperativeYield.h"
 #include "wifi/wifi_setting.h"
@@ -1144,9 +1145,11 @@ public:
     void loop() override
     {
         poll_article_image_loader();
+        run_article_prefetch();
         const bool allowed = _view == View::Article && !_reader_overlay.visible() &&
-            !_confirm_wallpaper_save && !M5.Display.displayBusy() &&
-            g_page + 1 < article_page_count();
+            !_confirm_wallpaper_save && !_image_load_busy && !M5.Display.displayBusy() &&
+            g_page + 1 < article_page_count() &&
+            (!_article_frame.buffer || _article_frame.ready);
         if (_auto_page.due(esp_timer_get_time(), reader_auto_page_seconds(ReaderProfile::Rss), allowed)) {
             next_article_page();
         }
@@ -1313,6 +1316,51 @@ private:
     std::vector<RssImageRef> _pending_image_refs;
     ReaderOverlay _reader_overlay;
     ReaderAutoPage _auto_page;
+    ReaderFrameCache _article_frame;
+    ReaderFrameHistory _article_frames;
+    int _article_frame_origin = -1;
+
+    bool rss_cache_enabled() const {
+        return MYPAPER_EPD_USE_2D_ENGINE && !M5.Display.getPanel()->getDither();
+    }
+    void invalidate_article_frame() {
+        _article_frames.clear();
+        _article_frame.reset();
+        _article_frame_origin = -1;
+    }
+    void run_article_prefetch() {
+#if MYPAPER_EPD_USE_2D_ENGINE
+        if (_view != View::Article || _reader_overlay.visible() || _image_load_busy ||
+            M5.Display.displayBusy() || !rss_cache_enabled() || bing_wallpaper_mode()) return;
+        const int next = g_page + 1;
+        if (next >= (int)g_article_pages.size()) return;
+        if (_article_frame_origin != g_page) {
+            _article_frames.remember(_article_frame);
+            _article_frame.reset();
+            _article_frame_origin = g_page;
+            unsigned images = 0;
+            std::string text;
+            for (const auto &item : g_article_pages[next]) {
+                if (item.type == document_layout::PageItemType::Image && ++images > 1) return;
+                if (item.type == document_layout::PageItemType::Text) text += item.text + '\n';
+            }
+            if (!text.empty() && !reader_text_renderer().preparePage(text)) return;
+            _article_frame.begin(uint64_t(next + 1), article_header_height() + reader_style_get(ReaderProfile::Rss).margin_top);
+            if (!_article_frame.buffer->createForPanel(*M5.Display.getPanel(), M5.Display.getRotation())) {
+                _article_frame.reset(); return;
+            }
+            if (reader_background_enabled(ReaderProfile::Rss))
+                reader_background_draw(*_article_frame.buffer, M5.Display.width(), M5.Display.height(), ReaderProfile::Rss);
+            return;
+        }
+        if (!_article_frame.buffer || _article_frame.ready) return;
+        _article_frame.buffer->startWrite();
+        draw_article_content(*_article_frame.buffer, next, _article_frame.item++, &_article_frame.cursor);
+        _article_frame.buffer->endWrite();
+        _article_frame.ready = _article_frame.item >= g_article_pages[next].size();
+        if (_article_frame.ready) ESP_LOGI(TAG, "prefetch framebuffer ready page=%d", next + 1);
+#endif
+    }
 
     void handle_reader_overlay_action(ReaderOverlay::Action action)
     {
@@ -1765,6 +1813,7 @@ private:
         }
 
         if (result && result->generation == _article_generation) {
+            invalidate_article_frame();
             bool current_page_changed = false;
             bool layout_changed = false;
             for (const auto &loaded : result->images) {
@@ -2138,6 +2187,7 @@ private:
 
     void rebuild_article_lines(bool reset_page)
     {
+        invalidate_article_frame();
         if (g_focus < 0 || g_focus >= (int)g_items.size()) return;
         const RssItem &item = g_items[g_focus];
         if (!reader_style_get(ReaderProfile::Rss).show_images) {
@@ -2551,45 +2601,35 @@ private:
         return preferred;
     }
 
-    void draw_article(int direction = 0)
+    void draw_article_content(lgfx::LGFXBase &gfx, int page_index,
+                              size_t first = 0, int *cursor = nullptr)
     {
-        if (draw_bing_wallpaper()) {
-            _non_quality_refresh_count = 0;
-            _post_image_quality_pending = false;
-            return;
-        }
-        epd_mode_t mode = select_article_refresh_mode();
-        epd_mode_t default_mode = reader_epd_mode();
-        M5.Display.startWrite();
-        M5.Display.setEpdMode(mode);
-        reader_background_draw(M5.Display, M5.Display.width(), M5.Display.height(), ReaderProfile::Rss);
-        if (article_header_visible()) draw_topbar("RSS");
         ReaderStyle rs = reader_style_get(ReaderProfile::Rss);
         int lh = reader_text_renderer().lineHeight();
         if (lh <= 0) lh = 48;
-        int y = article_header_height() + rs.margin_top;
-        const int content_width = std::max(100, (int)M5.Display.width() - rs.margin_left - rs.margin_right);
+        int y = cursor ? *cursor : article_header_height() + rs.margin_top;
+        const int content_width = std::max(100, (int)gfx.width() - rs.margin_left - rs.margin_right);
         auto draw_underline = [&](int ux, int uy, int uw) {
             ReaderStyle style = reader_style_get(ReaderProfile::Rss);
             if (style.underline_type <= 0 || uw <= 0) return;
             int underline_y = uy + std::max(1, lh - 5);
             if (style.underline_type == 1) {
-                M5.Display.drawFastHLine(ux, underline_y, uw, TFT_BLACK);
+                gfx.drawFastHLine(ux, underline_y, uw, TFT_BLACK);
             } else {
                 constexpr int dash = 12;
                 constexpr int gap = 8;
                 for (int dx = 0; dx < uw; dx += dash + gap) {
-                    M5.Display.drawFastHLine(ux + dx, underline_y,
+                    gfx.drawFastHLine(ux + dx, underline_y,
                                              std::min(dash, uw - dx), TFT_BLACK);
                 }
             }
         };
         const document_layout::Page *page = nullptr;
-        if (g_page >= 0 && g_page < (int)g_article_pages.size()) {
-            page = &g_article_pages[(size_t)g_page];
+        if (page_index >= 0 && page_index < (int)g_article_pages.size()) {
+            page = &g_article_pages[(size_t)page_index];
         }
         std::string page_text;
-        if (page) {
+        if (page && !cursor) {
             for (const auto &layout_item : *page) {
                 if (layout_item.type == document_layout::PageItemType::Text &&
                     !layout_item.text.empty()) {
@@ -2598,11 +2638,12 @@ private:
                 }
             }
         }
-        if (!page_text.empty()) reader_text_renderer().preparePage(page_text);
+        if (!cursor && !page_text.empty()) reader_text_renderer().preparePage(page_text);
 
         if (page) {
             CooperativeYield cooperative_yield;
-            for (size_t i = 0; i < page->size(); ++i) {
+            const size_t end = cursor ? std::min(page->size(), first + 1) : page->size();
+            for (size_t i = first; i < end; ++i) {
                 cooperative_yield.ifDue();
                 const auto &layout_item = (*page)[i];
                 if (layout_item.type == document_layout::PageItemType::Text) {
@@ -2616,7 +2657,7 @@ private:
                                         ? layout_item.width
                                         : reader_text_renderer().measureUtf8(layout_item.text);
                         reader_text_renderer().drawUtf8Line(
-                            M5.Display, layout_item.text, text_x, y, TFT_BLACK,
+                            gfx, layout_item.text, text_x, y, TFT_BLACK,
                             layout_item.justify ? layout_item.width : 0);
                         draw_underline(text_x, y, underline_w);
                     }
@@ -2626,7 +2667,7 @@ private:
                 } else if (layout_item.type == document_layout::PageItemType::HorizontalRule) {
                     int rule_y = y + layout_item.height / 2;
                     int inset = std::max(20, content_width / 8);
-                    M5.Display.drawFastHLine(rs.margin_left + inset, rule_y,
+                    gfx.drawFastHLine(rs.margin_left + inset, rule_y,
                                              std::max(1, content_width - inset * 2), TFT_BLACK);
                     y += layout_item.height;
                 } else if (layout_item.type == document_layout::PageItemType::Image) {
@@ -2645,20 +2686,41 @@ private:
                     int draw_h = layout_item.height;
                     float scale = layout_item.scale;
                     int x = rs.margin_left + std::max(0, (content_width - draw_w) / 2);
-                    bool ok = draw_article_image_file(M5.Display, *image, x, y,
+                    bool ok = draw_article_image_file(gfx, *image, x, y,
                                                       draw_w, draw_h, scale);
                     if (!ok) {
-                        M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+                        gfx.setTextColor(TFT_BLACK, TFT_WHITE);
                         system_font::draw_center(
-                            M5.Display,
+                            gfx,
                             ui_locale::text(ui_locale::TextId::ImageDecodeFailed),
-                            M5.Display.width() / 2,
+                            gfx.width() / 2,
                             y + std::max(0, draw_h / 2 - 18));
                     }
                     y += draw_h;
                 }
             }
         }
+        if (cursor) *cursor = y;
+    }
+
+    void draw_article(int direction = 0)
+    {
+        M5.Display.waitDisplay();
+        if (draw_bing_wallpaper()) {
+            _non_quality_refresh_count = 0;
+            _post_image_quality_pending = false;
+            return;
+        }
+        epd_mode_t mode = select_article_refresh_mode();
+        epd_mode_t default_mode = reader_epd_mode();
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(mode);
+        const bool imported = rss_cache_enabled() && (_article_frame.import(M5.Display, uint64_t(g_page + 1)) ||
+            _article_frames.import(M5.Display, uint64_t(g_page + 1)));
+        if (imported) ESP_LOGI(TAG, "redraw framebuffer hit page=%d", g_page + 1);
+        if (!imported) reader_background_draw(M5.Display, M5.Display.width(), M5.Display.height(), ReaderProfile::Rss);
+        if (article_header_visible()) draw_topbar("RSS");
+        if (!imported) draw_article_content(M5.Display, g_page);
         char pct[24];
         int pages = article_page_count();
         std::snprintf(pct, sizeof(pct), "%d/%d", g_page + 1, pages);

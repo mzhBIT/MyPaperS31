@@ -14,6 +14,7 @@
 #include "renderer/DocumentLayout.h"
 #include "renderer/P4JpegDecoder.h"
 #include "renderer/TextRenderer.h"
+#include "renderer/ReaderPageBuffer.h"
 #include "renderer/TurboJpegDecoder.h"
 #include "storage/app_paths.h"
 #include "ui/SystemFont.h"
@@ -52,13 +53,12 @@ static const uint32_t MOBI_PROGRESS_VERSION = 1;
 static const uint32_t FB2_PROGRESS_MAGIC = 0x46423231; // FB21
 static const uint32_t FB2_PROGRESS_VERSION = 1;
 static const uint32_t EPUB_LAYOUT_VERSION = 5;
-static const int64_t PROGRESS_SAVE_DELAY_US = 5LL * 1000 * 1000;
 // WeRead's `rt` is active reader time, not elapsed wall-clock time. Stop
 // accumulating after an idle reader has sat untouched for ten minutes.
 static const int64_t WEREAD_ACTIVE_IDLE_US = 10LL * 60 * 1000 * 1000;
 static const int64_t WEREAD_REPORT_INTERVAL_US = 60LL * 1000 * 1000;
 #if MYPAPER_EPD_USE_2D_ENGINE
-static constexpr bool READER_PREFETCH_FRAMEBUFFER_ENABLED = false;
+static constexpr bool READER_PREFETCH_FRAMEBUFFER_ENABLED = true;
 #else
 static constexpr bool READER_PREFETCH_FRAMEBUFFER_ENABLED = false;
 #endif
@@ -451,7 +451,7 @@ public:
     void loop() override
     {
         const bool allowed = _ok && !_overlay.visible() && !_footnote_popup_visible &&
-            !M5.Display.displayBusy() &&
+            !M5.Display.displayBusy() && !_prefetch.pending &&
             (_page_index + 1 < _page_count || _spine_index + 1 < g_epub.spine_count());
         if (_auto_page.due(esp_timer_get_time(), reader_auto_page_seconds(), allowed)) {
             const int old_spine = _spine_index, old_page = _page_index;
@@ -465,7 +465,6 @@ public:
         poll_annotation_worker();
         start_pending_annotation_fetch();
         run_page_prefetch();
-        flush_progress(false);
     }
 
     bool on_key(int key) override
@@ -518,7 +517,7 @@ public:
     bool jump_to_spine(int index)
     {
         if (!_ok || index < 0 || index >= g_epub.spine_count()) return false;
-        invalidate_page_prefetch();
+        invalidate_page_prefetch(true);
         if (!load_spine(index)) return false;
         _page_index = 0;
         mark_progress_dirty();
@@ -782,6 +781,7 @@ private:
             Empty,
             Glyph,
             Image,
+            Framebuffer,
             Ready,
         };
 
@@ -791,12 +791,18 @@ private:
         bool glyph_ready = false;
         bool images_ready = false;
         bool framebuffer_ready = false;
+        bool framebuffer_consumed = false;
         int spine = -1;
         int page = -1;
         uint32_t layout_sig = 0;
         Stage stage = Stage::Empty;
         document_layout::Pages pages;
-        lgfx::LGFX_Sprite *framebuffer = nullptr;
+        ReaderPageBuffer *framebuffer = nullptr;
+        size_t framebuffer_item = 0;
+        int framebuffer_y = 0;
+        int framebuffer_rotation = 0;
+        int framebuffer_underline = 0;
+        int64_t framebuffer_render_us = 0;
     };
 
     bool _ok = false;
@@ -818,7 +824,6 @@ private:
     bool _kf8_vertical_style = false;
     mutable std::unordered_map<std::string, bool> _stylesheet_vertical_cache;
     bool _progress_dirty = false;
-    int64_t _progress_dirty_at = 0;
     int64_t _weread_last_tick_us = 0;
     int64_t _weread_last_activity_us = 0;
     int64_t _weread_unreported_us = 0;
@@ -1016,7 +1021,6 @@ private:
     {
         if (!_ok || _progress_path.empty()) return;
         _progress_dirty = true;
-        _progress_dirty_at = esp_timer_get_time();
     }
 
     bool is_weread_active_reader() const
@@ -1096,10 +1100,12 @@ private:
 
     void flush_progress(bool force)
     {
+        // Local position is written only when leaving the book, together with
+        // BookReadingTimer::finish(). WeRead network reports remain separate.
+        if (!force) return;
         if (!_ok || _progress_path.empty()) return;
         tick_weread_active_time();
         if (!_progress_dirty && !force) return;
-        if (!force && esp_timer_get_time() - _progress_dirty_at < PROGRESS_SAVE_DELAY_US) return;
 
         const int64_t t0 = esp_timer_get_time();
         app_paths::ensure_dir(_progress_root.c_str());
@@ -1282,7 +1288,7 @@ private:
     bool load_spine(int index)
     {
         if (!_ok || index < 0 || index >= g_epub.spine_count()) return false;
-        invalidate_page_prefetch();
+        invalidate_page_prefetch(true);
 
         int64_t t0 = esp_timer_get_time();
         std::string xhtml;
@@ -1338,6 +1344,7 @@ private:
 
     void repaginate_current_spine()
     {
+        invalidate_page_prefetch();
         uint64_t old_position = page_position(_page_index);
         load_spine(_spine_index);
         if (_page_count > 0) _page_index = page_for_position(old_position);
@@ -1754,11 +1761,21 @@ private:
         const int64_t started = esp_timer_get_time();
         const std::string resolved = g_epub.normalize_resource_href(href);
 
-        if (allow_hw_jpeg && !_prefetched_decoded_gray4.empty() &&
+        lgfx::Panel_Device *decoded_destination = nullptr;
+        if (allow_hw_jpeg && &gfx == static_cast<lgfx::LGFXBase *>(&M5.Display)) {
+            decoded_destination = M5.Display.getPanel();
+        }
+#if MYPAPER_EPD_USE_2D_ENGINE
+        if (_prefetch.framebuffer &&
+            &gfx == static_cast<lgfx::LGFXBase *>(_prefetch.framebuffer)) {
+            decoded_destination = _prefetch.framebuffer->getPanel();
+        }
+#endif
+        if (decoded_destination && !_prefetched_decoded_gray4.empty() &&
             _prefetched_decoded_href == resolved &&
             _prefetched_decoded_width == w &&
             _prefetched_decoded_height == h) {
-            auto *panel = M5.Display.getPanel();
+            auto *panel = decoded_destination;
             if (panel &&
                 panel->writeNativeGrayscale4Rect(
                     _prefetched_decoded_gray4.data(),
@@ -2145,8 +2162,25 @@ private:
                _prefetch.page == page;
     }
 
-    void invalidate_page_prefetch()
+    ReaderFrameHistory _frame_history;
+
+    static uint64_t frame_key(int spine, int page) {
+        return (uint64_t(uint32_t(spine)) << 32) | uint32_t(page);
+    }
+
+    void invalidate_page_prefetch(bool preserve_frames = false)
     {
+        if (!preserve_frames) _frame_history.clear();
+        if (preserve_frames && _prefetch.framebuffer_ready && _prefetch.framebuffer &&
+            _prefetch.framebuffer_consumed) {
+            ReaderFrameCache completed;
+            completed.buffer.reset(_prefetch.framebuffer);
+            completed.ready = true;
+            completed.consumed = true;
+            completed.key = frame_key(_prefetch.spine, _prefetch.page);
+            _frame_history.remember(completed);
+            _prefetch.framebuffer = nullptr;
+        }
         if (_prefetch.framebuffer) {
             delete _prefetch.framebuffer;
             _prefetch.framebuffer = nullptr;
@@ -2157,6 +2191,10 @@ private:
         _prefetch.glyph_ready = false;
         _prefetch.images_ready = false;
         _prefetch.framebuffer_ready = false;
+        _prefetch.framebuffer_consumed = false;
+        _prefetch.framebuffer_item = 0;
+        _prefetch.framebuffer_y = 0;
+        _prefetch.framebuffer_render_us = 0;
         _prefetch.spine = -1;
         _prefetch.page = -1;
         _prefetch.layout_sig = 0;
@@ -2339,44 +2377,82 @@ private:
     {
         if (!READER_PREFETCH_FRAMEBUFFER_ENABLED) return false;
         if (!prefetch) return false;
-        if (prefetch->spine != _spine_index) return false;
+        // All reflow profiles share the same offscreen renderer. Never draw
+        // concurrently with a physical scan; multi-image pages stay uncached.
+        if (M5.Display.displayBusy() || M5.Display.getPanel()->getDither()) return false;
+        unsigned image_count = 0;
+        for (const auto &item : page) {
+            if (item.type == PageItemType::Image) {
+                if (++image_count > 1 || !prefetch->images_ready ||
+                    _prefetched_decoded_gray4.empty() ||
+                    _prefetched_decoded_href != g_epub.normalize_resource_href(item.resource)) return false;
+            }
+        }
         int w = M5.Display.width();
         int h = M5.Display.height();
         int64_t t0 = esp_timer_get_time();
-
-        lgfx::LGFX_Sprite *sprite = new lgfx::LGFX_Sprite(&M5.Display);
-        if (!sprite) return false;
-        sprite->setPsram(true);
-        sprite->setColorDepth(lgfx::color_depth_t::grayscale_4bit);
-        if (!sprite->createSprite(w, h)) {
-            ESP_LOGW(TAG, "prefetch framebuffer create failed %dx%d", w, h);
-            delete sprite;
-            return false;
+        if (!prefetch->framebuffer) {
+            // No parent display: preparation cannot submit an EPD update.
+            auto *sprite = new ReaderPageBuffer();
+            if (!sprite) return false;
+            sprite->setPsram(true);
+            sprite->setColorDepth(lgfx::color_depth_t::grayscale_4bit);
+#if MYPAPER_EPD_USE_2D_ENGINE
+            const bool allocated = sprite->createForPanel(*M5.Display.getPanel(), M5.Display.getRotation());
+#else
+            const bool allocated = sprite->createSprite(w, h);
+#endif
+            if (!allocated) {
+                ESP_LOGW(TAG, "prefetch framebuffer create failed %dx%d", w, h);
+                delete sprite;
+                return false;
+            }
+#if !MYPAPER_EPD_USE_2D_ENGINE
+            sprite->fillScreen(TFT_WHITE);
+#endif
+            prefetch->framebuffer = sprite;
+            prefetch->framebuffer_y = !page.empty() && page.front().vertical
+                ? content_x() + content_width() : content_y();
+            prefetch->framebuffer_rotation = M5.Display.getRotation();
+            prefetch->framebuffer_underline = reader_style_get().underline_type;
+            if (reader_background_enabled()) reader_background_draw(*sprite, w, h);
+            prefetch->framebuffer_render_us += esp_timer_get_time() - t0;
+            return true;
         }
-
+        auto *sprite = prefetch->framebuffer;
         sprite->startWrite();
-        reader_background_draw(*sprite, w, h);
-        if (header_visible()) draw_topbar(*sprite, w);
-        draw_page_content(*sprite, page, w, h, false, false, false);
+        // One item per activity loop, so touch dispatch runs between lines.
+        draw_page_content(*sprite, page, w, h, false, false, false,
+                          prefetch->framebuffer_item, &prefetch->framebuffer_y);
         sprite->endWrite();
-
-        prefetch->framebuffer = sprite;
-        prefetch->framebuffer_ready = true;
+        ++prefetch->framebuffer_item;
+        prefetch->framebuffer_render_us += esp_timer_get_time() - t0;
+        prefetch->framebuffer_ready = prefetch->framebuffer_item >= page.size() ||
+            (!page.empty() && page.front().vertical
+                ? prefetch->framebuffer_y <= content_x() : prefetch->framebuffer_y >= h);
+        if (!prefetch->framebuffer_ready) return true;
         ESP_LOGI(TAG,
-                 "prefetch framebuffer ready spine=%d page=%d size=%dx%d depth=%d time=%lld ms",
+                 "prefetch framebuffer ready spine=%d page=%d size=%dx%d packed_bpp=%d images=%u render=%lld us",
                  prefetch->spine + 1,
                  prefetch->page + 1,
                  w,
                  h,
-                 (int)sprite->getColorDepth(),
-                 (esp_timer_get_time() - t0) / 1000);
+                 4,
+                 image_count,
+                 (long long)prefetch->framebuffer_render_us);
         return true;
     }
 
     bool import_prefetch_framebuffer()
     {
 #if MYPAPER_EPD_USE_2D_ENGINE
-        if (!_prefetch.framebuffer_ready || _prefetch.framebuffer == nullptr) return false;
+        if (M5.Display.displayBusy() || M5.Display.getPanel()->getDither()) return false;
+        if (_frame_history.import(M5.Display, frame_key(_spine_index, _page_index))) return true;
+        if (!prefetch_matches(_spine_index, _page_index) ||
+            !_prefetch.framebuffer_ready || _prefetch.framebuffer == nullptr) return false;
+        if (M5.Display.displayBusy() || M5.Display.getPanel()->getDither() ||
+            _prefetch.framebuffer_rotation != M5.Display.getRotation() ||
+            _prefetch.framebuffer_underline != reader_style_get().underline_type) return false;
         const void *buffer = _prefetch.framebuffer->getBuffer();
         if (buffer == nullptr) return false;
         auto *panel = M5.Display.getPanel();
@@ -2384,9 +2460,15 @@ private:
             ESP_LOGW(TAG, "prefetch framebuffer native import skipped: no active panel");
             return false;
         }
-        return panel->writeNativeGrayscale4(static_cast<const uint8_t *>(buffer),
-                                            (uint16_t)_prefetch.framebuffer->width(),
-                                            (uint16_t)_prefetch.framebuffer->height());
+        if (_prefetch.framebuffer->width() != M5.Display.width() ||
+            _prefetch.framebuffer->height() != M5.Display.height() ||
+            _prefetch.framebuffer->offsetRotation() != panel->config().offset_rotation) return false;
+        const bool imported = panel->writePhysicalGrayscale4(static_cast<const uint8_t *>(buffer),
+                                              _prefetch.framebuffer->physicalWidth(),
+                                              _prefetch.framebuffer->physicalHeight(),
+                                              _prefetch.framebuffer_rotation);
+        if (imported) _prefetch.framebuffer_consumed = true;
+        return imported;
 #else
         return false;
 #endif
@@ -2401,7 +2483,7 @@ private:
         int target_page = -1;
         bool needs_spine_pages = false;
         if (!find_next_readable_page(&target_spine, &target_page, &needs_spine_pages)) {
-            invalidate_page_prefetch();
+            invalidate_page_prefetch(true);
             return;
         }
         if (prefetch_matches(target_spine, target_page)) {
@@ -2454,7 +2536,7 @@ private:
             }
 
             next.stage = PagePrefetch::Stage::Glyph;
-            invalidate_page_prefetch();
+            invalidate_page_prefetch(true);
             _prefetch = std::move(next);
             ESP_LOGI(TAG,
                      "prefetch pipeline layout ready spine=%d page=%d pages=%d time=%lld ms",
@@ -2487,9 +2569,12 @@ private:
 
         if (_prefetch.stage == PagePrefetch::Stage::Image) {
             _prefetch.images_ready = prefetch_page_image_memory(page);
-            if (READER_PREFETCH_FRAMEBUFFER_ENABLED) {
-                render_prefetch_framebuffer(&_prefetch, page);
-            }
+            _prefetch.stage = PagePrefetch::Stage::Framebuffer;
+            return;
+        }
+        if (_prefetch.stage == PagePrefetch::Stage::Framebuffer) {
+            if (_prefetch.glyph_ready && render_prefetch_framebuffer(&_prefetch, page) &&
+                !_prefetch.framebuffer_ready) return;
             _prefetch.valid = true;
             _prefetch.pending = false;
             _prefetch.stage = PagePrefetch::Stage::Ready;
@@ -2929,7 +3014,8 @@ private:
                          _spine_index + 1,
                          g_epub.spine_count(),
                          _page_count);
-                invalidate_page_prefetch();
+                // Preserve the completed pixel cache until redraw imports it.
+                _prefetch.has_pages = false;
                 _page_turn_direction = 1;
                 return;
             }
@@ -2946,7 +3032,7 @@ private:
     {
         _page_turn_direction = 0;
         if (!_ok) return;
-        invalidate_page_prefetch();
+        invalidate_page_prefetch(true);
         if (_page_index > 0) {
             _page_index--;
             _page_turn_direction = -1;
@@ -3003,20 +3089,23 @@ private:
     void draw_vertical_page_content(lgfx::LGFXBase &gfx,
                                     const document_layout::Page &page,
                                     bool prepare_glyphs,
-                                    bool allow_hw_jpeg)
+                                    bool allow_hw_jpeg,
+                                    size_t first_item = 0,
+                                    int *resume_right = nullptr)
     {
         const int64_t started = esp_timer_get_time();
         auto &renderer = reader_text_renderer();
-        const std::string page_text = page_text_for_prepare(page);
+        const std::string page_text = prepare_glyphs ? page_text_for_prepare(page) : std::string();
         if (prepare_glyphs && !page_text.empty() &&
             !(prefetch_matches(_spine_index, _page_index) && _prefetch.glyph_ready)) {
             renderer.preparePage(page_text);
         }
         const int cell = renderer.verticalCellAdvance();
         const bool center_image = is_single_image_page(page);
-        int right = content_x() + content_width();
-        for (size_t i = 0; i < page.size() && right > content_x(); ++i) {
-            if ((i & 7) == 0) vTaskDelay(1);
+        int right = resume_right ? *resume_right : content_x() + content_width();
+        const size_t end_item = resume_right ? std::min(page.size(), first_item + 1) : page.size();
+        for (size_t i = first_item; i < end_item && right > content_x(); ++i) {
+            if (!resume_right && (i & 7) == 0) vTaskDelay(1);
             const PageItem &item = page[i];
             if (item.type == PageItemType::Text) {
                 const int column_width = std::max(1, item.height);
@@ -3077,7 +3166,8 @@ private:
                 right -= item.width;
             }
         }
-        ESP_LOGI(TAG, "vertical page draw: items=%u time=%lld ms",
+        if (resume_right) *resume_right = right;
+        if (!resume_right) ESP_LOGI(TAG, "vertical page draw: items=%u time=%lld ms",
                  static_cast<unsigned>(page.size()),
                  (esp_timer_get_time() - started) / 1000);
     }
@@ -3088,10 +3178,12 @@ private:
                            int h,
                            bool prepare_glyphs,
                            bool allow_hw_jpeg,
-                           bool log_image_stats)
+                           bool log_image_stats,
+                           size_t first_item = 0,
+                           int *resume_y = nullptr)
     {
         if (!page.empty() && page.front().vertical) {
-            draw_vertical_page_content(gfx, page, prepare_glyphs, allow_hw_jpeg);
+            draw_vertical_page_content(gfx, page, prepare_glyphs, allow_hw_jpeg, first_item, resume_y);
             return;
         }
         const int64_t draw_begin = esp_timer_get_time();
@@ -3105,7 +3197,7 @@ private:
         const bool center_image = is_single_image_page(page);
         (void)w;
         int x = content_x();
-        int y = content_y();
+        int y = resume_y ? *resume_y : content_y();
         int line_h = reader_text_renderer().lineHeight();
         if (line_h <= 0) line_h = 48;
         const int underline_type = reader_style_get().underline_type;
@@ -3125,7 +3217,7 @@ private:
             }
         };
 
-        std::string page_text = page_text_for_prepare(page);
+        std::string page_text = prepare_glyphs ? page_text_for_prepare(page) : std::string();
         if (prepare_glyphs && !page_text.empty() && !(prefetch_matches(_spine_index, _page_index) && _prefetch.glyph_ready)) {
             bool prepared = reader_text_renderer().preparePage(page_text);
             if (!prepared) ESP_LOGW(TAG, "preparePage reported missing glyphs or render errors");
@@ -3134,8 +3226,9 @@ private:
         }
         prepare_us = esp_timer_get_time() - draw_begin;
 
-        for (size_t i = 0; i < page.size() && y < h; ++i) {
-            if ((i & 7) == 0) {
+        const size_t end_item = resume_y ? std::min(page.size(), first_item + 1) : page.size();
+        for (size_t i = first_item; i < end_item && y < h; ++i) {
+            if (!resume_y && (i & 7) == 0) {
                 const int64_t yield_begin = esp_timer_get_time();
                 vTaskDelay(1);
                 yield_us += esp_timer_get_time() - yield_begin;
@@ -3315,6 +3408,7 @@ private:
                 image_us += esp_timer_get_time() - item_begin;
             }
         }
+        if (resume_y) *resume_y = y;
         if (log_image_stats) {
             const int64_t total_us = esp_timer_get_time() - draw_begin;
             ESP_LOGI(TAG,
@@ -3346,6 +3440,9 @@ private:
 
     void redraw(int w, int h)
     {
+        // A queued display consumes _buf asynchronously. Do not overwrite it
+        // before its target snapshot and physical commit are complete.
+        M5.Display.waitDisplay();
         int64_t t0 = esp_timer_get_time();
         epd_mode_t mode = select_page_refresh_mode();
         epd_mode_t default_mode = epub_reader_epd_mode();
@@ -3354,12 +3451,11 @@ private:
         M5.Display.setEpdMode(mode);
         const int64_t setup_done = esp_timer_get_time();
         bool framebuffer_hit = READER_PREFETCH_FRAMEBUFFER_ENABLED &&
-                               prefetch_matches(_spine_index, _page_index) &&
-                               _prefetch.framebuffer_ready &&
-                               _prefetch.framebuffer != nullptr &&
                                !_overlay.visible();
         if (framebuffer_hit) {
             framebuffer_hit = import_prefetch_framebuffer();
+            // Header is dynamic and must use the newly selected chapter.
+            if (framebuffer_hit && header_visible()) draw_topbar(w);
             ESP_LOGI(TAG,
                      "redraw framebuffer hit spine=%d page=%d native=%d",
                      _spine_index + 1,
@@ -3420,6 +3516,7 @@ private:
 
     void redraw_all(epd_mode_t mode = epub_reader_epd_mode())
     {
+        M5.Display.waitDisplay();
         int w = M5.Display.width();
         int h = M5.Display.height();
         int64_t t0 = esp_timer_get_time();
@@ -3427,13 +3524,11 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(mode);
         bool framebuffer_hit = READER_PREFETCH_FRAMEBUFFER_ENABLED &&
-                               prefetch_matches(_spine_index, _page_index) &&
-                               _prefetch.framebuffer_ready &&
-                               _prefetch.framebuffer != nullptr &&
                                !_overlay.visible() &&
                                mode == epub_reader_epd_mode();
         if (framebuffer_hit) {
             framebuffer_hit = import_prefetch_framebuffer();
+            if (framebuffer_hit && header_visible()) draw_topbar(w);
             ESP_LOGI(TAG,
                      "redraw_all framebuffer hit spine=%d page=%d native=%d",
                      _spine_index + 1,

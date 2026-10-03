@@ -32,6 +32,10 @@ namespace lgfx
     bool writeNativeGrayscale4(const uint8_t* logical_frame,
                                uint16_t logical_width,
                                uint16_t logical_height) override;
+    bool writePhysicalGrayscale4(const uint8_t* physical_frame,
+                                 uint16_t physical_width,
+                                 uint16_t physical_height,
+                                 uint8_t rotation) override;
     bool writeNativeGrayscale4Rect(const uint8_t* logical_frame,
                                    uint16_t logical_width,
                                    uint16_t logical_height,

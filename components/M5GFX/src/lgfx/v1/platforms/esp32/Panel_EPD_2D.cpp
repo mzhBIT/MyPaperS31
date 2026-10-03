@@ -144,7 +144,7 @@ namespace lgfx
     return gray < 8 ? 0 : 15;
   }
 
-  __attribute__((optimize("O3"))) static void quantize_du_target_rect_4bpp(
+  __attribute__((optimize("O3"))) static void quantize_binary_target_rect_4bpp(
       uint8_t* target, size_t stride, size_t panel_width, size_t panel_height,
       uint16_t x, uint16_t y, uint16_t width, uint16_t height)
   {
@@ -1336,6 +1336,32 @@ namespace lgfx
     return getBusEPD2D()->measureVCOM(vcom_mV, timeout_ms);
   }
 
+  bool Panel_EPD_2D::writePhysicalGrayscale4(const uint8_t* physical_frame,
+                                            uint16_t physical_width,
+                                            uint16_t physical_height,
+                                            uint8_t rotation)
+  {
+    // Only the draw buffer is writable; target and physical state stay owned
+    // by the refresh task. Reject queued/in-flight updates before any write.
+    if (!physical_frame || !_buf || displayBusy()
+     || physical_width != _cfg.panel_width || physical_height != _cfg.panel_height
+     || _cfg.memory_width != _cfg.panel_width || (_cfg.panel_width & 1)
+     || _cfg.offset_x != 0 || _cfg.offset_y != 0 || rotation != getRotation()) {
+      return false;
+    }
+    const int64_t started = esp_timer_get_time();
+    const size_t bytes = size_t(physical_width / 2) * physical_height;
+    memcpy(_buf, physical_frame, bytes);
+    _range_mod.left = 0;
+    _range_mod.top = 0;
+    _range_mod.right = physical_width - 1;
+    _range_mod.bottom = physical_height - 1;
+    ESP_LOGI(TAG_2D, "physical 4bpp import: bytes=%u rotation=%u copy=%lld us",
+             (unsigned)bytes, (unsigned)rotation,
+             (long long)(esp_timer_get_time() - started));
+    return true;
+  }
+
   bool Panel_EPD_2D::writeNativeGrayscale4(const uint8_t* logical_frame,
                                            uint16_t logical_width,
                                            uint16_t logical_height)
@@ -1666,15 +1692,16 @@ namespace lgfx
         update.x = 0; update.y = 0; update.w = panel_w; update.h = panel_h;
       }
 
-#if MYPAPER_EPD_2D_DU_BINARY_TARGET
-      if (selected.type == WAVEFORM_MODE_DU) {
-        quantize_du_target_rect_4bpp(
+      // Both binary waveforms consume the same quantized target used later
+      // for transition selection and physical-state commit. Preserve _buf.
+      if (selected.type == WAVEFORM_MODE_DU || selected.type == WAVEFORM_MODE_A2) {
+        quantize_binary_target_rect_4bpp(
             me->_target_buf, stride, panel_w, panel_h,
             update.x, update.y, update.w, update.h);
         ESP_LOGI(TAG_2D,
-                 "DU target quantized: source_levels=16 target_levels=2 threshold=8");
+                 "%s target quantized: source_levels=16 target_levels=2 threshold=8",
+                 selected.type == WAVEFORM_MODE_DU ? "DU" : "A2");
       }
-#endif
 
       ESP_LOGI(TAG_2D,
                "batch begin: mode=%u waveform_type=%u phases=%d temp_range=%u area=%u,%u %ux%u merged=%u",
