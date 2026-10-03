@@ -1,6 +1,7 @@
 #include "activities/MapActivity.h"
 
 #include "activities/Activity.h"
+#include "activities/HomeActivity.h"
 #include "activities/ActivityManager.h"
 #include "activities/SettingActivity.h"
 #include "activities/MapSearchActivity.h"
@@ -55,6 +56,7 @@ struct MapRequest {
     uint32_t generation = 0;
     std::atomic<bool> cancel{false}, done{false};
     AmapMapResult result;
+    int64_t completed_us = 0; // Published by done's release/acquire pair.
 };
 
 void map_fetch_task(void *arg)
@@ -63,15 +65,21 @@ void map_fetch_task(void *arg)
     auto request = *holder;
     {
         AmapClient client;
+        const int64_t network_begin = esp_timer_get_time();
         const esp_err_t error = request->cancel.load() ? ESP_ERR_INVALID_STATE
             : wifi_setting_connect_saved(CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS);
+        const int64_t network_end = esp_timer_get_time();
         if (error == ESP_OK && !request->cancel.load()) {
             request->result = client.fetch_static_map(request->config, request->width,
                                                       request->height, &request->cancel);
         } else request->result.error = esp_err_to_name(error);
         // Release TLS before publishing completion and allowing Quality refresh.
         client.close();
+        ESP_LOGI(TAG, "fetch timing: generation=%lu network=%lld request_and_cleanup=%lld us",
+                 static_cast<unsigned long>(request->generation), network_end-network_begin,
+                 esp_timer_get_time()-network_end);
     }
+    request->completed_us = esp_timer_get_time();
     request->done.store(true, std::memory_order_release);
     request.reset();
     holder.reset();
@@ -124,6 +132,7 @@ class MapActivity final : public Activity {
 public:
     ~MapActivity() override
     {
+        request_home_quality_refresh();
         if (_request) _request->cancel.store(true);
         wifi_setting_release();
     }
@@ -162,6 +171,7 @@ public:
 
     void on_show() override
     {
+        _cache.reset_index(); // Settings/USB file management may have changed the directory.
         if (_search_selected) { _search_selected = false; reload_map(); }
         _dirty = _draw_quality = true; // Restore the gray map after the search list.
     }
@@ -170,6 +180,8 @@ public:
     {
         if (M5.Display.displayBusy()) return;
         if (_request && _request->done.load(std::memory_order_acquire)) {
+            const int64_t commit_begin = esp_timer_get_time();
+            const int64_t dispatch_us = commit_begin - _request->completed_us;
             const bool current = !_exit && !_request->cancel.load() &&
                                  _request->generation == _generation;
             auto result = std::move(_request->result);
@@ -180,7 +192,9 @@ public:
                 app_paths::ensure_dir(app_paths::map_viewport_cache_dir());
                 const std::string key = viewport_key(completed);
                 std::string path;
-                const bool stored = _cache.store(key, result.path.c_str(), &path);
+                const int64_t store_begin = esp_timer_get_time();
+                const bool stored = _cache.store_download(key, result.path.c_str(), result.bytes, result.crc, &path);
+                const int64_t store_end = esp_timer_get_time();
                 if (!stored) {
                     ESP_LOGW(TAG, "viewport cache store failed; retaining single-image fallback");
                     std::remove(app_paths::map_image_file());
@@ -194,9 +208,14 @@ public:
                     _has_map = true;
                     _gray_frame.reset();
                     _message.clear();
+                    const int64_t nvs_begin = esp_timer_get_time();
                     amap_config_save_viewport(completed.longitude, completed.latitude, completed.zoom, false,completed.hybrid);
+                    const int64_t nvs_end = esp_timer_get_time();
                     _display_config = completed;
                     _draw_quality = true;
+                    ESP_LOGI(TAG, "commit timing: dispatch=%lld setup=%lld cache=%lld nvs=%lld total=%lld us stored=%d",
+                             dispatch_us, store_begin-commit_begin, store_end-store_begin,
+                             nvs_end-nvs_begin, esp_timer_get_time()-commit_begin, stored ? 1 : 0);
                 } else _message = localized_map_error("Failed to commit map cache file");
             } else if (current) {
                 _message = localized_map_error(result.error);
@@ -250,7 +269,7 @@ public:
         if (event.type == TouchEventType::Tap) {
             if (event.y < HEADER_H && event.x >= 120 && event.x < 260) {
                 if (!_request && !_pending && !M5.Display.displayBusy()) {
-                    launch_map_route(_config,[this](AmapRoute route) { accept_route(std::move(route)); });
+                    launch_map_route(_config,[this](AmapRoute route) { accept_route(std::move(route)); },_route_cache);
                 }
                 return true;
             }
@@ -357,6 +376,7 @@ private:
     bool _search_selected = false;
     std::string _selected_place;
     AmapRoute _route;
+    std::shared_ptr<MapRouteCache> _route_cache=std::make_shared<MapRouteCache>();
 
     static double mercator_y(double lat) {
         const double r=std::max(-MERCATOR_MAX_LATITUDE,std::min(MERCATOR_MAX_LATITUDE,lat))*PI/180;
@@ -404,6 +424,7 @@ private:
 
     void draw_route() {
         if (!_route.success || _route.points.size()<2) return;
+        const int64_t begin=esp_timer_get_time();
         const double world=map_scale::world_pixels(_display_config.zoom);
         auto screen=[&](double lon,double lat) {
             if (_display_config.offline) {
@@ -414,16 +435,44 @@ private:
                 int(std::lround((mercator_y(lat)-mercator_y(_display_config.latitude))*world+M5.Display.height()/2)));
         };
         M5.Display.setClipRect(0,HEADER_H,M5.Display.width(),M5.Display.height()-HEADER_H-STATUS_H);
+        // Solid ~5 px route, without halo or per-pixel antialiasing. Clip
+        // before triangle filling to bound work even at high zoom levels.
+        auto stroke=[&](double x0,double y0,double x1,double y1) {
+            const double dx=x1-x0,dy=y1-y0;
+            double lo=0,hi=1;
+            auto edge=[&](double p,double q) {
+                if (p==0) return q>=0;
+                const double t=q/p;
+                if (p<0) lo=std::max(lo,t); else hi=std::min(hi,t);
+                return lo<=hi;
+            };
+            constexpr int radius=2;
+            if (!edge(-dx,x0+radius+1) ||
+                !edge(dx,M5.Display.width()+radius-x0) ||
+                !edge(-dy,y0-HEADER_H+radius+1) ||
+                !edge(dy,M5.Display.height()-STATUS_H+radius-y0)) return false;
+            x1=x0+hi*dx; y1=y0+hi*dy;
+            x0+=lo*dx; y0+=lo*dy;
+            const double length=std::hypot(x1-x0,y1-y0);
+            const double nx=length>0 ? -(y1-y0)*radius/length : 0;
+            const double ny=length>0 ? (x1-x0)*radius/length : 0;
+            const int ax=std::lround(x0+nx),ay=std::lround(y0+ny);
+            const int bx=std::lround(x0-nx),by=std::lround(y0-ny);
+            const int cx=std::lround(x1+nx),cy=std::lround(y1+ny);
+            const int ex=std::lround(x1-nx),ey=std::lround(y1-ny);
+            M5.Display.fillTriangle(ax,ay,bx,by,cx,cy,TFT_BLACK);
+            M5.Display.fillTriangle(bx,by,ex,ey,cx,cy,TFT_BLACK);
+            M5.Display.fillCircle(std::lround(x0),std::lround(y0),radius,TFT_BLACK);
+            M5.Display.fillCircle(std::lround(x1),std::lround(y1),radius,TFT_BLACK);
+            return true;
+        };
+        size_t drawn=0;
+        auto previous=screen(_route.points.front().first,_route.points.front().second);
         for (size_t i=1;i<_route.points.size();++i) {
-            const auto a=screen(_route.points[i-1].first,_route.points[i-1].second);
-            const auto b=screen(_route.points[i].first,_route.points[i].second);
-            // White halo separates the route from dark roads on a gray4 map.
-            for (int offset=-2;offset<=2;++offset) {
-                M5.Display.drawLine(a.first+offset,a.second,b.first+offset,b.second,TFT_WHITE);
-                M5.Display.drawLine(a.first,a.second+offset,b.first,b.second+offset,TFT_WHITE);
-            }
-            M5.Display.drawLine(a.first,a.second,b.first,b.second,TFT_BLACK);
-            M5.Display.drawLine(a.first+1,a.second,b.first+1,b.second,TFT_BLACK);
+            const auto current=screen(_route.points[i].first,_route.points[i].second);
+            if (current==previous) continue;
+            if (stroke(previous.first,previous.second,current.first,current.second)) ++drawn;
+            previous=current;
         }
         for (const auto *p : {&_route.origin,&_route.destination}) {
             const auto xy=screen(p->longitude,p->latitude);
@@ -432,6 +481,9 @@ private:
             M5.Display.fillCircle(xy.first,xy.second,p==&_route.origin?4:8,TFT_BLACK);
         }
         M5.Display.clearClipRect();
+        ESP_LOGI(TAG,"route draw: points=%u segments=%u time=%lld us",
+                 unsigned(_route.points.size()),unsigned(drawn),
+                 static_cast<long long>(esp_timer_get_time()-begin));
     }
 
     std::string viewport_key(const AmapConfig &c) const
@@ -599,7 +651,7 @@ private:
         _dirty = true;
     }
 
-    bool draw_image()
+    bool draw_image(bool png_prepared = false)
     {
         if (_display_config.offline) {
             const auto *data = _offline.frame();
@@ -622,7 +674,7 @@ private:
         if (!file_exists(path)) return false;
         if (_map_format == AmapImageFormat::Png) {
 #if MYPAPER_AMAP_LOW_RES_PIPELINE
-            if (!_gray_frame.valid() &&
+            if (!_gray_frame.valid() && !png_prepared &&
                 !_gray_frame.load_png(path,
                                       static_cast<uint16_t>(M5.Display.width()),
                                       static_cast<uint16_t>(M5.Display.height()))) {
@@ -726,16 +778,41 @@ private:
 
     void draw_map(bool quality, const std::string &message)
     {
+        const int64_t begin = esp_timer_get_time();
         M5.Display.startWrite();
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_text);
-        M5.Display.fillScreen(TFT_WHITE);
-        if (!draw_image()) {
+        const int64_t setup_end = esp_timer_get_time();
+        bool png_prepared = false;
+        const uint8_t *full_frame = nullptr;
+        if (_display_config.offline) full_frame = _offline.frame();
+#if MYPAPER_AMAP_LOW_RES_PIPELINE
+        else if (_map_format == AmapImageFormat::Png) {
+            png_prepared = true;
+            if (!_gray_frame.valid() && !_gray_frame.load_png(_image_path.c_str(),
+                    uint16_t(M5.Display.width()), uint16_t(M5.Display.height()))) {
+                ESP_LOGW(TAG, "processed map unavailable; using direct PNG fallback");
+            }
+            if (_gray_frame.valid() && _gray_frame.width() == M5.Display.width() &&
+                _gray_frame.height() == M5.Display.height()) full_frame = _gray_frame.data();
+        }
+#endif
+        const int64_t prepared = esp_timer_get_time();
+        auto *panel = M5.Display.getPanel();
+        const bool full_import = full_frame && panel && panel->writeNativeGrayscale4(
+            full_frame, M5.Display.width(), M5.Display.height());
+        const int64_t imported = esp_timer_get_time();
+        // Only a successful full-frame overwrite makes clearing redundant.
+        // Decode/import failure follows the original white-clear fallback.
+        if (!full_import) M5.Display.fillScreen(TFT_WHITE);
+        const int64_t clear_end = esp_timer_get_time();
+        if (!full_import && !draw_image(png_prepared)) {
             if (!_display_config.offline && !_image_key.empty()) _cache.invalidate(_image_key);
             _has_map = false;
             system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::MapDecodeFailed),
                                      M5.Display.width() / 2,
                                      M5.Display.height() / 2, TFT_BLACK);
         }
+        const int64_t image_end = esp_timer_get_time();
         draw_route();
         draw_header();
         draw_controls();
@@ -764,8 +841,15 @@ private:
             M5.Display.drawString(credit, x, y, &fonts::Font2);
         }
         draw_status_bar(message);
+        const int64_t overlay_end = esp_timer_get_time();
         M5.Display.display();
+        const int64_t submit_end = esp_timer_get_time();
         M5.Display.endWrite();
+        ESP_LOGI(TAG, "draw timing: setup=%lld clear=%lld image=%lld overlays=%lld submit=%lld end_write=%lld total=%lld us source=%s clear_skipped=%d",
+                 setup_end-begin, clear_end-imported, (prepared-setup_end)+(imported-prepared)+(image_end-clear_end),
+                 overlay_end-image_end, submit_end-overlay_end,
+                 esp_timer_get_time()-submit_end, esp_timer_get_time()-begin,
+                 _display_config.offline ? "offline" : "online", full_import ? 1 : 0);
     }
 
     void draw_status(const std::string &message, bool quality)

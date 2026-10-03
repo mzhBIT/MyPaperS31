@@ -1,10 +1,14 @@
 #include "map/MapCache.h"
+#include "map/MapCrc.h"
 #include <cassert>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
 
 int main(int argc,char **argv) {
+    const char *known="123456789";
+    assert(~map_crc::update(~0u,known,9)==0xcbf43926u);
+    assert(~map_crc::update(map_crc::update(~0u,known,4),known+4,5)==0xcbf43926u);
     assert(argc==2);
     // A new, explicitly supplied test directory only; never touch SD packages.
     const std::filesystem::path root=argv[1];
@@ -45,6 +49,7 @@ int main(int argc,char **argv) {
     // A dropped commit marker or unfinished write is never a hit, and is cleaned.
     { std::ofstream f(root/(k1+".img.tmp")); f<<"partial"; }
     { std::ofstream f(root/(k1+".img")); f<<"orphan"; }
+    reopened.reset_index(); // Simulate restarting after a dropped commit.
     assert(reopened.store(k2,source.c_str(),&path));
     assert(!std::filesystem::exists(root/(k1+".img.tmp")));
     assert(!std::filesystem::exists(root/(k1+".img")));
@@ -62,6 +67,34 @@ int main(int argc,char **argv) {
     { std::ofstream f(root/(k2+".meta"),std::ios::binary); f<<"truncated"; }
     assert(!one_entry.lookup(k2,&path));
     assert(!one_entry.store("../escape",source.c_str(),&path));
+    const auto download=(root/"download.tmp").string();
+    const std::string payload(64,'a');
+    const uint32_t crc=~map_crc::update(~0u,payload.data(),payload.size());
+    { std::ofstream f(download,std::ios::binary); f<<payload; }
+    assert(!one_entry.store_download(k1,download.c_str(),65,crc,&path));
+    assert(std::filesystem::exists(download)); // Failed size check retains fallback.
+    assert(!too_small.store_download(k1,download.c_str(),64,crc,&path));
+    assert(std::filesystem::exists(download)); // Capacity rejection also retains source.
+    assert(one_entry.store_download(k1,download.c_str(),64,crc,&path));
+    assert(!std::filesystem::exists(download)); // Ownership was transferred, not copied.
+    assert(one_entry.lookup(k1,&path));
+    { std::ofstream f(download,std::ios::binary); f<<std::string(64,'b'); }
+    assert(one_entry.store_download(k2,download.c_str(),64,
+        ~map_crc::update(~0u,std::string(64,'b').data(),64),&path));
+    assert(one_entry.usage().entries==1 && !one_entry.lookup(k1,&path));
+    assert(one_entry.lookup(k2,&path));
+    { std::ofstream f(path,std::ios::binary); f<<std::string(64,'c'); }
+    assert(!one_entry.lookup(k2,&path)); // Adopted files still get CRC validation.
+    // Metadata publication failure must return the downloaded file to the caller.
+    { std::ofstream f(download,std::ios::binary); f<<payload; }
+    const auto blocked_meta=root/(k1+".meta.tmp");
+    std::filesystem::create_directory(blocked_meta);
+    assert(!one_entry.store_download(k1,download.c_str(),64,crc,&path));
+    assert(std::filesystem::exists(download));
+    assert(!std::filesystem::exists(root/(k1+".img")));
+    std::filesystem::remove(blocked_meta); // This test's empty failure-injection directory only.
+    assert(one_entry.store_download(k1,download.c_str(),64,crc,&path));
+    assert(one_entry.lookup(k1,&path));
     assert(one_entry.clear());
-    std::puts("Map cache: key isolation, CRC, persistent LRU, byte cap, recovery and safe clear passed");
+    std::puts("Map cache: CRC streaming, zero-copy adoption, failure fallback, LRU, byte cap, recovery and safe clear passed");
 }

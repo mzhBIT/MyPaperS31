@@ -9,6 +9,7 @@
 #include <M5Unified.h>
 #include <freertos/idf_additions.h>
 #include <esp_heap_caps.h>
+#include <esp_log.h>
 #include <atomic>
 #include <memory>
 #include <algorithm>
@@ -39,6 +40,7 @@ class MapRouteActivity final : public Activity {
     AmapConfig _config; AmapPlace _start,_end;
     AmapTravelMode _mode=AmapTravelMode::Driving;
     AmapRoute _route;
+    std::shared_ptr<MapRouteCache> _cache;
     std::function<void(AmapRoute)> _show;
     std::shared_ptr<Request> _request;
     std::vector<std::string> _lines;
@@ -48,12 +50,23 @@ class MapRouteActivity final : public Activity {
     int body_y() const { return header_layout::height+4*ROW; }
     int lines_per_page() const { return std::max(1,int((M5.Display.height()-FOOT-body_y()-16)/(system_font::line_height()+8))); }
     void reset_result() { _route=AmapRoute{}; _lines.clear(); _page=0; _status.clear(); _dirty=true; }
+    void endpoints_changed() {
+        _cache->clear(); _cache->start=_start; _cache->end=_end;
+        reset_result();
+    }
+    void select_mode(AmapTravelMode mode) {
+        _mode=mode; _cache->mode=mode; reset_result();
+        if (_cache->load(mode,_route)) {
+            prepare_lines();
+            ESP_LOGI("MAP_ROUTE","PSRAM cache hit mode=%d bytes=%u",int(mode),unsigned(_cache->bytes(mode)));
+        }
+    }
     void back() { _exit=true; _pending=false; if (_request) _request->cancel.store(true); }
     void choose(bool start) {
         if (_request || _pending) return;
         launch_map_search(_config,[this,start](const AmapPlace &place) {
             if (start) _start=place; else _end=place;
-            reset_result();
+            endpoints_changed();
         });
     }
     void plan() {
@@ -117,9 +130,13 @@ class MapRouteActivity final : public Activity {
         d.display(); d.endWrite(); _dirty=false; _quality=false;
     }
 public:
-    MapRouteActivity(const AmapConfig &config,std::function<void(AmapRoute)> show):_config(config),_show(std::move(show)) {}
+    MapRouteActivity(const AmapConfig &config,std::function<void(AmapRoute)> show,
+                     std::shared_ptr<MapRouteCache> cache):_config(config),_cache(std::move(cache)),_show(std::move(show)) {}
     ~MapRouteActivity() override { wifi_setting_release(); }
-    void on_create() override { _status=tr(TextId::MapRouteChooseBoth); }
+    void on_create() override {
+        _start=_cache->start; _end=_cache->end; select_mode(_cache->mode);
+        if (!_route.success && (_start.name.empty() || _end.name.empty())) _status=tr(TextId::MapRouteChooseBoth);
+    }
     void on_show() override { _dirty=_quality=true; }
     bool allow_system_back() const override { return false; }
     void loop() override {
@@ -128,7 +145,12 @@ public:
             if (!_exit) {
                 _route=std::move(_request->result);
                 _status=_route.success?"":ui_locale::localize_message(_route.error);
-                if (_route.success) prepare_lines();
+                if (_route.success) {
+                    if (_cache->store(_route))
+                        ESP_LOGI("MAP_ROUTE","PSRAM cache stored mode=%d bytes=%u",int(_mode),unsigned(_cache->bytes(_mode)));
+                    else ESP_LOGW("MAP_ROUTE","PSRAM cache allocation failed mode=%d",int(_mode));
+                    prepare_lines();
+                }
                 _dirty=true;
             }
             _request.reset();
@@ -158,11 +180,11 @@ public:
             _page=std::max(0,std::min(_page+(e.type==TouchEventType::SwipeUp?1:-1),int((_lines.empty()?0:_lines.size()-1)/lines_per_page()))); _dirty=true; return true;
         }
         if (e.type!=TouchEventType::Tap) return false;
-        if (header_layout::right_hit(e.x,e.y,M5.Display.width(),130)) { std::swap(_start,_end); reset_result(); }
+        if (header_layout::right_hit(e.x,e.y,M5.Display.width(),130)) { std::swap(_start,_end); endpoints_changed(); }
         else if (e.y<header_layout::height) return true;
         else if (e.y<header_layout::height+ROW) choose(true);
         else if (e.y<header_layout::height+2*ROW) choose(false);
-        else if (e.y<header_layout::height+3*ROW) { _mode=AmapTravelMode(std::max(0,std::min(2,int(e.x)*3/int(M5.Display.width())))); reset_result(); }
+        else if (e.y<header_layout::height+3*ROW) { select_mode(AmapTravelMode(std::max(0,std::min(2,int(e.x)*3/int(M5.Display.width()))))); }
         else if (e.y>=M5.Display.height()-FOOT) {
             if (e.x<M5.Display.width()/3) plan();
             else if (e.x>=M5.Display.width()*2/3 && _route.success && !_route.points.empty()) { _show(std::move(_route)); back(); }
@@ -171,7 +193,8 @@ public:
     }
 };
 }
-void launch_map_route(const AmapConfig &config,std::function<void(AmapRoute)> show)
+void launch_map_route(const AmapConfig &config,std::function<void(AmapRoute)> show,
+                      std::shared_ptr<MapRouteCache> cache)
 {
-    ActivityManager::instance().push(new MapRouteActivity(config,std::move(show)));
+    ActivityManager::instance().push(new MapRouteActivity(config,std::move(show),std::move(cache)));
 }

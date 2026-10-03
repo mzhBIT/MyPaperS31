@@ -31,6 +31,7 @@ struct AmapMapResult {
     bool success = false;
     int http_status = 0;
     size_t bytes = 0;
+    uint32_t crc = 0; // CRC32 of the successfully closed image file.
     AmapImageFormat format = AmapImageFormat::Unknown;
     std::string path;
     std::string error;

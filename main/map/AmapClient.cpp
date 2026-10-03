@@ -2,6 +2,7 @@
 #include "map/AmapRoute.h"
 #include "map/AmapImageProcessor.h"
 #include "map/MapScale.h"
+#include "map/MapCrc.h"
 
 #include "storage/app_paths.h"
 
@@ -25,6 +26,8 @@ namespace {
 
 constexpr const char *TAG = "AMAP_HTTP";
 constexpr int64_t MIN_REQUEST_INTERVAL_US = 500000;
+constexpr int JSON_CONNECT_TIMEOUT_MS = 8000;
+constexpr int64_t JSON_ATTEMPT_TIMEOUT_US = 15000000;
 constexpr size_t MAX_MAP_BYTES = 4 * 1024 * 1024;
 constexpr std::time_t MIN_VALID_UNIX_TIME = 1704067200;
 portMUX_TYPE s_rate_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -114,6 +117,7 @@ struct DownloadSink {
     bool write_ok = true;
     bool overflow = false;
     bool connected = false;
+    uint32_t crc_state = ~0u;
 };
 
 bool header_is(const char *actual, const char *expected)
@@ -229,42 +233,69 @@ AmapSearchResult AmapClient::fetch_place_json(const AmapConfig &config, const st
 bool AmapClient::fetch_json(const std::string &url, size_t capacity, const std::atomic<bool> *cancel,
                            const std::function<void(std::string_view)> &parse, std::string &error)
 {
-    if (cancelled(cancel) || !ensure_request_time(&error) || !wait_for_request_slot(cancel)) return false;
+    if (cancelled(cancel) || !ensure_request_time(&error)) return false;
     const size_t CAP = capacity;
     std::unique_ptr<char, decltype(&std::free)> body(
         static_cast<char *>(heap_caps_malloc(CAP+1, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)), &std::free);
     if (!body) { error = "Not enough memory for map"; return false; }
     esp_http_client_config_t cfg = {};
-    cfg.url = url.c_str(); cfg.timeout_ms = 3000; cfg.crt_bundle_attach = esp_crt_bundle_attach;
+    cfg.url = url.c_str(); cfg.timeout_ms = JSON_CONNECT_TIMEOUT_MS; cfg.crt_bundle_attach = esp_crt_bundle_attach;
     cfg.buffer_size = 2048; cfg.user_agent = "MyPaper Map";
     close();
-    auto client = esp_http_client_init(&cfg); _client = client;
-    if (!client) { error = "Failed to create AMap HTTPS client"; return false; }
-    ESP_LOGI(TAG, "map JSON query begin cap=%u", unsigned(capacity)); // Never log the URL/API key.
-    const int64_t begin = esp_timer_get_time();
-    esp_err_t err = esp_http_client_open(client, 0);
-    if (err == ESP_OK && esp_http_client_fetch_headers(client) < 0) err = ESP_FAIL;
-    const int status = esp_http_client_get_status_code(client);
-    size_t used = 0;
-    esp_http_client_set_timeout_ms(client, 1000);
-    while (err == ESP_OK && !cancelled(cancel)) {
-        if (esp_timer_get_time()-begin > 15000000) { err = ESP_ERR_TIMEOUT; break; }
-        char chunk[1024];
-        const int n = esp_http_client_read(client, chunk, sizeof(chunk));
-        if (n == -ESP_ERR_HTTP_EAGAIN) continue;
-        if (n < 0) { err = ESP_FAIL; break; }
-        if (n == 0) { if (!esp_http_client_is_complete_data_received(client)) err = ESP_FAIL; break; }
-        if (size_t(n) > CAP-used) { err = ESP_ERR_INVALID_SIZE; break; }
-        std::copy(chunk, chunk+n, body.get()+used); used += n;
+    const int64_t query_begin = esp_timer_get_time();
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (!wait_for_request_slot(cancel)) return false;
+        auto client = esp_http_client_init(&cfg); _client = client;
+        if (!client) { error = "Failed to create AMap HTTPS client"; return false; }
+        // Never log the URL, search text or API key.
+        ESP_LOGI(TAG, "map JSON query begin cap=%u attempt=%d connect_timeout=%d ms",
+                 unsigned(capacity), attempt + 1, JSON_CONNECT_TIMEOUT_MS);
+        const int64_t begin = esp_timer_get_time();
+        esp_err_t err = esp_http_client_open(client, 0);
+        const int64_t opened = esp_timer_get_time();
+        if (err == ESP_OK && !cancelled(cancel) && esp_http_client_fetch_headers(client) < 0) err = ESP_FAIL;
+        const int64_t headers = esp_timer_get_time();
+        const int status = esp_http_client_get_status_code(client);
+        size_t used = 0;
+        esp_http_client_set_timeout_ms(client, 1000);
+        while (err == ESP_OK && !cancelled(cancel)) {
+            if (esp_timer_get_time()-begin > JSON_ATTEMPT_TIMEOUT_US) { err = ESP_ERR_TIMEOUT; break; }
+            char chunk[1024];
+            const int n = esp_http_client_read(client, chunk, sizeof(chunk));
+            if (n == -ESP_ERR_HTTP_EAGAIN) continue;
+            if (n < 0) { err = ESP_FAIL; break; }
+            if (n == 0) { if (!esp_http_client_is_complete_data_received(client)) err = ESP_FAIL; break; }
+            if (size_t(n) > CAP-used) { err = ESP_ERR_INVALID_SIZE; break; }
+            std::copy(chunk, chunk+n, body.get()+used); used += n;
+        }
+        const int64_t received = esp_timer_get_time();
+        close(); // Release transport before retrying, parsing or UI publication.
+        ESP_LOGI(TAG, "map JSON transport attempt=%d status=%d bytes=%u open=%lld ms headers=%lld ms read=%lld ms total=%lld ms err=%s",
+                 attempt + 1, status, unsigned(used), (opened-begin)/1000,
+                 (headers-opened)/1000, (received-headers)/1000,
+                 (received-begin)/1000, esp_err_to_name(err));
+        if (cancelled(cancel)) return false;
+        if (err == ESP_OK) {
+            if (status != 200) { error = "AMap HTTP error " + std::to_string(status); return false; }
+            body.get()[used] = 0;
+            parse(std::string_view(body.get(),used));
+            ESP_LOGI(TAG,"map JSON query complete bytes=%u attempts=%d time=%lld ms",
+                     unsigned(used), attempt + 1, (esp_timer_get_time()-query_begin)/1000);
+            return true;
+        }
+        error = std::string("AMap connection failed: ")+esp_err_to_name(err);
+        // Only retry transport failures. HTTP/API errors, capacity limits and
+        // allocation failures cannot be fixed by sending the same request again.
+        if (attempt != 0 || err == ESP_ERR_INVALID_SIZE || err == ESP_ERR_NO_MEM ||
+            (status > 0 && status != 200)) return false;
+        ESP_LOGW(TAG, "map JSON transport failed; rebuilding once after 500 ms");
+        const int64_t retry_at = esp_timer_get_time() + MIN_REQUEST_INTERVAL_US;
+        while (esp_timer_get_time() < retry_at) {
+            if (cancelled(cancel)) return false;
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
     }
-    close(); // Release transport before parsing and before UI publication.
-    if (cancelled(cancel)) return false;
-    if (err != ESP_OK) { error = std::string("AMap connection failed: ")+esp_err_to_name(err); return false; }
-    if (status != 200) { error = "AMap HTTP error " + std::to_string(status); return false; }
-    body.get()[used] = 0;
-    parse(std::string_view(body.get(),used));
-    ESP_LOGI(TAG,"map JSON query complete bytes=%u time=%lld ms",unsigned(used),(esp_timer_get_time()-begin)/1000);
-    return true;
+    return false;
 }
 
 AmapRoute AmapClient::plan_route(const AmapConfig &config, const AmapPlace &origin,
@@ -322,6 +353,12 @@ AmapMapResult AmapClient::fetch_static_map(const AmapConfig &config,
     std::remove(temporary.c_str());
 
     if (cancelled(cancel) || !ensure_request_time(&result.error)) return result;
+    constexpr size_t SD_WRITE_BUFFER_BYTES = 32 * 1024;
+    // Keep the stdio buffer alive through every fclose, including early exits.
+    // Network reads remain small/cancellable; SD writes are coalesced separately.
+    std::unique_ptr<char, decltype(&std::free)> sd_buffer(
+        static_cast<char *>(heap_caps_malloc(SD_WRITE_BUFFER_BYTES,
+                                             MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)), &std::free);
     DownloadSink sink;
     esp_err_t perform_error = ESP_FAIL;
     int64_t request_time_ms = 0;
@@ -334,6 +371,9 @@ AmapMapResult AmapClient::fetch_static_map(const AmapConfig &config,
             result.error = "Failed to create map cache file";
             return result;
         }
+        const size_t sd_buffer_bytes = sd_buffer &&
+            std::setvbuf(sink.file, sd_buffer.get(), _IOFBF, SD_WRITE_BUFFER_BYTES) == 0
+                ? SD_WRITE_BUFFER_BYTES : 0;
 
         esp_http_client_handle_t client = static_cast<esp_http_client_handle_t>(_client);
         const bool reuse_attempt = client != nullptr;
@@ -384,9 +424,13 @@ AmapMapResult AmapClient::fetch_static_map(const AmapConfig &config,
         const int64_t started = esp_timer_get_time();
         esp_http_client_set_timeout_ms(client, 3000);
         perform_error = esp_http_client_open(client, 0);
+        const int64_t opened = esp_timer_get_time();
         if (perform_error == ESP_OK && !cancelled(cancel)) {
             if (esp_http_client_fetch_headers(client) < 0) perform_error = ESP_FAIL;
         }
+        const int64_t headers = esp_timer_get_time();
+        int64_t read_us = 0, write_us = 0, max_read_us = 0, first_byte_us = -1;
+        unsigned read_calls = 0, again_count = 0;
         uint8_t buffer[4096];
         esp_http_client_set_timeout_ms(client, 1000);
         while (perform_error == ESP_OK && !cancelled(cancel)) {
@@ -394,8 +438,14 @@ AmapMapResult AmapClient::fetch_static_map(const AmapConfig &config,
                 perform_error = ESP_ERR_TIMEOUT;
                 break;
             }
+            const int64_t read_begin = esp_timer_get_time();
             const int count = esp_http_client_read(client, reinterpret_cast<char *>(buffer), sizeof(buffer));
-            if (count == -ESP_ERR_HTTP_EAGAIN) continue;
+            const int64_t read_end = esp_timer_get_time();
+            const int64_t read_elapsed = read_end - read_begin;
+            read_us += read_elapsed;
+            max_read_us = std::max(max_read_us, read_elapsed);
+            ++read_calls;
+            if (count == -ESP_ERR_HTTP_EAGAIN) { ++again_count; continue; }
             if (count < 0) { perform_error = ESP_FAIL; break; }
             if (count == 0) {
                 if (!esp_http_client_is_complete_data_received(client)) perform_error = ESP_FAIL;
@@ -404,19 +454,30 @@ AmapMapResult AmapClient::fetch_static_map(const AmapConfig &config,
             if (static_cast<size_t>(count) > MAX_MAP_BYTES - sink.bytes) {
                 sink.overflow = true; perform_error = ESP_FAIL; break;
             }
-            if (std::fwrite(buffer, 1, count, sink.file) != static_cast<size_t>(count)) {
+            if (first_byte_us < 0) first_byte_us = read_end - started;
+            const int64_t write_begin = esp_timer_get_time();
+            const size_t written = std::fwrite(buffer, 1, count, sink.file);
+            write_us += esp_timer_get_time() - write_begin;
+            if (written != static_cast<size_t>(count)) {
                 sink.write_ok = false; perform_error = ESP_FAIL; break;
             }
             sink.bytes += count;
+            sink.crc_state = map_crc::update(sink.crc_state, buffer, static_cast<size_t>(count));
         }
         if (cancelled(cancel)) perform_error = ESP_ERR_INVALID_STATE;
         request_time_ms = (esp_timer_get_time() - started) / 1000;
         result.http_status = esp_http_client_get_status_code(client);
         result.bytes = sink.bytes;
+        const int64_t close_begin = esp_timer_get_time();
         if (std::fclose(sink.file) != 0) sink.write_ok = false;
+        const int64_t file_close_us = esp_timer_get_time() - close_begin;
         sink.file = nullptr;
         esp_http_client_set_user_data(client, nullptr);
 
+        ESP_LOGI(TAG, "static map timing: attempt=%d open=%lld headers=%lld read=%lld sd_write=%lld sd_close=%lld first_byte=%lld max_read=%lld us calls=%u again=%u sd_buffer=%u",
+                 attempt + 1, opened-started, headers-opened, read_us, write_us,
+                 file_close_us, first_byte_us, max_read_us, read_calls, again_count,
+                 unsigned(sd_buffer_bytes));
         ESP_LOGI(TAG,
                  "static map transfer status=%d bytes=%u time=%lld ms socket=%s err=%s",
                  result.http_status, static_cast<unsigned>(result.bytes), request_time_ms,
@@ -464,6 +525,7 @@ AmapMapResult AmapClient::fetch_static_map(const AmapConfig &config,
 
     // The UI commits only the current generation; stale downloads stay temporary.
     result.path = temporary;
+    result.crc = ~sink.crc_state;
     result.success = true;
     ESP_LOGI(TAG, "static map complete status=%d bytes=%u format=%s time=%lld ms",
              result.http_status, static_cast<unsigned>(result.bytes),

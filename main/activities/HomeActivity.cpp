@@ -1,4 +1,5 @@
 #include "activities/Activity.h"
+#include "activities/HomeActivity.h"
 #include "activities/ActivityManager.h"
 #include "activities/DeepSeekActivity.h"
 #include "activities/MusicActivity.h"
@@ -46,6 +47,9 @@ extern void launch_fb2_reader(const char *path);
 extern void launch_markdown_reader(const char *path);
 
 static const char *TAG = "HOME";
+static bool g_quality_on_return = false;
+
+void request_home_quality_refresh() { g_quality_on_return = true; }
 
 static const int HEADER_H = header_layout::height;
 static const int COVER_H  = 260;
@@ -799,10 +803,15 @@ public:
         }
         M5.Display.startWrite();
         M5.Display.setDither(false);
-        M5.Display.setEpdMode(epd_mode_t::epd_text);
+        const bool quality = g_quality_on_return;
+        g_quality_on_return = false;
+        M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_text);
+        if (quality) ESP_LOGI(TAG, "one-shot Quality refresh after leaving map");
         draw_home_page();
         M5.Display.display();
         M5.Display.endWrite();
+        // The queued update captured Quality; only subsequent updates use Text.
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
         remember_clock();
     }
 
@@ -853,6 +862,7 @@ public:
         if (idx >= 0 && idx != g_focus[g_page]) {
             g_focus[g_page] = idx;
             M5.Display.startWrite();
+            M5.Display.setEpdMode(epd_mode_t::epd_text);
             // The current panel wiring scans the complete gate array even for
             // a small dirty rectangle.  Refresh the complete home grid so
             // repeated focus changes do not visually weaken neighbouring
@@ -876,6 +886,7 @@ public:
         if (key == APP_KEY_UP && focus > 0) {
             focus--;
             M5.Display.startWrite();
+            M5.Display.setEpdMode(epd_mode_t::epd_text);
             draw_menu();
             draw_page_indicator();
             M5.Display.display();
@@ -885,6 +896,7 @@ public:
         if (key == APP_KEY_DOWN && focus + 1 < menu_count(g_page)) {
             focus++;
             M5.Display.startWrite();
+            M5.Display.setEpdMode(epd_mode_t::epd_text);
             draw_menu();
             draw_page_indicator();
             M5.Display.display();

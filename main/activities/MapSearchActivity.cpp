@@ -47,19 +47,24 @@ class MapSearchActivity final : public Activity {
     ui::TextInputOverlay _input;
     std::shared_ptr<SearchRequest> _request;
     std::vector<AmapPlace> _places;
-    std::string _pending, _status;
+    std::string _pending, _status, _keyword;
     bool _dirty = true, _exit = false, _first_draw = true;
+    bool _auto_input = false;
     int _page = 0;
     int _kind = 0;
     int row_height() const { return (M5.Display.height()-header_layout::height-FOOTER)/ROWS; }
-    void back() { _exit = true; _pending.clear(); if (_request) _request->cancel.store(true); }
+    void back() { _exit = true; _auto_input = false; _pending.clear(); if (_request) _request->cancel.store(true); }
     void input() {
-        if (_request || _exit || M5.Display.displayBusy()) return;
+        if (_request || !_pending.empty() || _exit || M5.Display.displayBusy()) return;
+        _auto_input = false;
         if (_kind) { _pending = "lookup"; _places.clear(); _status = tr(TextId::MapLocating); _dirty = true; return; }
         TextInputOptions options; options.title = tr(TextId::MapSearchHint);
+        options.initial_text = _keyword;
         options.max_bytes = 240; options.start_in_chinese = true;
         _input.open(options, [this](const std::string &value) {
-            _pending = value; _places.clear(); _page = 0; _status = tr(TextId::MapSearching); _dirty = true;
+            _keyword = value;
+            _pending = value; _places.clear(); _page = 0;
+            _status = tr(value.empty() ? TextId::MapSearchHint : TextId::MapSearching); _dirty = true;
         }, [this] { _dirty = true; });
     }
     void draw() {
@@ -102,7 +107,7 @@ class MapSearchActivity final : public Activity {
         }
         if (_places.empty()) system_font::draw_center(d, system_font::ellipsize(_status, w-36), w/2, header_layout::height+30);
         d.drawFastHLine(0, h-FOOTER, w, TFT_BLACK);
-        system_font::draw_left(d, tr(_kind ? TextId::RefreshAction : TextId::MapSearchAction), 18, h-FOOTER+10);
+        if (_kind) system_font::draw_left(d, tr(TextId::RefreshAction), 18, h-FOOTER+10);
         if (_kind) system_font::draw_right(d, tr(_kind == 1 && !_places.empty() ? TextId::MapUseLocation : TextId::Cancel), w-18,h-FOOTER+10);
         else system_font::draw_right(d, std::to_string(_page+1)+"/"+
             std::to_string(std::max<size_t>(1, (_places.size()+ROWS-1)/ROWS)), w-18, h-FOOTER+10);
@@ -115,6 +120,7 @@ public:
     void on_create() override {
         _status = tr(_kind ? TextId::MapLocating : TextId::MapSearchHint);
         if (_kind) _pending = "lookup";
+        else _auto_input = true;
     }
     bool allow_system_back() const override { return false; }
     void loop() override {
@@ -132,6 +138,9 @@ public:
         if (_exit && !_request) { ActivityManager::instance().pop(); return; }
         if (_exit || _request) return;
         if (_dirty) { draw(); return; }
+        // Restore the search page first, then open once after its EPD refresh.
+        // Cancelling the editor must not cause it to reopen on the next loop.
+        if (_auto_input) { _auto_input = false; input(); return; }
         if (!_pending.empty()) {
             _request = std::make_shared<SearchRequest>(); _request->config = _config;
             _request->kind = _kind;
@@ -167,7 +176,13 @@ public:
             }
             return true;
         }
-        if (e.type == TouchEventType::Tap && (header_layout::right_hit(e.x,e.y,M5.Display.width(),160) || e.y >= M5.Display.height()-FOOTER)) { input(); return true; }
+        if (e.type == TouchEventType::Tap && header_layout::right_hit(e.x,e.y,M5.Display.width(),160)) {
+            _auto_input = false; input(); return true;
+        }
+        if (e.type == TouchEventType::Tap && _places.empty() && e.y >= header_layout::height &&
+            e.y < M5.Display.height()-FOOTER && _pending.empty()) {
+            _auto_input = false; input(); return true;
+        }
         if (e.type == TouchEventType::SwipeUp || e.type == TouchEventType::SwipeDown) {
             _page = std::max(0, std::min(_page+(e.type == TouchEventType::SwipeUp ? 1 : -1), int((_places.empty()?0:_places.size()-1)/ROWS)));
             _dirty = true; return true;

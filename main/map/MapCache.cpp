@@ -1,5 +1,6 @@
 #include "map/MapCache.h"
 #include "map/MapScale.h"
+#include "map/MapCrc.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -16,6 +17,7 @@
 #include <dirent.h>
 #endif
 #ifdef ESP_PLATFORM
+#include <esp_log.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
@@ -23,6 +25,13 @@
 
 namespace {
 constexpr size_t MAX_IMAGE = 4u*1024*1024;
+int64_t perf_now() {
+#ifdef ESP_PLATFORM
+    return esp_timer_get_time();
+#else
+    return 0;
+#endif
+}
 struct Meta { uint32_t bytes = 0, crc = 0; uint64_t age = 0; };
 struct Entry { std::string key; Meta meta; };
 bool valid_key(const std::string &s) {
@@ -98,16 +107,10 @@ bool cleanup_uncommitted(const std::string &dir) {
     }
     return ok;
 }
-uint64_t next_age(const std::vector<Entry> &entries) {
-    uint64_t age=0; for(const auto &e:entries) age=std::max(age,e.meta.age);
-    return age==UINT64_MAX ? 0 : age+1;
-}
 bool image_crc(const char *path,Meta &m,const char *copy=nullptr) {
     FILE *in=std::fopen(path,"rb"); if(!in) return false;
     FILE *out=copy?std::fopen(copy,"wb"):nullptr;
     if(copy&&!out) { std::fclose(in); return false; }
-    static const auto table=[] { struct T { uint32_t v[256]; } t{};
-        for(uint32_t i=0;i<256;++i) { uint32_t c=i; for(int j=0;j<8;++j)c=(c>>1)^((c&1)?0xedb88320u:0); t.v[i]=c; } return t; }();
     uint8_t b[4096]; size_t bytes=0; uint32_t c=~0u; bool ok=true;
 #ifdef ESP_PLATFORM
     int64_t yielded=esp_timer_get_time();
@@ -116,7 +119,7 @@ bool image_crc(const char *path,Meta &m,const char *copy=nullptr) {
         if(n>MAX_IMAGE-bytes) { ok=false; break; }
         bytes+=n;
         if(out&&std::fwrite(b,1,n,out)!=n) { ok=false; break; }
-        for(size_t i=0;i<n;++i)c=table.v[(c^b[i])&255]^(c>>8);
+        c=map_crc::update(c,b,n);
 #ifdef ESP_PLATFORM
         if(esp_timer_get_time()-yielded>=200000) { vTaskDelay(1); yielded=esp_timer_get_time(); }
 #endif
@@ -138,41 +141,110 @@ std::string MapCache::key(const AmapConfig &c,int w,int h,int scale) {
     return b; // Exact normalized request parameters, never includes the API Key.
 }
 
+bool MapCache::ensure_index() {
+    if(_index_ready) return true;
+    const int64_t begin=perf_now();
+    struct stat st{};
+    if(stat(_directory.c_str(),&st)) return false;
+    if(!cleanup_uncommitted(_directory)) return false;
+    const int64_t cleaned=perf_now();
+    auto entries=scan(_directory);
+    _index.clear(); _age=0;
+    for(const auto &e:entries) {
+        _index.push_back({e.key,e.meta.bytes,e.meta.crc,e.meta.age});
+        _age=std::max(_age,e.meta.age);
+    }
+    _index_ready=true;
+#ifdef ESP_PLATFORM
+    ESP_LOGI("MAP_CACHE", "index ready: cleanup=%lld scan=%lld total=%lld us entries=%u",
+             cleaned-begin, perf_now()-cleaned, perf_now()-begin, unsigned(_index.size()));
+#else
+    (void)begin; (void)cleaned;
+#endif
+    return true;
+}
+
 bool MapCache::lookup(const std::string &key,std::string *path) {
-    if(!path||!valid_key(key)) return false;
+    if(!path||!valid_key(key)||!ensure_index()) return false;
+    auto entry=std::find_if(_index.begin(),_index.end(),[&](const CachedEntry &e){return e.key==key;});
+    if(entry==_index.end()) return false;
     Meta saved,actual;
     const auto image=file(_directory,key,".img");
     if(!read_meta(file(_directory,key,".meta"),saved)||!image_crc(image.c_str(),actual)||
        actual.bytes!=saved.bytes||actual.crc!=saved.crc) { invalidate(key); return false; }
-    saved.age=next_age(scan(_directory));
-    if(saved.age) write_meta(file(_directory,key,".meta"),saved); // Failed touch still permits a verified hit.
+    if(_age!=UINT64_MAX) {
+        saved.age=++_age;
+        entry->age=saved.age;
+        write_meta(file(_directory,key,".meta"),saved); // Failed touch still permits a verified hit.
+    }
     *path=image; return true;
 }
 
 bool MapCache::store(const std::string &key,const char *source,std::string *path) {
+    return store_impl(key,source,0,0,false,path);
+}
+
+bool MapCache::store_download(const std::string &key,const char *source,size_t bytes,
+                              uint32_t crc,std::string *path) {
+    return store_impl(key,source,bytes,crc,true,path);
+}
+
+bool MapCache::store_impl(const std::string &key,const char *source,size_t bytes,
+                          uint32_t crc,bool adopt,std::string *path) {
     if(!source||!path||!valid_key(key)||!_entries) return false;
     const auto image=file(_directory,key,".img"),temp=image+".tmp";
     if(image==source||temp==source) return false;
-    if(!cleanup_uncommitted(_directory)) return false;
+    const int64_t begin=perf_now();
+    // Only the first operation rebuilds/reconciles the directory. The download
+    // source lives outside this directory and is never removed by recovery.
+    if(!ensure_index()) return false;
+    const int64_t indexed=perf_now();
     Meta m;
-    if(!image_crc(source,m,temp.c_str())) { std::remove(temp.c_str()); return false; }
-    if(size_t(m.bytes)+32>_limit) { std::remove(temp.c_str()); return false; }
-    auto entries=scan(_directory); m.age=next_age(entries);
-    if(!m.age) { std::remove(temp.c_str()); return false; }
+    if(adopt) {
+        struct stat st{};
+        const std::string name=source;
+        if(bytes==0||bytes>MAX_IMAGE||name.size()<4||name.compare(name.size()-4,4,".tmp")||
+           stat(source,&st)||!S_ISREG(st.st_mode)||uint64_t(st.st_size)!=bytes) return false;
+        m.bytes=uint32_t(bytes); m.crc=crc;
+    } else if(!image_crc(source,m,temp.c_str())) { std::remove(temp.c_str()); return false; }
+    const int64_t copied=perf_now();
+    const auto discard_copy=[&] { if(!adopt) std::remove(temp.c_str()); };
+    if(size_t(m.bytes)+32>_limit) { discard_copy(); return false; }
+    auto entries=_index;
+    m.age=_age==UINT64_MAX?0:++_age;
+    const int64_t scanned=perf_now();
+    if(!m.age) { discard_copy(); return false; }
     size_t total=0,count=0;
-    for(const auto &e:entries) if(e.key!=key) { total+=size_t(e.meta.bytes)+32; ++count; }
-    std::sort(entries.begin(),entries.end(),[](const Entry &a,const Entry &b) { return a.meta.age<b.meta.age; });
+    for(const auto &e:entries) if(e.key!=key) { total+=size_t(e.bytes)+32; ++count; }
+    std::sort(entries.begin(),entries.end(),[](const CachedEntry &a,const CachedEntry &b) { return a.age<b.age; });
     for(const auto &e:entries) {
         if(total+m.bytes+32<=_limit && count<_entries) break;
         if(e.key==key) continue;
-        if(!invalidate(e.key)) { std::remove(temp.c_str()); return false; }
-        total-=size_t(e.meta.bytes)+32; --count;
+        if(!invalidate(e.key)) { discard_copy(); return false; }
+        total-=size_t(e.bytes)+32; --count;
     }
+    const int64_t evicted=perf_now();
     std::remove(file(_directory,key,".meta").c_str());
     std::remove(image.c_str());
-    if(std::rename(temp.c_str(),image.c_str()) || !write_meta(file(_directory,key,".meta"),m)) {
-        std::remove(temp.c_str()); invalidate(key); return false;
+    if(std::rename(adopt?source:temp.c_str(),image.c_str())) {
+        discard_copy(); invalidate(key); return false;
     }
+    if(!write_meta(file(_directory,key,".meta"),m)) {
+        // Restore the downloader's file for the single-image fallback. An
+        // interrupted restore is reconciled on the next index rebuild.
+        if(adopt) std::rename(image.c_str(),source);
+        invalidate(key); return false;
+    }
+    _index.erase(std::remove_if(_index.begin(),_index.end(),[&](const CachedEntry &e){return e.key==key;}),_index.end());
+    _index.push_back({key,m.bytes,m.crc,m.age});
+#ifdef ESP_PLATFORM
+    ESP_LOGI("MAP_CACHE", "store timing: index=%lld copy_crc=%lld lru=%lld evict=%lld commit=%lld total=%lld us entries=%u bytes=%lu adopt=%d",
+             indexed-begin, copied-indexed, scanned-copied, evicted-scanned,
+             perf_now()-evicted, perf_now()-begin, unsigned(_index.size()),
+             static_cast<unsigned long>(m.bytes), adopt?1:0);
+#else
+    (void)begin; (void)indexed; (void)copied; (void)scanned; (void)evicted;
+#endif
     *path=image; return true;
 }
 
@@ -183,10 +255,13 @@ bool MapCache::invalidate(const std::string &key) {
         const auto p=file(_directory,key,suffix); struct stat st{};
         if(!stat(p.c_str(),&st) && ( !S_ISREG(st.st_mode) || std::remove(p.c_str()) )) ok=false;
     }
+    if(ok) _index.erase(std::remove_if(_index.begin(),_index.end(),[&](const CachedEntry &e){return e.key==key;}),_index.end());
+    else reset_index();
     return ok;
 }
 
 bool MapCache::clear() {
+    reset_index();
     bool ok=true;
     for(const auto &name:names(_directory)) {
         std::string key;
