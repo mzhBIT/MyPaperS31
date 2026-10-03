@@ -1480,6 +1480,15 @@ namespace lgfx
     return true;
   }
 
+  bool Panel_EPD_2D::setPageTurnAnimation(int direction)
+  {
+    _next_animation_direction = 0;
+    if (direction == 0) return true;
+    if (displayBusy()) return false;
+    _next_animation_direction = direction > 0 ? 1 : -1;
+    return true;
+  }
+
   void Panel_EPD_2D::display(uint_fast16_t x, uint_fast16_t y,
                              uint_fast16_t w, uint_fast16_t h)
   {
@@ -1495,6 +1504,7 @@ namespace lgfx
       _range_mod.bottom = std::max<int32_t>(ye, _range_mod.bottom);
     }
     if (_range_mod.empty()) {
+      _next_animation_direction = 0;
       ESP_LOGW(TAG_2D, "display skipped: update range is empty");
       return;
     }
@@ -1516,7 +1526,22 @@ namespace lgfx
       .w = uint16_t(xe - xs + 1),
       .h = uint16_t(_range_mod.bottom - _range_mod.top + 1),
       .mode = _epd_mode,
+      .animation_direction = _next_animation_direction,
+      .animation_bands = {},
     };
+    _next_animation_direction = 0;
+    if (update.animation_direction != 0) {
+      const uint_fast16_t logical_w = (_internal_rotation & 1) ? _cfg.panel_height : _cfg.panel_width;
+      const uint_fast16_t logical_h = (_internal_rotation & 1) ? _cfg.panel_width : _cfg.panel_height;
+      for (int band=0; band<lgfx_epd_page_turn::bands; ++band) {
+        uint_fast16_t bx = band*logical_w/lgfx_epd_page_turn::bands;
+        uint_fast16_t by = 0;
+        uint_fast16_t ex = (band+1)*logical_w/lgfx_epd_page_turn::bands-1;
+        uint_fast16_t ey = logical_h-1;
+        _rotate_pos(bx, by, ex, ey);
+        update.animation_bands[band] = {uint16_t(bx), uint16_t(by), uint16_t(ex-bx+1), uint16_t(ey-by+1)};
+      }
+    }
 
     // The sprite writeback deliberately does NOT happen here. It is a long,
     // non-interruptible walk over PSRAM, and this function runs on whichever
@@ -1584,6 +1609,8 @@ namespace lgfx
         }
         ++merged;
       }
+      // Coalesced UI updates no longer describe one immutable page turn.
+      if (merged) update.animation_direction = 0;
 
       if (!me->_physical_state_known) {
         if (update.mode != epd_mode_t::epd_quality) {
@@ -1625,6 +1652,19 @@ namespace lgfx
         me->_physical_state_known = false;
         continue;
       }
+      bool animation_requested = false;
+#if (defined(CONFIG_IDF_TARGET_ESP32P4) || defined(CONFIG_IDF_TARGET_ESP32S31)) \
+ && MYPAPER_EPD_USE_2D_ENGINE && MYPAPER_EPD_2D_CONTINUOUS_SCAN \
+ && MYPAPER_EPD_2D_PRECOMPUTE_WAVEFORM
+      animation_requested = update.animation_direction != 0 && me->_physical_state_known &&
+          selected.type == WAVEFORM_MODE_DU4 && selected.phases->phases == 15 &&
+          panel_w == memory_w && scan_rows == panel_h &&
+          me->_cfg.offset_x == 0 && me->_cfg.offset_y == 0 &&
+          lgfx_epd_page_turn::valid_rects(update.animation_bands, panel_w, panel_h);
+#endif
+      if (animation_requested) {
+        update.x = 0; update.y = 0; update.w = panel_w; update.h = panel_h;
+      }
 
 #if MYPAPER_EPD_2D_DU_BINARY_TARGET
       if (selected.type == WAVEFORM_MODE_DU) {
@@ -1665,6 +1705,8 @@ namespace lgfx
       bool gc16_pipeline_active = false;
       gc16_phase_pipeline_t gc16_pipeline = {};
       bool du4_pipeline_active = false;
+      uint8_t* animation_frames = nullptr;
+      int sequence_phases = selected.phases->phases;
       du4_phase_pipeline_t du4_pipeline = {};
 #if (defined(CONFIG_IDF_TARGET_ESP32P4) || defined(CONFIG_IDF_TARGET_ESP32S31)) \
  && MYPAPER_EPD_USE_2D_ENGINE && MYPAPER_EPD_2D_CONTINUOUS_SCAN \
@@ -1776,6 +1818,7 @@ namespace lgfx
         const bool du4_pipeline_requested =
 #if MYPAPER_EPD_2D_DU4_PIPELINE
             selected.type == WAVEFORM_MODE_DU4
+         && !animation_requested
          && me->_du4_pair_lut_2d != nullptr
          && deduplicated
          && cached_phase_count > MYPAPER_EPD_2D_DU4_PIPELINE_PRIME
@@ -2100,6 +2143,29 @@ namespace lgfx
       }
 #endif
 
+      // Prepare the entire staggered sequence before applying any panel voltage.
+      // Base DU4 waveforms remain unchanged; only their regional start time shifts.
+      if (animation_requested && phase_frames != nullptr) {
+        const int count = lgfx_epd_page_turn::phases(selected.phases->phases);
+        const size_t bytes = size_t(count)*me->_scan_frame_bytes_2d;
+        animation_frames = static_cast<uint8_t*>(heap_caps_aligned_alloc(
+            64, bytes, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
+        if (animation_frames != nullptr) {
+          const int64_t begin = esp_timer_get_time();
+          for (int phase=0; phase<count; ++phase) {
+            lgfx_epd_page_turn::compose(animation_frames+size_t(phase)*me->_scan_frame_bytes_2d,
+                me->_scan_frame_bytes_2d, memory_w, phase_frames, phase_frame_map,
+                selected.phases->phases, phase, update.animation_direction, update.animation_bands);
+          }
+          sequence_phases = count;
+          ESP_LOGI(TAG_2D, "page turn prepared: direction=%s bands=4 stagger=3 phases=%d bytes=%u compose=%lld us",
+              update.animation_direction>0 ? "right-to-left" : "left-to-right",
+              count, unsigned(bytes), (long long)(esp_timer_get_time()-begin));
+        } else {
+          ESP_LOGW(TAG_2D, "page turn cache allocation failed: bytes=%u; using normal DU4", unsigned(bytes));
+        }
+      }
+
       if (!bus->powerControl(true)) {
         ESP_LOGE(TAG_2D, "power on failed; batch aborted before scan");
         me->_physical_state_known = false;
@@ -2116,6 +2182,7 @@ namespace lgfx
         heap_caps_free(phase_frame_map);
         heap_caps_free(representative_phases);
         heap_caps_free(unique_transitions);
+        heap_caps_free(animation_frames);
         continue;
       }
 
@@ -2129,7 +2196,7 @@ namespace lgfx
       uint64_t prefetch_total_us = 0;
       uint32_t prefetch_max_us = 0;
       const int64_t sequence_begin = esp_timer_get_time();
-      for (int phase = 0; phase < selected.phases->phases; ++phase) {
+      for (int phase = 0; phase < sequence_phases; ++phase) {
         const uint8_t* frame_data = nullptr;
 #if MYPAPER_EPD_2D_LINE_STREAM
         if (selected.type == WAVEFORM_MODE_DU) {
@@ -2180,6 +2247,9 @@ namespace lgfx
         }
 #endif
 #if MYPAPER_EPD_2D_PRECOMPUTE_WAVEFORM
+        if (animation_frames != nullptr) {
+          frame_data = animation_frames + size_t(phase)*me->_scan_frame_bytes_2d;
+        } else {
         const size_t cached_phase = phase_frame_map != nullptr
                                   ? phase_frame_map[phase] : size_t(phase);
         size_t frame_slot = cached_phase;
@@ -2224,6 +2294,7 @@ namespace lgfx
         }
         frame_data = phase_frames
                    + frame_slot * me->_scan_frame_bytes_2d;
+        }
 #else
         const uint8_t* phase_lut = selected.phases->luts + size_t(phase) * 64;
         build_transition_lut(transition, phase_lut);
@@ -2241,7 +2312,7 @@ namespace lgfx
         if (!bus->write2DFrame(frame_data, me->_scan_frame_bytes_2d,
                                100, &scan_us)) {
           ESP_LOGE(TAG_2D, "phase %d/%d continuous scan failed",
-                   phase + 1, selected.phases->phases);
+                   phase + 1, sequence_phases);
           scan_ok = false;
           break;
         }
@@ -2266,7 +2337,7 @@ namespace lgfx
       if (scan_ok) {
         ESP_LOGI(TAG_2D,
                  "phase sequence complete: phases=%d sequence=%lu.%03lu ms scan_total=%llu us scan_min=%lu us scan_max=%lu us submit_overhead_max=%lu us prefetch_total=%llu us prefetch_max=%lu us backend=%s",
-                 selected.phases->phases,
+                 sequence_phases,
                  (unsigned long)(sequence_us / 1000),
                  (unsigned long)(sequence_us % 1000),
                  (unsigned long long)scan_total_us,
@@ -2397,6 +2468,7 @@ namespace lgfx
       }
 
       const bool power_off_ok = bus->powerControl(false);
+      heap_caps_free(animation_frames);
       if (phase_frames_temporary) {
         heap_caps_free(phase_frames);
       }

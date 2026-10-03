@@ -3,6 +3,7 @@
 #include "activities/ReaderBackgroundPickerActivity.h"
 #include "activities/ReaderOverlay.h"
 #include "ui/ReaderAutoPage.h"
+#include "ui/ReaderPageAnimation.h"
 #include "parser/txt_parser.h"
 #include "recent_books.h"
 #include "reader_style.h"
@@ -344,7 +345,7 @@ public:
         }
         g_offset = g_page.next_offset;
         g_page = g_book.read_page(g_offset);
-        redraw(w, h);
+        redraw(w, h, 1);
     }
 
     void prev_page(int w, int h) {
@@ -358,10 +359,10 @@ public:
             g_offset = prev;
         }
         g_page = g_book.read_page(g_offset);
-        redraw(w, h);
+        redraw(w, h, -1);
     }
 
-    void redraw(int w, int h) {
+    void redraw(int w, int h, int direction = 0) {
         int64_t t0 = esp_timer_get_time();
         epd_mode_t mode = select_page_refresh_mode();
         epd_mode_t default_mode = reader_epd_mode();
@@ -387,6 +388,7 @@ public:
         draw_content(w, h);
         if (m_overlay.visible()) m_overlay.draw();
         int64_t t3 = esp_timer_get_time();
+        reader_request_page_animation(m_overlay.visible() ? 0 : direction, mode);
         M5.Display.display();
         int64_t t4 = esp_timer_get_time();
         M5.Display.endWrite();

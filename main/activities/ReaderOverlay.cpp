@@ -111,9 +111,10 @@ void beauty_text(int index, bool weread_mode, ReaderProfile profile, std::string
         2, // Background
         3, // Book cover
         7, // Auto page
+        8, // Experimental page animation
     };
     const int ordered_index = weread_mode && index > 5 ? index - 1 : index;
-    const int base_index = ordered_index >= 0 && ordered_index < 8
+    const int base_index = ordered_index >= 0 && ordered_index < 9
         ? kBeautyOrder[ordered_index]
         : -1;
     switch (base_index) {
@@ -150,6 +151,10 @@ void beauty_text(int index, bool weread_mode, ReaderProfile profile, std::string
         *name = ui_locale::text(ui_locale::TextId::FullRefresh);
         snprintf(buf, sizeof(buf), "%d", style.full_refresh_pages);
         *value = buf;
+        break;
+    case 8:
+        *name = ui_locale::text(ui_locale::TextId::PageAnimation);
+        *value = ui_locale::text(reader_page_animation_enabled(profile) ? ui_locale::TextId::On : ui_locale::TextId::Off);
         break;
     case 7: {
         *name = ui_locale::text(ui_locale::TextId::AutoPage);
@@ -198,10 +203,10 @@ void ReaderOverlay::set_book_path(const char *path)
 
 int ReaderOverlay::beauty_base_index(int index) const
 {
-    static constexpr int kBeautyOrder[] = {4, 6, 5, 0, 1, 2, 3, 7};
+    static constexpr int kBeautyOrder[] = {4, 6, 5, 0, 1, 2, 3, 7, 8};
     if (m_weread_mode && index == 5) return -1;
     const int ordered_index = m_weread_mode && index > 5 ? index - 1 : index;
-    return ordered_index >= 0 && ordered_index < 8
+    return ordered_index >= 0 && ordered_index < 9
         ? kBeautyOrder[ordered_index]
         : -1;
 }
@@ -381,6 +386,9 @@ void ReaderOverlay::adjust_setting(int delta)
         case 7:
             reader_auto_page_set_seconds(reader_auto_page_seconds(m_profile) + delta * 5, m_profile);
             return; // Timing-only setting: no text repagination needed.
+        case 8:
+            reader_page_animation_set_enabled(!reader_page_animation_enabled(m_profile), m_profile);
+            return;
         default:
             return;
         }
@@ -433,7 +441,7 @@ int ReaderOverlay::hit_setting(int x, int y, int *direction) const
         bool toggle = (m_tab == Tab::Settings && (index == 7 || index == 8)) ||
                       (m_tab == Tab::Beauty &&
                        (is_public_comments_row(index) || beauty_index <= 1 ||
-                        beauty_index == 4 || beauty_index == 5));
+                        beauty_index == 4 || beauty_index == 5 || beauty_index == 8));
         if (toggle && x >= minus_x && x < plus_x + STEP_BOX_W) {
             *direction = 1;
         } else if (x >= minus_x && x < minus_x + STEP_BOX_W) *direction = -1;
@@ -633,7 +641,7 @@ void ReaderOverlay::draw_settings(const Geometry &g)
             bool toggle = (m_tab == Tab::Settings && (index == 7 || index == 8)) ||
                           (m_tab == Tab::Beauty &&
                            (is_public_comments_row(index) || beauty_index <= 1 ||
-                            beauty_index == 4 || beauty_index == 5));
+                            beauty_index == 4 || beauty_index == 5 || beauty_index == 8));
             if (toggle) {
                 int toggle_w = plus_x + STEP_BOX_W - minus_x;
                 M5.Display.drawRoundRect(minus_x, box_y, toggle_w, box_h, 4, fg);

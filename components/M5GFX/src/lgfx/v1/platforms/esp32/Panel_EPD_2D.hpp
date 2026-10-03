@@ -2,6 +2,7 @@
 
 #include "Panel_EPD.hpp"
 #include "EpdWaveform2D.h"
+#include "EpdPageTurn.h"
 
 #if SOC_LCD_I80_SUPPORTED
 
@@ -25,6 +26,7 @@ namespace lgfx
     bool init(bool use_reset) override;
     void waitDisplay(void) override;
     bool displayBusy(void) override;
+    bool setPageTurnAnimation(int direction) override;
     void display(uint_fast16_t x, uint_fast16_t y,
                  uint_fast16_t w, uint_fast16_t h) override;
     bool writeNativeGrayscale4(const uint8_t* logical_frame,
@@ -49,6 +51,8 @@ namespace lgfx
       uint16_t w;
       uint16_t h;
       epd_mode_t mode;
+      int8_t animation_direction;
+      lgfx_epd_page_turn::Rect animation_bands[lgfx_epd_page_turn::bands];
     };
 
     struct selected_waveform_t {
@@ -80,6 +84,7 @@ namespace lgfx
     volatile bool _display_busy_2d = false;
     volatile bool _physical_state_known = false;
     int _temperature_c = 25;
+    int8_t _next_animation_direction = 0;
   };
 
  }

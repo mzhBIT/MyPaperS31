@@ -62,7 +62,7 @@ public:
 
 private:
     static constexpr int SETTING_COUNT = 9;
-    static constexpr int BEAUTY_COUNT = 8;
+    static constexpr int BEAUTY_COUNT = 9;
     static constexpr int PROGRESS_AREA_H = 118;
 
     struct Geometry {

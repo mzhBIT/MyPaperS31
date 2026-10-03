@@ -747,6 +747,7 @@ constexpr Translation kText[] = {
     {"Start and destination are the same", "起点与终点相同", "起點與終點相同"},
     {"Auto page", "自动翻页", "自動翻頁"},
     {"s", "秒", "秒"},
+    {"Page animation (test)", "翻页动画（实验）", "翻頁動畫（實驗）"},
 };
 static_assert(sizeof(kText) / sizeof(kText[0]) == static_cast<size_t>(TextId::Count));
 

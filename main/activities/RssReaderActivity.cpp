@@ -4,6 +4,7 @@
 #include "activities/ReaderBackgroundPickerActivity.h"
 #include "activities/ReaderOverlay.h"
 #include "ui/ReaderAutoPage.h"
+#include "ui/ReaderPageAnimation.h"
 #include "activities/SettingActivity.h"
 #include "reader_font.h"
 #include "reader_style.h"
@@ -2550,7 +2551,7 @@ private:
         return preferred;
     }
 
-    void draw_article()
+    void draw_article(int direction = 0)
     {
         if (draw_bing_wallpaper()) {
             _non_quality_refresh_count = 0;
@@ -2667,6 +2668,7 @@ private:
             system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::LastPage), M5.Display.width() / 2, M5.Display.height() - 50);
         }
         if (_reader_overlay.visible()) _reader_overlay.draw();
+        reader_request_page_animation(_reader_overlay.visible() ? 0 : direction, mode, ReaderProfile::Rss);
         M5.Display.display();
         M5.Display.endWrite();
         if (mode != default_mode) M5.Display.setEpdMode(default_mode);
@@ -2677,7 +2679,7 @@ private:
         int pages = article_page_count();
         if (g_page + 1 < pages) {
             g_page++;
-            draw_article();
+            draw_article(1);
         }
     }
 
@@ -2685,7 +2687,7 @@ private:
     {
         if (g_page > 0) {
             g_page--;
-            draw_article();
+            draw_article(-1);
         }
     }
 

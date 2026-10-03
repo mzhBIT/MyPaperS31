@@ -3,6 +3,7 @@
 #include "activities/ReaderBackgroundPickerActivity.h"
 #include "activities/ReaderOverlay.h"
 #include "ui/ReaderAutoPage.h"
+#include "ui/ReaderPageAnimation.h"
 #include "parser/epub_html.h"
 #include "parser/markdown_parser.h"
 #include "parser/reflow_book.h"
@@ -2908,9 +2909,11 @@ private:
 
     void next_page()
     {
+        _page_turn_direction = 0;
         if (!_ok) return;
         if (_page_index + 1 < _page_count) {
             _page_index++;
+            _page_turn_direction = 1;
             return;
         }
 
@@ -2927,9 +2930,13 @@ private:
                          g_epub.spine_count(),
                          _page_count);
                 invalidate_page_prefetch();
+                _page_turn_direction = 1;
                 return;
             }
-            if (load_spine(next_spine) && !_pages.empty()) return;
+            if (load_spine(next_spine) && !_pages.empty()) {
+                _page_turn_direction = 1;
+                return;
+            }
             if (g_epub.is_weread()) return;
             next_spine++;
         }
@@ -2937,10 +2944,12 @@ private:
 
     void prev_page()
     {
+        _page_turn_direction = 0;
         if (!_ok) return;
         invalidate_page_prefetch();
         if (_page_index > 0) {
             _page_index--;
+            _page_turn_direction = -1;
             return;
         }
 
@@ -2948,6 +2957,7 @@ private:
         while (prev_spine >= 0) {
             if (load_spine(prev_spine)) {
                 _page_index = std::max(0, _page_count - 1);
+                _page_turn_direction = -1;
                 return;
             }
             if (g_epub.is_weread()) return;
@@ -3376,6 +3386,8 @@ private:
         if (_overlay.visible()) _overlay.draw();
         if (_footnote_popup_visible) draw_footnote_popup(M5.Display, w, h);
         const int64_t overlay_done = esp_timer_get_time();
+        reader_request_page_animation(_overlay.visible() || _footnote_popup_visible ? 0 : _page_turn_direction, mode);
+        _page_turn_direction = 0;
         M5.Display.display();
         const int64_t submit_done = esp_timer_get_time();
         M5.Display.endWrite();
@@ -3450,6 +3462,7 @@ private:
 
     ReaderOverlay _overlay;
     ReaderAutoPage _auto_page;
+    int _page_turn_direction = 0;
 };
 
 void launch_epub_reader(const char *path)

@@ -742,6 +742,7 @@ enum class TextId : uint16_t {
     MapRouteSame,
     AutoPage,
     SecondsShort,
+    PageAnimation,
     Count,
 };
 

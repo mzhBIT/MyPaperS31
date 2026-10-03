@@ -37,3 +37,5 @@ constexpr int reader_auto_page_clamp_seconds(int seconds)
 }
 int reader_auto_page_seconds(ReaderProfile profile = ReaderProfile::Shared);
 bool reader_auto_page_set_seconds(int seconds, ReaderProfile profile = ReaderProfile::Shared);
+bool reader_page_animation_enabled(ReaderProfile profile = ReaderProfile::Shared);
+bool reader_page_animation_set_enabled(bool enabled, ReaderProfile profile = ReaderProfile::Shared);
