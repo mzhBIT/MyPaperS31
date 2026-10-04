@@ -26,7 +26,7 @@ namespace lgfx
     bool init(bool use_reset) override;
     void waitDisplay(void) override;
     bool displayBusy(void) override;
-    bool setPageTurnAnimation(int direction) override;
+    bool setPageTurnAnimation(int direction, int speed = 1) override;
     void display(uint_fast16_t x, uint_fast16_t y,
                  uint_fast16_t w, uint_fast16_t h) override;
     bool writeNativeGrayscale4(const uint8_t* logical_frame,
@@ -57,6 +57,7 @@ namespace lgfx
       epd_mode_t mode;
       int8_t animation_direction;
       uint8_t animation_rotation;
+      uint8_t animation_speed;
     };
 
     struct selected_waveform_t {
@@ -89,6 +90,7 @@ namespace lgfx
     volatile bool _physical_state_known = false;
     int _temperature_c = 25;
     int8_t _next_animation_direction = 0;
+    uint8_t _next_animation_speed = 1;
     // Lazy geometry-only caches. Owned solely by task_update, like DU4 workspace.
     // Panel lifetime is process lifetime; shutdown teardown remains passive.
     lgfx_epd_page_turn::Layout _animation_layouts_2d[8]{};

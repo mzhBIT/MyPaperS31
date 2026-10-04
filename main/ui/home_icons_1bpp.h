@@ -19,7 +19,6 @@ enum class HomeIconId {
     Setting,
     DeepSeek,
     WeChatReading,
-    ZhiHu,
     Map,
     Messages,
     Phone,

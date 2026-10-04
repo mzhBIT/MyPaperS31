@@ -14,7 +14,6 @@
 #include "activities/TransferActivity.h"
 #include "activities/WifiTransferActivity.h"
 #include "activities/WereadActivity.h"
-#include "activities/ZhihuActivity.h"
 #include "recent_books.h"
 #include "renderer/CoverThumbnail.h"
 #include "renderer/P4JpegDecoder.h"
@@ -73,7 +72,6 @@ static void go_music()   { launch_music(); }
 static void go_images()  { launch_file_browser("/sdcard"); }
 static void go_deepseek(){ launch_deepseek(); }
 static void go_weread()  { launch_weread(); }
-static void go_zhihu()   { launch_zhihu(); }
 static void go_map()     { launch_map(); }
 static void go_sms()     { launch_sms(); }
 static void go_phone()   { launch_phone(); }
@@ -96,14 +94,13 @@ static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
         {ui_locale::TextId::WeRead, go_weread},
     },
     {
-        {ui_locale::TextId::Zhihu, go_zhihu},
         {ui_locale::TextId::Messages, go_sms},
         {ui_locale::TextId::Phone, go_phone},
         {ui_locale::TextId::Stocks, go_stocks}, {ui_locale::TextId::Calculator, go_calculator},
         {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
         {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
         {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
-        {ui_locale::TextId::Count, nullptr},
+        {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
     },
 };
 static int g_page = 0;
@@ -133,10 +130,10 @@ static const HomeIconId g_icons[HOME_PAGE_CNT][MENU_CNT] = {
         HomeIconId::WeChatReading,
     },
     {
-        HomeIconId::ZhiHu, HomeIconId::Messages, HomeIconId::Phone,
+        HomeIconId::Messages, HomeIconId::Phone,
         HomeIconId::Stocks, HomeIconId::Calculator, HomeIconId::Count,
         HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
-        HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
+        HomeIconId::Count, HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
     },
 };
 

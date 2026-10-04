@@ -153,7 +153,7 @@ namespace lgfx
                                          uint8_t) { return false; }
     // One-shot page-turn request: +1 next (right first), -1 previous (left first).
     // Unsupported panels/legacy engines retain their normal refresh path.
-    virtual bool setPageTurnAnimation(int) { return false; }
+    virtual bool setPageTurnAnimation(int, int speed = 1) { (void)speed; return false; }
     virtual bool writeNativeGrayscale4Rect(const uint8_t*, uint16_t, uint16_t,
                                            int16_t, int16_t) { return false; }
 

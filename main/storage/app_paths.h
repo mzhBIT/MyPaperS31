@@ -21,7 +21,6 @@ const char *deepseek_sessions_dir();
 const char *weread_dir();
 const char *weread_books_dir();
 const char *weread_covers_dir();
-const char *zhihu_hot_list_file();
 const char *map_cache_dir();
 const char *map_viewport_cache_dir();
 const char *map_image_file();

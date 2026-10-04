@@ -66,6 +66,7 @@ private:
     std::string _digits;
     std::vector<std::string> _compositions;
     size_t _interpretation = 0;
+    bool _unmatched = false;
     PinyinEngine _engine;
 };
 

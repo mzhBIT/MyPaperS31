@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 #include <esp_log.h>
 #include <esp_timer.h>
 
@@ -657,6 +658,7 @@ void Pinyin9Engine::clear()
     _digits.clear();
     _compositions.clear();
     _interpretation = 0;
+    _unmatched = false;
     _engine.set_composition("");
 }
 
@@ -680,7 +682,9 @@ void Pinyin9Engine::select_interpretation(size_t index)
         return;
     }
     _interpretation = std::min(index, _compositions.size() - 1);
-    _engine.set_composition(_compositions[_interpretation]);
+    // An unmatched spelling remains visible, but must not produce candidates
+    // for a shorter prefix or be mistaken for a dictionary interpretation.
+    _engine.set_composition(_unmatched ? "" : _compositions[_interpretation]);
 }
 
 bool Pinyin9Engine::next_interpretation()
@@ -700,8 +704,10 @@ bool Pinyin9Engine::previous_interpretation()
 void Pinyin9Engine::rebuild()
 {
     const int64_t start_us = esp_timer_get_time();
+    const std::string previous = composition();
     _compositions.clear();
     _interpretation = 0;
+    _unmatched = false;
     if (_digits.empty()) {
         _engine.set_composition("");
         return;
@@ -731,6 +737,22 @@ void Pinyin9Engine::rebuild()
 
     for (const auto &key : exact) append_unique_key(&_compositions, key, 24);
     for (const auto &key : prefix) append_unique_key(&_compositions, key, 24);
+    if (_compositions.empty()) {
+        // Keep the selected spelling's shared prefix after append/backspace.
+        // Unknown suffix keys use their first letter, so an invalid sequence
+        // is still visible without restoring the space-consuming digit label.
+        const std::string previous_digits = t9_digits(previous.c_str());
+        size_t shared = 0;
+        while (shared < previous_digits.size() && shared < _digits.size() &&
+               previous_digits[shared] == _digits[shared]) ++shared;
+        std::string fallback = t9_prefix_for(previous.c_str(), shared);
+        constexpr char first_letters[] = "'\0adgjmptw";
+        for (size_t i = shared; i < _digits.size(); ++i) {
+            fallback.push_back(first_letters[_digits[i] - '0']);
+        }
+        _compositions.push_back(std::move(fallback));
+        _unmatched = true;
+    }
     select_interpretation(0);
     ESP_LOGI(TAG, "nine-key digits=%s pinyin=%s options=%u dictionary_scan=%d indexed=%d time=%lld ms",
              _digits.c_str(), composition().c_str(),

@@ -8,6 +8,13 @@ using namespace lgfx_epd_page_turn;
 int main()
 {
     static_assert(phases(15)==24);
+    static_assert(phases(15,slow_spread)==35);
+    static_assert(band_delay(0,slow_spread)==0 && band_delay(1,slow_spread)==6 &&
+                  band_delay(2,slow_spread)==13 && band_delay(3,slow_spread)==20);
+    static_assert(band_delay(0,slow_spread,8)==0 && band_delay(1,slow_spread,8)==3 &&
+                  band_delay(2,slow_spread,8)==6 && band_delay(3,slow_spread,8)==9 &&
+                  band_delay(4,slow_spread,8)==11 && band_delay(5,slow_spread,8)==14 &&
+                  band_delay(6,slow_spread,8)==17 && band_delay(7,slow_spread,8)==20);
     constexpr size_t width=64, height=36, bytes=width*height/4;
     std::vector<uint8_t> base(bytes*9);
     for (int i=0; i<9; ++i)
@@ -100,19 +107,65 @@ int main()
     constexpr size_t pb=size_t(pw)*ph/4;
     std::vector<uint8_t> panel_base(pb*9),reference(pb),fast(pb),band_map(size_t(pw)*ph/16);
     for(size_t i=0;i<panel_base.size();++i) panel_base[i]=uint8_t(i*31+i/257);
-    std::vector<Span> spans(ph*bands);
+    std::vector<Span> spans(ph*max_bands);
+    for(int spread : {fast_spread,slow_spread})
     for(int r=0;r<8;++r) for(int d : {-4,-3,-2,-1,1,2,3,4}) {
+        const int band_count=spread==slow_spread ? 8 : 4;
+        std::vector<uint8_t> lazy(pb*9,0xA5);
+        std::array<int,9> rendered{};
+        constexpr int slots=12;
+        std::vector<uint8_t> ring(pb*slots,0xA5);
+        std::array<int,slots> tags;
+        tags.fill(-1);
+        int generated=0;
+        std::array<int,max_bands> driven{};
         Layout layout;
-        assert(prepare_layout(layout,pw,ph,r,d,spans.data()));
-        make_band_map(band_map.data(),pw,ph,r,d);
-        for(int p=0;p<phases(15);++p) {
-            compose_projected(reference.data(),pb,pw,panel_base.data(),map,15,p,band_map.data());
+        assert(prepare_layout(layout,pw,ph,r,d,spans.data(),band_count));
+        assert(layout.matches(pw,ph,r,d,band_count));
+        assert(!layout.matches(pw,ph,r,d,band_count==8 ? 4 : 8));
+        make_band_map(band_map.data(),pw,ph,r,d,band_count);
+        const auto produce=[&](int p) {
+            const int slot=p%slots;
+            assert(tags[slot]==-1); // No overwrite of queued/DMA-owned data.
+            for_each_dependency(p,15,map,[&](int unique) {
+                assert(unique>=0 && unique<9);
+                if(!rendered[unique]) {
+                    std::memcpy(lazy.data()+size_t(unique)*pb,panel_base.data()+size_t(unique)*pb,pb);
+                    ++rendered[unique];
+                }
+            },spread,band_count);
+            auto *out=ring.data()+size_t(slot)*pb;
+            clear_inactive_layout(out,pb,15,p,layout,spread);
+            copy_layout(out,pb,lazy.data(),map,15,p,layout,false,spread);
+            tags[slot]=p;
+        };
+        for(;generated<8;++generated) produce(generated);
+        for(int p=0;p<phases(15,spread);++p) {
+            for(int band=0;band<band_count;++band) {
+                const int local=p-band_delay(band,spread,band_count);
+                if(local>=0 && local<15) ++driven[band];
+            }
+            // Fast producer fills available slots then must stop at the first
+            // occupied slot. Consumer frees only the previous phase after DMA.
+            while(generated<phases(15,spread) && tags[generated%slots]==-1) {
+                produce(generated++);
+            }
+            assert(tags[p%slots]==p);
+            compose_projected(reference.data(),pb,pw,panel_base.data(),map,15,p,band_map.data(),spread,band_count);
             std::memset(fast.data(),0xA5,pb);
-            clear_inactive_layout(fast.data(),pb,15,p,layout);
-            copy_layout(fast.data(),pb,panel_base.data(),map,15,p,layout);
+            clear_inactive_layout(fast.data(),pb,15,p,layout,spread);
+            copy_layout(fast.data(),pb,lazy.data(),map,15,p,layout,false,spread);
             assert(fast==reference);
+            assert(std::memcmp(ring.data()+size_t(p%slots)*pb,reference.data(),pb)==0);
+            if(p>0) {
+                assert(tags[(p-1)%slots]==p-1);
+                tags[(p-1)%slots]=-1;
+            }
         }
+        assert(generated==phases(15,spread));
+        for(int band=0;band<max_bands;++band) assert(driven[band]==(band<band_count ? 15 : 0));
+        for(int count:rendered) assert(count==1);
     }
     assert(local_phase(0,3,1)==0 && local_phase(0,0,-1)==0);
-    std::puts("Page turn: eight directions, all rotations, neutral masks and production-sized fast-path equivalence passed");
+    std::puts("Page turn: fast 4/24, slow 8/35, eight directions, all rotations, neutral masks and ring equivalence passed");
 }

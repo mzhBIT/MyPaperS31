@@ -39,3 +39,7 @@ int reader_auto_page_seconds(ReaderProfile profile = ReaderProfile::Shared);
 bool reader_auto_page_set_seconds(int seconds, ReaderProfile profile = ReaderProfile::Shared);
 bool reader_page_animation_enabled(ReaderProfile profile = ReaderProfile::Shared);
 bool reader_page_animation_set_enabled(bool enabled, ReaderProfile profile = ReaderProfile::Shared);
+// NVS-compatible values: old boolean 1 becomes Fast.
+enum class ReaderAnimationMode : unsigned char { Off=0, Fast=1, Slow=2 };
+ReaderAnimationMode reader_page_animation_mode(ReaderProfile profile = ReaderProfile::Shared);
+bool reader_page_animation_set_mode(ReaderAnimationMode mode, ReaderProfile profile = ReaderProfile::Shared);

@@ -51,7 +51,7 @@ must be measured/ellipsized or wrapped within their existing touch targets.
    languages, reboot persistence, SD-absent recovery and long strings.
 
 Current implementation covers step 1, Home/recent bookshelf, the primary
-Settings list and its WiFi, Network, Frontlight, Time Basis, DeepSeek, Zhihu,
+Settings list and its WiFi, Network, Frontlight, Time Basis, DeepSeek,
 Map, and RSS cache child screens. The shared reader Settings/Beauty/Chapters
 overlay, common text-input UI, font/background/ringtone pickers, and main File
 Browser actions are also migrated. DeepSeek's session/chat/composer screens and
@@ -59,7 +59,7 @@ image picker, and the map screen's fixed prompts and known client errors are
 migrated. Phone/SMS and WeRead screens now use the catalog for fixed controls,
 loading states and known local errors. Existing call/SMS records retain their
 on-disk representation; legacy status values are translated only when drawn.
-RSS/Zhihu, Music/Radio, image-viewer errors, and the device-side USB/Wi-Fi
+RSS, Music/Radio, image-viewer errors, and the device-side USB/Wi-Fi
 transfer screens now use the catalog for their fixed controls and known local
 status strings. News content, lyrics, filenames, station names, network/API
 responses and stored call/SMS records remain untranslated. EPD Diagnostics

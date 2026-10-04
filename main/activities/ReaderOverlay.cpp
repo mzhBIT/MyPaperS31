@@ -154,7 +154,9 @@ void beauty_text(int index, bool weread_mode, ReaderProfile profile, std::string
         break;
     case 8:
         *name = ui_locale::text(ui_locale::TextId::PageAnimation);
-        *value = ui_locale::text(reader_page_animation_enabled(profile) ? ui_locale::TextId::On : ui_locale::TextId::Off);
+        *value = ui_locale::text(reader_page_animation_mode(profile)==ReaderAnimationMode::Slow ?
+            ui_locale::TextId::AnimationSlow : reader_page_animation_mode(profile)==ReaderAnimationMode::Fast ?
+            ui_locale::TextId::AnimationFast : ui_locale::TextId::Off);
         break;
     case 7: {
         *name = ui_locale::text(ui_locale::TextId::AutoPage);
@@ -387,7 +389,8 @@ void ReaderOverlay::adjust_setting(int delta)
             reader_auto_page_set_seconds(reader_auto_page_seconds(m_profile) + delta * 5, m_profile);
             return; // Timing-only setting: no text repagination needed.
         case 8:
-            reader_page_animation_set_enabled(!reader_page_animation_enabled(m_profile), m_profile);
+            reader_page_animation_set_mode(static_cast<ReaderAnimationMode>(
+                (static_cast<int>(reader_page_animation_mode(m_profile))+(delta<0 ? 2 : 1))%3),m_profile);
             return;
         default:
             return;

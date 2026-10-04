@@ -920,6 +920,80 @@ namespace lgfx
     ctx->task = nullptr;
   }
 
+  struct animation_pipeline_t {
+    du4_phase_pipeline_t* source = nullptr;
+    uint8_t* frames = nullptr;
+    const uint16_t* map = nullptr;
+    const lgfx_epd_page_turn::Layout* layout = nullptr;
+    int waveform_phases = 15;
+    int count = 24;
+    int spread = lgfx_epd_page_turn::fast_spread;
+    int slots = 24;
+    int next = 0;
+    int ready[35] = {}; // -1 free; otherwise complete absolute phase number.
+    bool abort = false;
+    bool finished = false;
+    bool external_stack = false;
+    TaskHandle_t task = nullptr;
+    SemaphoreHandle_t done = nullptr;
+    uint64_t zero_us = 0, copy_us = 0;
+  };
+
+  static void render_animation_phase(animation_pipeline_t* ctx,int phase) {
+    lgfx_epd_page_turn::for_each_dependency(phase,ctx->waveform_phases,ctx->map,[&](int unique) {
+      if (!ctx->source->ready[unique]) {
+        render_du4_pipeline_unique(ctx->source,unique);
+        ctx->source->next_unique=ctx->source->next_unique+1;
+      }
+    },ctx->spread,ctx->layout->band_count);
+    const int slot=phase%ctx->slots;
+    auto *out=ctx->frames+size_t(slot)*ctx->source->frame_bytes;
+    const int64_t begin=esp_timer_get_time();
+    lgfx_epd_page_turn::clear_inactive_layout(out,ctx->source->frame_bytes,
+        ctx->waveform_phases,phase,*ctx->layout,ctx->spread);
+    const int64_t copied=esp_timer_get_time();
+    lgfx_epd_page_turn::copy_layout(out,ctx->source->frame_bytes,ctx->source->frames,
+        ctx->map,ctx->waveform_phases,phase,*ctx->layout,false,ctx->spread);
+    ctx->zero_us+=copied-begin;
+    const int64_t end=esp_timer_get_time();
+    ctx->copy_us+=end-copied;
+    __atomic_store_n(&ctx->ready[slot],phase,__ATOMIC_RELEASE);
+    ctx->next=phase+1;
+  }
+
+  static void animation_producer_task(void* argument) {
+    auto *ctx=static_cast<animation_pipeline_t*>(argument);
+    for (int phase=ctx->next;phase<ctx->count &&
+         !__atomic_load_n(&ctx->abort,__ATOMIC_ACQUIRE);++phase) {
+      // A slot remains owned through the following successful scan. That
+      // scan's submission stops/resets the previous DMA descriptor chain.
+      while (__atomic_load_n(&ctx->ready[phase%ctx->slots],__ATOMIC_ACQUIRE)!=-1 &&
+             !__atomic_load_n(&ctx->abort,__ATOMIC_ACQUIRE)) {
+        ulTaskNotifyTake(pdTRUE,portMAX_DELAY);
+      }
+      if (__atomic_load_n(&ctx->abort,__ATOMIC_ACQUIRE)) break;
+      render_animation_phase(ctx,phase);
+    }
+    const bool external=ctx->external_stack;
+    __atomic_store_n(&ctx->finished,true,__ATOMIC_RELEASE);
+    xSemaphoreGive(ctx->done);
+    if (external) vTaskDeleteWithCaps(nullptr);
+    else vTaskDelete(nullptr);
+  }
+
+  static void finish_animation_pipeline(animation_pipeline_t* ctx,bool abort) {
+    if (!ctx->done) return;
+    if (abort) {
+      __atomic_store_n(&ctx->abort,true,__ATOMIC_RELEASE);
+      if (!__atomic_load_n(&ctx->finished,__ATOMIC_ACQUIRE) && ctx->task)
+        xTaskNotifyGive(ctx->task);
+    }
+    xSemaphoreTake(ctx->done,portMAX_DELAY);
+    vSemaphoreDelete(ctx->done);
+    ctx->done=nullptr;
+    ctx->task=nullptr;
+  }
+
   struct phase_line_context_t {
     const uint8_t* physical;
     const uint8_t* target;
@@ -1506,13 +1580,15 @@ namespace lgfx
     return true;
   }
 
-  bool Panel_EPD_2D::setPageTurnAnimation(int direction)
+  bool Panel_EPD_2D::setPageTurnAnimation(int direction, int speed)
   {
     _next_animation_direction = 0;
     if (direction == 0) return true;
     if (displayBusy()) return false;
     if (!lgfx_epd_page_turn::valid_direction(direction)) return false;
+    if (speed<1 || speed>2) return false;
     _next_animation_direction = direction;
+    _next_animation_speed = uint8_t(speed);
     return true;
   }
 
@@ -1555,6 +1631,7 @@ namespace lgfx
       .mode = _epd_mode,
       .animation_direction = _next_animation_direction,
       .animation_rotation = uint8_t(_internal_rotation),
+      .animation_speed = _next_animation_speed,
     };
     _next_animation_direction = 0;
 
@@ -1725,6 +1802,8 @@ namespace lgfx
       uint8_t* animation_frames = nullptr;
       int sequence_phases = selected.phases->phases;
       du4_phase_pipeline_t du4_pipeline = {};
+      animation_pipeline_t animation_pipeline = {};
+      bool animation_deferred_source = false;
 #if (defined(CONFIG_IDF_TARGET_ESP32P4) || defined(CONFIG_IDF_TARGET_ESP32S31)) \
  && MYPAPER_EPD_USE_2D_ENGINE && MYPAPER_EPD_2D_CONTINUOUS_SCAN \
  && MYPAPER_EPD_2D_PRECOMPUTE_WAVEFORM
@@ -1969,7 +2048,9 @@ namespace lgfx
             du4_active_groups = me->_du4_active_groups_2d;
           }
         }
-        if (du4_pipeline_requested) {
+        animation_deferred_source = animation_requested && deduplicated &&
+            me->_du4_pair_lut_2d != nullptr && cached_phase_count <= DU4_PIPELINE_MAX_PHASES;
+        if (du4_pipeline_requested || animation_deferred_source) {
           du4_pipeline.frames = phase_frames;
           du4_pipeline.frame_bytes = phase_frame_bytes;
           du4_pipeline.physical = me->_physical_buf;
@@ -1989,6 +2070,7 @@ namespace lgfx
           du4_pipeline.unique_count = cached_phase_count;
           du4_pipeline.next_unique = std::min<int>(
               MYPAPER_EPD_2D_DU4_PIPELINE_PRIME, cached_phase_count);
+          if (du4_pipeline_requested) {
           du4_pipeline.done = xSemaphoreCreateBinary();
           if (du4_pipeline.done == nullptr) {
             ESP_LOGW(TAG_2D,
@@ -1996,11 +2078,13 @@ namespace lgfx
           } else {
             du4_pipeline_active = true;
           }
+          }
+          if (animation_deferred_source) du4_pipeline.next_unique = 0;
         }
         const int initial_render_count = gc16_pipeline_active
             ? gc16_pipeline.next_unique
             : du4_pipeline_active ? int(du4_pipeline.next_unique)
-                                  : cached_phase_count;
+                                  : animation_deferred_source ? 0 : cached_phase_count;
         for (int cached = 0; cached < initial_render_count; ++cached) {
           const int phase = deduplicated ? representative_phases[cached]
                                          : cached;
@@ -2133,8 +2217,8 @@ namespace lgfx
                    du4_pipeline.external_stack ? "psram" : "internal");
         } else {
           ESP_LOGI(TAG_2D,
-                   "waveform prepared before power-on: phases=%d cached=%d transitions=%u bytes=%u time=%lu.%03lu ms lut_build=%llu us frame_render=%llu us renderer=%s workspace=%s active_groups=%u/%u path=%s",
-                   phase_count, cached_phase_count,
+                   "waveform preparation: stage=%s phases=%d cached=%d transitions=%u bytes=%u time=%lu.%03lu ms lut_build=%llu us frame_render=%llu us renderer=%s workspace=%s active_groups=%u/%u path=%s",
+                   animation_deferred_source ? "workspace" : "complete",phase_count, cached_phase_count,
                    (unsigned)used_transition_count, (unsigned)phase_cache_bytes,
                    (unsigned long)(precompute_us / 1000),
                    (unsigned long)(precompute_us % 1000),
@@ -2152,19 +2236,28 @@ namespace lgfx
                    (unsigned)du4_active_group_count,
                    (unsigned)total_group_count,
                    du4_active_groups != nullptr ? "sparse" : "full");
+          if (!animation_deferred_source) {
           heap_caps_free(representative_phases);
           representative_phases = nullptr;
           heap_caps_free(unique_transitions);
           unique_transitions = nullptr;
+          }
         }
       }
 #endif
 
-      // Prepare the entire staggered sequence before applying any panel voltage.
-      // Base DU4 waveforms remain unchanged; only their regional start time shifts.
+      // Ordered dependency generation; only complete immutable animation frames
+      // are exposed to the scanner. No concurrent writes to an active DMA frame.
       if (animation_requested && phase_frames != nullptr) {
-        const int count = lgfx_epd_page_turn::phases(selected.phases->phases);
-        const size_t bytes = size_t(count)*me->_scan_frame_bytes_2d;
+        const int spread=update.animation_speed==2 ? lgfx_epd_page_turn::slow_spread : lgfx_epd_page_turn::fast_spread;
+        const int band_count=update.animation_speed==2 ? 8 : 4;
+        const int count = lgfx_epd_page_turn::phases(selected.phases->phases,spread);
+        animation_pipeline.spread=spread;
+        if (animation_deferred_source && uxTaskPriorityGet(nullptr)>1)
+          animation_pipeline.done=xSemaphoreCreateBinary();
+        animation_pipeline.slots=animation_pipeline.done ? std::min(12,count) : count;
+        for (int i=0;i<35;++i) animation_pipeline.ready[i]=-1;
+        size_t bytes = size_t(animation_pipeline.slots)*me->_scan_frame_bytes_2d;
         const int64_t alloc_begin=esp_timer_get_time();
         animation_frames = static_cast<uint8_t*>(heap_caps_aligned_alloc(
             64, bytes, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
@@ -2172,41 +2265,111 @@ namespace lgfx
         const int direction=update.animation_direction;
         const int slot=direction>0 ? direction-1 : 4-direction-1;
         auto &layout=me->_animation_layouts_2d[slot];
-        const bool layout_cached=layout.matches(memory_w,scan_rows,update.animation_rotation,direction);
+        const bool layout_cached=layout.matches(memory_w,scan_rows,update.animation_rotation,direction,band_count);
         bool layout_ready=layout_cached;
         if (animation_frames && !layout_cached) {
           heap_caps_free(layout.rows); layout=lgfx_epd_page_turn::Layout{};
           auto *rows=(direction>2 || direction<-2) ?
               static_cast<lgfx_epd_page_turn::Span*>(heap_caps_malloc(
-                  size_t(scan_rows)*lgfx_epd_page_turn::bands*sizeof(lgfx_epd_page_turn::Span),
+                  size_t(scan_rows)*band_count*sizeof(lgfx_epd_page_turn::Span),
                   MALLOC_CAP_8BIT|MALLOC_CAP_SPIRAM)) : nullptr;
           layout_ready=lgfx_epd_page_turn::prepare_layout(layout,memory_w,scan_rows,
-              update.animation_rotation,direction,rows);
+              update.animation_rotation,direction,rows,band_count);
           if (!layout_ready) heap_caps_free(rows);
         }
         const int64_t layout_done=esp_timer_get_time();
         if (animation_frames != nullptr && layout_ready) {
           int64_t zero_us=0,copy_us=0;
-          for (int phase=0; phase<count; ++phase) {
+          int sources_primed=0;
+          uint64_t render_primed_us=0;
+          int initial_count=count;
+          if (animation_deferred_source) {
+            animation_pipeline.source=&du4_pipeline;
+            animation_pipeline.frames=animation_frames;
+            animation_pipeline.map=phase_frame_map;
+            animation_pipeline.layout=&layout;
+            animation_pipeline.waveform_phases=selected.phases->phases;
+            animation_pipeline.count=count;
+            initial_count=animation_pipeline.done ? std::min(8,count) : count;
+          }
+          for (int phase=0; phase<initial_count; ++phase) {
+            if (animation_deferred_source) {
+              render_animation_phase(&animation_pipeline,phase);
+              continue;
+            }
             auto *out=animation_frames+size_t(phase)*me->_scan_frame_bytes_2d;
             const int64_t zero_begin=esp_timer_get_time();
             lgfx_epd_page_turn::clear_inactive_layout(out,me->_scan_frame_bytes_2d,
-                selected.phases->phases,phase,layout);
+                selected.phases->phases,phase,layout,spread);
             const int64_t copy_begin=esp_timer_get_time();
             lgfx_epd_page_turn::copy_layout(out,me->_scan_frame_bytes_2d,phase_frames,phase_frame_map,
-                selected.phases->phases,phase,layout);
+                selected.phases->phases,phase,layout,false,spread);
             const int64_t copy_done=esp_timer_get_time();
             zero_us+=copy_begin-zero_begin; copy_us+=copy_done-copy_begin;
           }
-          sequence_phases = count;
-          ESP_LOGI(TAG_2D, "page turn prepared: direction=%s bands=4 stagger=3 phases=%d bytes=%u compose=%lld us alloc=%lld layout=%lld zero=%lld copy=%lld us layout_cache=%d path=%s zero_scope=inactive",
-              lgfx_epd_page_turn::direction_name(direction),count,unsigned(bytes),
-              (long long)(esp_timer_get_time()-alloc_done),(long long)(alloc_done-alloc_begin),
+          if (animation_deferred_source) {
+            // Fixed eight-frame prime; six frames underrun in device testing.
+            // An underrun remains fatal
+            // to the batch rather than stretching the waveform phase timing.
+            initial_count=animation_pipeline.next;
+            sources_primed=du4_pipeline.next_unique;
+            render_primed_us=du4_pipeline.frame_render_us;
+            // Snapshot prime-only counters before the producer can run.
+            zero_us=animation_pipeline.zero_us; copy_us=animation_pipeline.copy_us;
+            if (animation_pipeline.done && create_epd_pipeline_task(
+                animation_producer_task,"epd2d_anim",4096,&animation_pipeline,
+                uxTaskPriorityGet(nullptr)-1,&animation_pipeline.task,xPortGetCoreID(),
+                &animation_pipeline.external_stack)!=pdPASS) {
+              vSemaphoreDelete(animation_pipeline.done); animation_pipeline.done=nullptr;
+              // No worker can drain a ring before power-on. Expand to a full
+              // sequence, preserving already primed frames, or use normal DU4.
+              bytes=size_t(count)*me->_scan_frame_bytes_2d;
+              auto *full=static_cast<uint8_t*>(heap_caps_aligned_alloc(
+                  64,bytes,MALLOC_CAP_8BIT|MALLOC_CAP_SPIRAM|MALLOC_CAP_DMA));
+              if (full) std::memcpy(full,animation_frames,
+                  size_t(animation_pipeline.next)*me->_scan_frame_bytes_2d);
+              heap_caps_free(animation_frames); animation_frames=full;
+              animation_pipeline.frames=full;
+              animation_pipeline.slots=count;
+              if (full) {
+                for (int phase=animation_pipeline.next;phase<count;++phase)
+                  render_animation_phase(&animation_pipeline,phase);
+                initial_count=count;
+                sources_primed=du4_pipeline.next_unique;
+                render_primed_us=du4_pipeline.frame_render_us;
+                ESP_LOGW(TAG_2D,"animation producer unavailable; full sequence prepared before power-on");
+              } else {
+                for (int unique=0;unique<cached_phase_count;++unique)
+                  if (!du4_pipeline.ready[unique]) render_du4_pipeline_unique(&du4_pipeline,unique);
+                ESP_LOGW(TAG_2D,"animation producer and full cache unavailable; using normal DU4");
+              }
+              zero_us=animation_pipeline.zero_us; copy_us=animation_pipeline.copy_us;
+            }
+          }
+          sequence_phases = animation_frames ? count : selected.phases->phases;
+          if (animation_frames) {
+          const int64_t prepare_us=esp_timer_get_time()-alloc_done;
+          ESP_LOGI(TAG_2D, "page turn prepared: direction=%s speed=%s bands=%d spread=%d phases=%d bytes=%u prepare=%lld compose=%lld us alloc=%lld layout=%lld zero=%lld copy=%lld us layout_cache=%d path=%s zero_scope=inactive",
+              lgfx_epd_page_turn::direction_name(direction),update.animation_speed==2 ? "slow" : "fast",band_count,spread,count,unsigned(bytes),
+              (long long)prepare_us,(long long)(prepare_us-render_primed_us),(long long)(alloc_done-alloc_begin),
               (long long)(layout_done-alloc_done),(long long)zero_us,(long long)copy_us,
               layout_cached?1:0,layout.kind==lgfx_epd_page_turn::LayoutKind::RowBlocks ? "row-blocks" :
               layout.kind==lgfx_epd_page_turn::LayoutKind::ColumnBlocks ? "column-blocks" : "diagonal-spans");
+          if (animation_deferred_source) ESP_LOGI(TAG_2D,
+              "page turn pipeline primed: phases=%d primed=%d slots=%d source_ready=%d/%d render=%llu us stack=%s",
+              count,initial_count,animation_pipeline.slots,sources_primed,cached_phase_count,
+              (unsigned long long)render_primed_us,
+              animation_pipeline.external_stack ? "psram" : "internal");
+          }
         } else {
+          if (animation_pipeline.done) {
+            vSemaphoreDelete(animation_pipeline.done); animation_pipeline.done=nullptr;
+          }
           heap_caps_free(animation_frames); animation_frames=nullptr;
+          if (animation_deferred_source) {
+            for (int unique=0;unique<cached_phase_count;++unique)
+              if (!du4_pipeline.ready[unique]) render_du4_pipeline_unique(&du4_pipeline,unique);
+          }
           ESP_LOGW(TAG_2D, "page turn cache allocation failed: bytes=%u; using normal DU4", unsigned(bytes));
         }
       }
@@ -2215,6 +2378,7 @@ namespace lgfx
         ESP_LOGE(TAG_2D, "power on failed; batch aborted before scan");
         me->_physical_state_known = false;
         bus->powerControl(false);
+        finish_animation_pipeline(&animation_pipeline,true);
         if (gc16_pipeline_active) {
           finish_gc16_phase_pipeline(&gc16_pipeline, true);
         }
@@ -2293,7 +2457,13 @@ namespace lgfx
 #endif
 #if MYPAPER_EPD_2D_PRECOMPUTE_WAVEFORM
         if (animation_frames != nullptr) {
-          frame_data = animation_frames + size_t(phase)*me->_scan_frame_bytes_2d;
+          if (animation_deferred_source &&
+              __atomic_load_n(&animation_pipeline.ready[phase%animation_pipeline.slots],__ATOMIC_ACQUIRE)!=phase) {
+            ESP_LOGE(TAG_2D,"page turn pipeline underrun: phase=%d; aborting without extending phase timing",phase+1);
+            scan_ok=false;
+            break;
+          }
+          frame_data = animation_frames + size_t(phase%animation_pipeline.slots)*me->_scan_frame_bytes_2d;
         } else {
         const size_t cached_phase = phase_frame_map != nullptr
                                   ? phase_frame_map[phase] : size_t(phase);
@@ -2360,6 +2530,13 @@ namespace lgfx
                    phase + 1, sequence_phases);
           scan_ok = false;
           break;
+        }
+        if (animation_frames && animation_deferred_source && animation_pipeline.done && phase>0) {
+          // Keep a one-frame guard: write2DFrame stops/resets old GDMA at
+          // its next submission, not at VSYNC return. Never reuse on VSYNC alone.
+          __atomic_store_n(&animation_pipeline.ready[(phase-1)%animation_pipeline.slots],-1,__ATOMIC_RELEASE);
+          if (!__atomic_load_n(&animation_pipeline.finished,__ATOMIC_ACQUIRE) && animation_pipeline.task)
+            xTaskNotifyGive(animation_pipeline.task);
         }
         if (gc16_pipeline_active) {
           __atomic_store_n(&gc16_pipeline.consumed_phase, phase,
@@ -2467,6 +2644,14 @@ namespace lgfx
       }
 #endif
 
+      finish_animation_pipeline(&animation_pipeline,!scan_ok);
+      if (animation_deferred_source && animation_frames) {
+        ESP_LOGI(TAG_2D,"page turn pipeline complete: generated=%d/%d slots=%d sources=%d/%d render=%llu zero=%llu copy=%llu us",
+            animation_pipeline.next,animation_pipeline.count,animation_pipeline.slots,int(du4_pipeline.next_unique),cached_phase_count,
+            (unsigned long long)du4_pipeline.frame_render_us,
+            (unsigned long long)animation_pipeline.zero_us,(unsigned long long)animation_pipeline.copy_us);
+        if (animation_pipeline.next!=animation_pipeline.count) scan_ok=false;
+      }
       if (gc16_pipeline_active) {
         finish_gc16_phase_pipeline(&gc16_pipeline, !scan_ok);
         if (scan_ok && !gc16_pipeline.failed
@@ -2505,7 +2690,7 @@ namespace lgfx
           scan_ok = false;
         }
       }
-      if (gc16_pipeline_active || du4_pipeline_active) {
+      if (gc16_pipeline_active || du4_pipeline_active || animation_deferred_source) {
         heap_caps_free(representative_phases);
         representative_phases = nullptr;
         heap_caps_free(unique_transitions);

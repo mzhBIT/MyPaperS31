@@ -26,7 +26,6 @@ constexpr int MODE_KEY_W = 116;
 constexpr int MODE_KEY_GAP = 8;
 constexpr int LAYOUT_KEY_W = 80;
 constexpr int PAGE_KEY_W = 36;
-constexpr int PINYIN_DIGITS_W = 92;
 constexpr int PINYIN_PAGE_KEY_W = 40;
 constexpr int SECRET_TOGGLE_W = 104;
 constexpr int CURSOR_BUTTON_W = 48;
@@ -250,10 +249,10 @@ struct TextInputOverlay::Impl {
             const int width = M5.Display.width();
             const size_t page_start =
                 (nine_engine.interpretation() / PINYIN_SLOTS) * PINYIN_SLOTS;
-            const int choices_x = PINYIN_DIGITS_W + PINYIN_PAGE_KEY_W;
-            const int choices_w = width - PINYIN_DIGITS_W - PINYIN_PAGE_KEY_W * 2;
+            const int choices_x = PINYIN_PAGE_KEY_W;
+            const int choices_w = width - PINYIN_PAGE_KEY_W * 2;
             const int slot_w = std::max(1, choices_w / PINYIN_SLOTS);
-            if (x >= PINYIN_DIGITS_W && x < choices_x) {
+            if (x >= 0 && x < choices_x) {
                 if (page_start >= PINYIN_SLOTS) {
                     nine_engine.select_interpretation(page_start - PINYIN_SLOTS);
                     draw();
@@ -517,16 +516,14 @@ struct TextInputOverlay::Impl {
         } else if (chinese && nine_key && !nine_engine.digits().empty()) {
             const int row_y = y + 10;
             const int row_h = candidate_controls_y() - y - 20;
-            const int choices_x = PINYIN_DIGITS_W + PINYIN_PAGE_KEY_W;
-            const int choices_w = width - PINYIN_DIGITS_W - PINYIN_PAGE_KEY_W * 2;
+            const int choices_x = PINYIN_PAGE_KEY_W;
+            const int choices_w = width - PINYIN_PAGE_KEY_W * 2;
             const int slot_w = std::max(1, choices_w / PINYIN_SLOTS);
             const size_t page_start =
                 (nine_engine.interpretation() / PINYIN_SLOTS) * PINYIN_SLOTS;
 
-            system_font::draw_center(M5.Display, nine_engine.digits(),
-                                     PINYIN_DIGITS_W / 2, row_y, TFT_BLACK);
             system_font::draw_center(M5.Display, "<",
-                                     PINYIN_DIGITS_W + PINYIN_PAGE_KEY_W / 2,
+                                     PINYIN_PAGE_KEY_W / 2,
                                      row_y, TFT_BLACK);
             system_font::draw_center(M5.Display, ">",
                                      width - PINYIN_PAGE_KEY_W / 2,

@@ -91,10 +91,10 @@ static ReaderStyle s_rss_style;
 static bool s_rss_initialized = false;
 static int s_auto_page_seconds[2] = {};
 static bool s_auto_page_loaded[2] = {};
-static bool s_page_animation[2] = {};
+static ReaderAnimationMode s_page_animation[2] = {};
 static bool s_page_animation_loaded[2] = {};
 
-bool reader_page_animation_enabled(ReaderProfile profile)
+ReaderAnimationMode reader_page_animation_mode(ReaderProfile profile)
 {
     const int index = profile == ReaderProfile::Rss ? 1 : 0;
     if (!s_page_animation_loaded[index]) {
@@ -105,23 +105,33 @@ bool reader_page_animation_enabled(ReaderProfile profile)
             nvs_get_u8(h, "page_anim", &value);
             nvs_close(h);
         }
-        s_page_animation[index] = value == 1;
+        s_page_animation[index] = value<=2 ? static_cast<ReaderAnimationMode>(value) : ReaderAnimationMode::Off;
     }
     return s_page_animation[index];
 }
 
-bool reader_page_animation_set_enabled(bool enabled, ReaderProfile profile)
+bool reader_page_animation_set_mode(ReaderAnimationMode mode, ReaderProfile profile)
 {
+    if (static_cast<unsigned>(mode)>2) return false;
     const int index = profile == ReaderProfile::Rss ? 1 : 0;
     nvs_handle_t h;
     if (nvs_open(index ? "rss_reader" : NVS_NS, NVS_READWRITE, &h) != ESP_OK) return false;
-    esp_err_t err = nvs_set_u8(h, "page_anim", enabled ? 1 : 0);
+    esp_err_t err = nvs_set_u8(h, "page_anim", static_cast<uint8_t>(mode));
     if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
     if (err != ESP_OK) return false;
-    s_page_animation[index] = enabled;
+    s_page_animation[index] = mode;
     s_page_animation_loaded[index] = true;
     return true;
+}
+
+bool reader_page_animation_enabled(ReaderProfile profile)
+{
+    return reader_page_animation_mode(profile)!=ReaderAnimationMode::Off;
+}
+bool reader_page_animation_set_enabled(bool enabled, ReaderProfile profile)
+{
+    return reader_page_animation_set_mode(enabled ? ReaderAnimationMode::Fast : ReaderAnimationMode::Off,profile);
 }
 
 int reader_auto_page_seconds(ReaderProfile profile)

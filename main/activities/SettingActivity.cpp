@@ -19,8 +19,6 @@
 #include "ui/VirtualKeyboard.h"
 #include "ui/home_preferences.h"
 #include "wifi/wifi_setting.h"
-#include "zhihu/ZhihuClient.h"
-#include "zhihu/ZhihuConfig.h"
 
 #include <M5Unified.h>
 #include <esp_err.h>
@@ -600,133 +598,6 @@ private:
                                  _message.empty() ? ui_locale::text(ui_locale::TextId::ApiKeyNvsHint) :
                                                     system_font::ellipsize(_message, M5.Display.width() - 40),
                                  M5.Display.width() / 2, HEADER_H + 500, TFT_BLACK);
-        M5.Display.display();
-        M5.Display.endWrite();
-    }
-};
-
-class ZhihuSettingsActivity final : public Activity {
-public:
-    void on_create() override { draw(true); }
-
-    void on_show() override
-    {
-        if (!_seen_show) {
-            _seen_show = true;
-            return;
-        }
-        draw(false);
-    }
-
-    bool on_touch(const TouchEvent &event) override
-    {
-        if (event.type == TouchEventType::Back || header_back_hit(event)) {
-            ActivityManager::instance().pop();
-            return true;
-        }
-        if (event.type != TouchEventType::Tap) return false;
-        if (event.y >= HEADER_H && event.y < HEADER_H + 140) {
-            _focus = 0;
-            edit_access_secret();
-            return true;
-        }
-        if (event.y >= HEADER_H + 160 && event.y < HEADER_H + 300) {
-            _focus = 1;
-            test_connection();
-            return true;
-        }
-        return false;
-    }
-
-    bool on_key(int key) override
-    {
-        if (key == APP_KEY_BACK) {
-            ActivityManager::instance().pop();
-            return true;
-        }
-        if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
-            _focus = 1 - _focus;
-            draw(false);
-            return true;
-        }
-        if (key == APP_KEY_OK) {
-            if (_focus == 0) edit_access_secret();
-            else test_connection();
-            return true;
-        }
-        return false;
-    }
-
-private:
-    bool _seen_show = false;
-    int _focus = 0;
-    std::string _message;
-
-    void edit_access_secret()
-    {
-        TextInputOptions options;
-        options.title = ui_locale::text(ui_locale::TextId::ZhihuAccessSecret);
-        options.submit_label = ui_locale::text(ui_locale::TextId::Save);
-        options.max_bytes = 255;
-        options.start_in_chinese = false;
-        options.secret = true;
-        launch_text_input(options, [](const std::string &value) {
-            if (!zhihu_config_save_access_secret(value)) {
-                ESP_LOGE(TAG, "Failed to save Zhihu Access Secret");
-            }
-        });
-    }
-
-    void test_connection()
-    {
-        if (!ensure_wifi_configured_or_show_guide()) return;
-        ZhihuConfig config;
-        zhihu_config_load(&config);
-        M5.Display.startWrite();
-        M5.Display.setEpdMode(epd_mode_t::epd_fast);
-        M5.Display.fillScreen(TFT_WHITE);
-        draw_header(ui_locale::text(ui_locale::TextId::ZhihuSettings));
-        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::LoadingZhihuHotList),
-                                 M5.Display.width() / 2, 420, TFT_BLACK);
-        M5.Display.display();
-        M5.Display.endWrite();
-        M5.Display.waitDisplay();
-        ZhihuHotListResult result = ZhihuClient::fetch_hot_list(config, 1, true);
-        _message = result.success ? ui_locale::text(ui_locale::TextId::ConnectionSuccessful) : ui_locale::localize_message(result.error);
-        draw(false);
-    }
-
-    void draw_row(int y, const char *title, const std::string &detail, bool selected)
-    {
-        const int width = M5.Display.width();
-        const uint16_t background = selected ? TFT_BLACK : TFT_WHITE;
-        const uint16_t foreground = selected ? TFT_WHITE : TFT_BLACK;
-        M5.Display.fillRoundRect(PAD, y, width - PAD * 2, 140, 8, background);
-        M5.Display.drawRoundRect(PAD, y, width - PAD * 2, 140, 8, TFT_BLACK);
-        system_font::draw_left(M5.Display, title, PAD + 18, y + 14, foreground);
-        system_font::draw_left(M5.Display, detail, PAD + 18, y + 74, foreground);
-        system_font::draw_right(M5.Display, ">", width - PAD - 20, y + 48, foreground);
-    }
-
-    void draw(bool quality)
-    {
-        ZhihuConfig config;
-        const bool configured = zhihu_config_load(&config);
-        M5.Display.startWrite();
-        M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
-        M5.Display.fillScreen(TFT_WHITE);
-        draw_header(ui_locale::text(ui_locale::TextId::ZhihuSettings));
-        draw_row(HEADER_H, ui_locale::text(ui_locale::TextId::AccessSecret),
-                 configured ? ui_locale::text(ui_locale::TextId::ConfiguredTapReplace)
-                            : ui_locale::text(ui_locale::TextId::NotConfigured),
-                 _focus == 0);
-        draw_row(HEADER_H + 160, ui_locale::text(ui_locale::TextId::TestConnection),
-                 ui_locale::text(ui_locale::TextId::RequestHotListHint), _focus == 1);
-        system_font::draw_center(M5.Display,
-                                 _message.empty() ? ui_locale::text(ui_locale::TextId::SecretNvsHint) :
-                                                    system_font::ellipsize(_message,
-                                                                           M5.Display.width() - 40),
-                                 M5.Display.width() / 2, HEADER_H + 370, TFT_BLACK);
         M5.Display.display();
         M5.Display.endWrite();
     }
@@ -1627,7 +1498,7 @@ public:
             return true;
         }
         if (event.type != TouchEventType::Tap || event.y < ROW_Y ||
-            event.y >= ROW_Y + ROW_H * 3) return false;
+            event.y >= ROW_Y + ROW_H * 2) return false;
         _focus = (event.y - ROW_Y) / ROW_H;
         open_focused();
         return true;
@@ -1639,7 +1510,7 @@ public:
             return true;
         }
         if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
-            _focus = (_focus + (key == APP_KEY_DOWN ? 1 : 2)) % 3;
+            _focus = (_focus + 1) % 2;
             draw(false);
             return true;
         }
@@ -1658,7 +1529,6 @@ private:
     void open_focused()
     {
         if (_focus == 0) ActivityManager::instance().push(new DeepSeekSettingsActivity());
-        else if (_focus == 1) ActivityManager::instance().push(new ZhihuSettingsActivity());
         else ActivityManager::instance().push(new MapSettingsActivity());
     }
 
@@ -1669,25 +1539,21 @@ private:
         const int width = M5.Display.width();
         DeepSeekConfig deepseek;
         const bool deepseek_configured = deepseek_config_load(&deepseek);
-        ZhihuConfig zhihu;
-        const bool zhihu_configured = zhihu_config_load(&zhihu);
         AmapConfig amap;
         const bool map_configured = amap_config_load(&amap);
-        const char *titles[] = {text(TextId::DeepSeek), text(TextId::Zhihu), text(TextId::Map)};
+        const char *titles[] = {text(TextId::DeepSeek), text(TextId::Map)};
         const std::string details[] = {
             deepseek_configured
                 ? std::string(text(TextId::ApiKeyConfigured)) + ", " +
                       deepseek_model_label(deepseek.default_model)
                 : text(TextId::ApiKeyNotConfigured),
-            text(zhihu_configured ? TextId::AccessSecretConfigured
-                                  : TextId::AccessSecretNotConfigured),
             text(map_configured ? TextId::ApiKeyConfigured : TextId::ApiKeyNotConfigured),
         };
         M5.Display.startWrite();
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
         draw_header(text(TextId::AppSettings));
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < 2; ++i) {
             const int top = ROW_Y + i * ROW_H;
             if (i == 0) M5.Display.drawFastHLine(PAD, top, width - 2 * PAD, TFT_BLACK);
             M5.Display.drawFastHLine(PAD, top + ROW_H - 1, width - 2 * PAD, TFT_BLACK);
@@ -1860,8 +1726,7 @@ private:
                                                  ? TextId::WifiAlwaysOn : TextId::WifiOnDemand));
         draw_item(2, text(TextId::Frontlight), std::to_string(frontlight_get_percent()) + "%");
         draw_item(3, text(TextId::AppSettings),
-                  std::string(text(TextId::DeepSeek)) + " / " + text(TextId::Zhihu) +
-                      " / " + text(TextId::Map));
+                  std::string(text(TextId::DeepSeek)) + " / " + text(TextId::Map));
         draw_item(4, text(TextId::EpdDiagnostics), text(TextId::EpdDiagnosticsDetail));
         RssCacheInfo rss_cache = rss_cache_info();
         char rss_detail[64] = {};

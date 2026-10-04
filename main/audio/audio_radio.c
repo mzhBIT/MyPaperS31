@@ -1,4 +1,5 @@
 #include "audio_radio.h"
+#include "audio/mp3_duration.h"
 
 #include <inttypes.h>
 #include <stdbool.h>
@@ -28,8 +29,11 @@
 #include "esp_gmf_rate_cvt.h"
 #include "esp_hls_io.h"
 #include "esp_log.h"
+#include "esp_heap_caps.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
 #include "media_lib_adapter.h"
 #include "nvs.h"
 
@@ -109,6 +113,9 @@ static uint64_t s_file_pcm_bytes;
 static uint32_t s_file_duration_ms;
 static volatile bool s_current_source_is_file;
 static bool s_extractor_registered;
+static uint32_t s_duration_generation;
+typedef struct { uint32_t generation; char path[512]; } duration_job_t;
+static QueueHandle_t s_duration_queue;
 static audio_output_mode_t s_output_mode = AUDIO_OUTPUT_SPEAKER;
 static bool s_output_mode_loaded;
 static bool s_force_speaker;
@@ -283,6 +290,88 @@ static bool audio_radio_read_flac_streaminfo_duration(FILE *file, uint32_t *dura
     return false;
 }
 
+typedef struct {
+    int64_t begin_us, yield_us;
+    uint32_t generation;
+    bool background;
+} duration_scan_t;
+static bool audio_radio_duration_scan_progress(void *ctx)
+{
+    duration_scan_t *scan = ctx;
+    const int64_t now = esp_timer_get_time();
+    if (now - scan->begin_us > (scan->background ? 30000000 : 3000000)) return false;
+    if (scan->background) {
+        portENTER_CRITICAL(&s_timing_lock);
+        bool current = scan->generation == s_duration_generation;
+        portEXIT_CRITICAL(&s_timing_lock);
+        if (!current) return false;
+        // Yield between 32KiB SD windows so playback gets first use of the card.
+        vTaskDelay(1);
+        return true;
+    }
+    if (now - scan->yield_us >= 100000) {
+        vTaskDelay(1);
+        scan->yield_us = esp_timer_get_time();
+    }
+    return true;
+}
+
+static void audio_radio_duration_task(void *ctx)
+{
+    (void)ctx;
+    duration_job_t job;
+    for (;;) {
+        if (xQueueReceive(s_duration_queue, &job, portMAX_DELAY) != pdTRUE) continue;
+        duration_scan_t scan = {.begin_us = esp_timer_get_time(),
+                               .generation = job.generation, .background = true};
+        while (!s_playback_ready && audio_radio_duration_scan_progress(&scan)) vTaskDelay(pdMS_TO_TICKS(20));
+        if (!audio_radio_duration_scan_progress(&scan)) continue;
+        vTaskDelay(pdMS_TO_TICKS(200)); // Let the decoder/sink prime before metadata I/O.
+        FILE *file = fopen(job.path, "rb");
+        if (!file) continue;
+        mp3_duration_info_t info = {0};
+        bool ok = mp3_duration_read(file, &info, audio_radio_duration_scan_progress, &scan);
+        fclose(file);
+        portENTER_CRITICAL(&s_timing_lock);
+        const bool current = job.generation == s_duration_generation && s_current_source_is_file;
+        if (ok && current) s_file_duration_ms = info.duration_ms;
+        portEXIT_CRITICAL(&s_timing_lock);
+        ESP_LOGI(TAG, "MP3 duration background: ok=%d applied=%d duration=%" PRIu32
+                 " ms time=%lld ms frames=%" PRIu32 " reads=%" PRIu32 " reason=%s",
+                 ok, ok && current, info.duration_ms,
+                 (esp_timer_get_time() - scan.begin_us) / 1000,
+                 info.frames_scanned, info.read_count, info.failure ? info.failure : "none");
+    }
+}
+
+static void audio_radio_queue_duration(const char *path)
+{
+    if (strlen(path) >= sizeof(((duration_job_t *)0)->path)) {
+        ESP_LOGW(TAG, "MP3 duration background skipped: path too long");
+        return;
+    }
+    // Requests originate from the serialized playback-control path. Keep one
+    // worker and one pending/latest request; never spawn a scanner per switch.
+    if (!s_duration_queue) {
+        s_duration_queue = xQueueCreate(1, sizeof(duration_job_t));
+        if (!s_duration_queue) return;
+        if (xTaskCreatePinnedToCoreWithCaps(audio_radio_duration_task, "mp3_duration",
+                4096, NULL, 1, NULL, 0, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+            vQueueDelete(s_duration_queue);
+            s_duration_queue = NULL;
+            ESP_LOGW(TAG, "MP3 duration background task creation failed");
+            return;
+        }
+    }
+    duration_job_t job = {0};
+    portENTER_CRITICAL(&s_timing_lock);
+    job.generation = s_duration_generation;
+    portEXIT_CRITICAL(&s_timing_lock);
+    memcpy(job.path, path, strlen(path) + 1);
+    xQueueOverwrite(s_duration_queue, &job);
+    ESP_LOGI(TAG, "MP3 duration scan queued after playback start");
+}
+
 static esp_err_t audio_radio_read_file_duration(const char *path, uint32_t *duration_ms)
 {
     ESP_RETURN_ON_FALSE(path != NULL && duration_ms != NULL, ESP_ERR_INVALID_ARG,
@@ -337,20 +426,43 @@ static esp_err_t audio_radio_read_file_duration(const char *path, uint32_t *dura
     if (extractor != NULL) esp_extractor_close(extractor);
 
     bool used_flac_streaminfo = false;
+    bool used_mp3_fallback = false;
+    mp3_duration_info_t mp3_info = {0};
     if ((extractor_ret != ESP_EXTRACTOR_ERR_OK || *duration_ms == 0) &&
         extractor_type == ESP_EXTRACTOR_TYPE_FLAC) {
         used_flac_streaminfo = audio_radio_read_flac_streaminfo_duration(file, duration_ms);
     }
+    if ((extractor_ret != ESP_EXTRACTOR_ERR_OK || *duration_ms == 0) &&
+        extractor_type == ESP_EXTRACTOR_TYPE_MP3) {
+        duration_scan_t scan = {.begin_us = esp_timer_get_time()};
+        scan.yield_us = scan.begin_us;
+        used_mp3_fallback = mp3_duration_read_tags(file, &mp3_info,
+                                             audio_radio_duration_scan_progress, &scan);
+        if (used_mp3_fallback) {
+            *duration_ms = mp3_info.duration_ms;
+        }
+        ESP_LOGI(TAG, "MP3 duration fallback: ok=%d source=%s duration=%" PRIu32 " ms time=%lld ms stage=%s reason=%s first=%ld frames=%" PRIu32 " reads=%" PRIu32 " bytes=%" PRIu64,
+                 used_mp3_fallback, used_mp3_fallback ? mp3_info.source : "unavailable",
+                 mp3_info.duration_ms, (esp_timer_get_time() - scan.begin_us) / 1000,
+                 mp3_info.stage ? mp3_info.stage : "none", mp3_info.failure ? mp3_info.failure : "none",
+                 mp3_info.first_frame_offset, mp3_info.frames_scanned, mp3_info.read_count, mp3_info.read_bytes);
+    }
     fclose(file);
 
-    if (!used_flac_streaminfo &&
+    if (!used_mp3_fallback && extractor_type == ESP_EXTRACTOR_TYPE_MP3 &&
+        *duration_ms == 0 && mp3_info.failure && !strcmp(mp3_info.failure, "no-duration-tag")) {
+        return ESP_ERR_NOT_FINISHED; // Full frame scan is deferred until playback starts.
+    }
+
+    if (!used_flac_streaminfo && !used_mp3_fallback &&
         (extractor_ret != ESP_EXTRACTOR_ERR_OK || *duration_ms == 0)) {
         ESP_LOGW(TAG, "Audio duration unavailable for %s, extractor ret=%d",
                  path, extractor_ret);
         return ESP_ERR_NOT_SUPPORTED;
     }
     ESP_LOGI(TAG, "Audio metadata duration=%" PRIu32 " ms source=%s path=%s",
-             *duration_ms, used_flac_streaminfo ? "flac-streaminfo" : "extractor", path);
+             *duration_ms, used_flac_streaminfo ? "flac-streaminfo" :
+                           used_mp3_fallback ? mp3_info.source : "extractor", path);
     return ESP_OK;
 }
 
@@ -1030,6 +1142,7 @@ esp_err_t audio_radio_play(const char *url)
     portENTER_CRITICAL(&s_timing_lock);
     s_file_pcm_bytes = 0;
     s_file_duration_ms = 0;
+    ++s_duration_generation;
     s_current_source_is_file = is_file;
     portEXIT_CRITICAL(&s_timing_lock);
     s_output_format_ok = true;
@@ -1091,6 +1204,9 @@ esp_err_t audio_radio_play_file(const char *path)
         portENTER_CRITICAL(&s_timing_lock);
         s_file_duration_ms = duration_ms;
         portEXIT_CRITICAL(&s_timing_lock);
+        if (duration_ms == 0 && audio_radio_extractor_type(path) == ESP_EXTRACTOR_TYPE_MP3) {
+            audio_radio_queue_duration(path);
+        }
     }
     return ret;
 }
@@ -1103,6 +1219,9 @@ esp_err_t audio_radio_play_default(void)
 
 esp_err_t audio_radio_stop(void)
 {
+    portENTER_CRITICAL(&s_timing_lock);
+    ++s_duration_generation; // Cancels an in-flight scan without waiting on SD I/O.
+    portEXIT_CRITICAL(&s_timing_lock);
     const int64_t stop_begin_us = esp_timer_get_time();
     // Close the output gate before stopping a sink. A callback already inside
     // usb_audio_output_write() is bounded by AUDIO_USB_WRITE_TIMEOUT_MS; all
@@ -1609,6 +1728,9 @@ esp_err_t audio_radio_record_wav(const char *path, uint32_t duration_ms)
 
 void audio_radio_deinit(void)
 {
+    portENTER_CRITICAL(&s_timing_lock);
+    ++s_duration_generation;
+    portEXIT_CRITICAL(&s_timing_lock);
     const int64_t deinit_begin_us = esp_timer_get_time();
     ESP_LOGI(TAG, "Deinit begin output=%s", s_active_output_usb ? "USB" : "SPK");
     if (s_player != NULL) {

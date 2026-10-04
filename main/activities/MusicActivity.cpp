@@ -9,6 +9,7 @@
 #include "renderer/CoverThumbnail.h"
 #include "renderer/P4JpegDecoder.h"
 #include "ui/SystemFont.h"
+#include "ui/MusicLyricLayout.h"
 #include "ui/UiLocale.h"
 #include "ui/music_icons_1bpp.h"
 
@@ -54,12 +55,9 @@ constexpr int LIST_INSET = 8;
 constexpr int LIST_FOOTER_H = 62;
 constexpr int LYRICS_TOP = COVER_Y + 18;
 constexpr int LYRICS_BOTTOM = COVER_Y + COVER_H - 52;
-constexpr int LYRICS_ROWS = 9;
 constexpr int ALBUM_ART_SIZE = 430;
 constexpr int ALBUM_ART_X = COVER_X + (COVER_W - ALBUM_ART_SIZE) / 2;
 constexpr int ALBUM_ART_Y = COVER_Y + 48;
-constexpr int CURRENT_LYRIC_TOP = ALBUM_ART_Y + ALBUM_ART_SIZE + 42;
-constexpr int CURRENT_LYRIC_H = 112;
 constexpr int VIEW_INDICATOR_Y = COVER_Y + COVER_H - 14;
 constexpr int VOLUME_TOAST_H = 58;
 // Place the transient value beside the volume-up icon, vertically aligned
@@ -371,6 +369,10 @@ private:
     uint32_t _duration_ms = 0;
     int64_t _last_progress_update_us = 0;
     int _last_lyric_index = -2;
+    int _last_lyric_window = -1;
+    int _lyric_wrap_width = 0;
+    std::vector<std::string> _lyric_lines;
+    std::vector<int> _lyric_starts;
     int _volume_toast_value = 0;
     int64_t _volume_toast_hide_us = 0;
     bool _volume_toast_pending = false;
@@ -506,6 +508,10 @@ private:
         _last_progress_update_us = 0;
         _last_lyric_index = -2;
         _lyrics.clear();
+        _lyric_lines.clear();
+        _lyric_starts.clear();
+        _lyric_wrap_width = 0;
+        _last_lyric_window = -1;
         _cover_thumbnail_path.clear();
         _status = ui_locale::text(ui_locale::TextId::OpeningAudio);
 
@@ -797,29 +803,96 @@ private:
         }
     }
 
+    struct LyricArea { int left, top, right, bottom, inset; };
+
+    LyricArea lyric_area() const
+    {
+        if (_view == ContentView::Cover) {
+            const int radius = std::max(3, design_x(5));
+            return {design_x(COVER_X + 18),
+                    design_y(ALBUM_ART_Y) + std::max(1, design_y(ALBUM_ART_SIZE)) +
+                        std::max(6, design_y(12)),
+                    design_x(COVER_X + COVER_W - 18),
+                    design_y(VIEW_INDICATOR_Y) - radius - std::max(4, design_y(6)),
+                    design_x(10)};
+        }
+        return {design_x(COVER_X + 10), design_y(LYRICS_TOP),
+                design_x(COVER_X + COVER_W - 10), design_y(LYRICS_BOTTOM),
+                design_x(18)};
+    }
+
+    void prepare_lyric_lines(int width)
+    {
+        if (_lyric_wrap_width == width && _lyric_starts.size() == _lyrics.size() + 1) return;
+        _lyric_wrap_width = width;
+        _lyric_lines.clear();
+        _lyric_starts.clear();
+        for (const auto &lyric : _lyrics) {
+            _lyric_starts.push_back(static_cast<int>(_lyric_lines.size()));
+            auto lines = music_lyric_layout::wrap(lyric.text, width,
+                [](const std::string &text) { return system_font::measure(text); });
+            for (auto &line : lines) _lyric_lines.push_back(std::move(line));
+        }
+        _lyric_starts.push_back(static_cast<int>(_lyric_lines.size()));
+    }
+
+    int lyric_window(int line_height)
+    {
+        const auto area = lyric_area();
+        const int pitch = line_height + std::max(4, design_y(6));
+        const int capacity = std::max(1, (area.bottom - area.top +
+                                         pitch - line_height) / pitch);
+        prepare_lyric_lines(std::max(1, area.right - area.left - area.inset * 2));
+        if (_lyrics.empty()) return 0;
+        const int active = std::max(0, current_lyric_index());
+        const uint32_t age = _elapsed_ms >= _lyrics[active].time_ms
+            ? _elapsed_ms - _lyrics[active].time_ms : 0;
+        return music_lyric_layout::window_start(_lyric_starts[active],
+            _lyric_starts[active + 1], static_cast<int>(_lyric_lines.size()), capacity, age);
+    }
+
+    void draw_wrapped_lyrics()
+    {
+        const auto area = lyric_area();
+        const int width = area.right - area.left, height = area.bottom - area.top;
+        if (width <= 0 || height <= 0) return;
+        M5.Display.fillRect(area.left, area.top, width, height, TFT_WHITE);
+        if (_lyrics.empty()) return;
+        const int line_height = system_font::line_height();
+        const int pitch = line_height + std::max(4, design_y(6));
+        const int capacity = std::max(1, (height + pitch - line_height) / pitch);
+        const int first = lyric_window(line_height);
+        _last_lyric_window = first;
+        const int count = std::min(capacity, static_cast<int>(_lyric_lines.size()) - first);
+        const int text_height = count * pitch - (pitch - line_height);
+        const int text_top = area.top + std::max(0, (height - text_height) / 2);
+        const int active = current_lyric_index();
+
+        int32_t clip_x, clip_y, clip_w, clip_h;
+        M5.Display.getClipRect(&clip_x, &clip_y, &clip_w, &clip_h);
+        const int x = std::max(area.left, int(clip_x));
+        const int y = std::max(area.top, int(clip_y));
+        M5.Display.setClipRect(x, y,
+            std::max(0, std::min(area.right, int(clip_x + clip_w)) - x),
+            std::max(0, std::min(area.bottom, int(clip_y + clip_h)) - y));
+        for (int row = 0; row < count; ++row) {
+            const int line = first + row;
+            const bool selected = _view == ContentView::Lyrics && active >= 0 &&
+                line >= _lyric_starts[active] && line < _lyric_starts[active + 1];
+            const int top = text_top + row * pitch;
+            if (selected) {
+                M5.Display.fillRect(area.left + design_x(6), top - 2,
+                                    width - design_x(12), pitch, TFT_BLACK);
+            }
+            system_font::draw_center(M5.Display, _lyric_lines[line],
+                (area.left + area.right) / 2, top, selected ? TFT_WHITE : TFT_BLACK);
+        }
+        M5.Display.setClipRect(clip_x, clip_y, clip_w, clip_h);
+    }
+
     void draw_current_lyric_section()
     {
-        if (_view != ContentView::Cover) return;
-        int left = design_x(COVER_X + 18);
-        int right = design_x(COVER_X + COVER_W - 18);
-        int top = design_y(CURRENT_LYRIC_TOP);
-        int height = std::max(1, design_y(CURRENT_LYRIC_H));
-        M5.Display.fillRect(left, top, std::max(1, right - left), height, TFT_WHITE);
-
-        int active = current_lyric_index();
-        if (_lyrics.empty()) return;
-        if (active < 0) active = 0;
-        int row_height = std::max(1, height / 3);
-        for (int row = 0; row < 3; ++row) {
-            int index = active + row - 1;
-            if (index < 0 || index >= static_cast<int>(_lyrics.size())) continue;
-            int y = top + row * row_height;
-            std::string text = system_font::ellipsize(
-                _lyrics[index].text, right - left - design_x(20));
-            system_font::draw_center(
-                M5.Display, text, (left + right) / 2,
-                y + std::max(0, (row_height - system_font::line_height()) / 2), TFT_BLACK);
-        }
+        if (_view == ContentView::Cover) draw_wrapped_lyrics();
     }
 
     void draw_cover_view()
@@ -852,37 +925,8 @@ private:
 
     void draw_lyrics_section()
     {
-        if (_lyrics.empty() || _view != ContentView::Lyrics) return;
-
-        int left = design_x(COVER_X + 10);
-        int right = design_x(COVER_X + COVER_W - 10);
-        int top = design_y(LYRICS_TOP);
-        int bottom = design_y(LYRICS_BOTTOM);
-        int width = std::max(1, right - left);
-        int row_height = std::max(system_font::line_height() + 6,
-                                  (bottom - top) / LYRICS_ROWS);
-        M5.Display.fillRect(left, top, width, std::max(1, bottom - top), TFT_WHITE);
-
-        int active = current_lyric_index();
-        int first = (active >= 0 ? active : 0) - LYRICS_ROWS / 2;
-        for (int row = 0; row < LYRICS_ROWS; ++row) {
-            int index = first + row;
-            if (index < 0 || index >= static_cast<int>(_lyrics.size())) continue;
-            int y = top + row * row_height;
-            bool selected = index == active;
-            uint16_t foreground = selected ? TFT_WHITE : TFT_BLACK;
-            if (selected) {
-                M5.Display.fillRoundRect(left + design_x(6), y + 2,
-                                         width - design_x(12), row_height - 4,
-                                         std::max(3, design_x(6)), TFT_BLACK);
-            }
-            std::string text = system_font::ellipsize(_lyrics[index].text,
-                                                       width - design_x(36));
-            system_font::draw_center(
-                M5.Display, text, (left + right) / 2,
-                y + std::max(0, (row_height - system_font::line_height()) / 2),
-                foreground);
-        }
+        if (_view != ContentView::Lyrics) return;
+        draw_wrapped_lyrics();
         draw_view_indicator();
     }
 
@@ -943,7 +987,8 @@ private:
         uint32_t progress = read_progress();
         int lyric_index = current_lyric_index();
         bool lyric_changed = _view != ContentView::List && !_lyrics.empty() &&
-                             lyric_index != _last_lyric_index;
+                             (lyric_index != _last_lyric_index ||
+                              lyric_window(system_font::line_height()) != _last_lyric_window);
         if (progress == previous && _elapsed_ms / 1000 == previous_elapsed_second &&
             _duration_ms == previous_duration && !lyric_changed) return;
 
