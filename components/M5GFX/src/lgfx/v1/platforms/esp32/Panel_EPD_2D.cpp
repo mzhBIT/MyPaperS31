@@ -1,4 +1,5 @@
 #include "Panel_EPD_2D.hpp"
+#include "EpdTransitionStats.h"
 
 #if SOC_LCD_I80_SUPPORTED && (defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32P4) || defined(CONFIG_IDF_TARGET_ESP32S31))
 
@@ -93,31 +94,13 @@ namespace lgfx
     }
   }
 
-  static size_t collect_used_transitions_4bpp(
+  __attribute__((optimize("O3"))) static size_t collect_used_transitions_4bpp(
       bool* used, const uint8_t* physical, const uint8_t* target,
       size_t stride, size_t panel_height,
       uint16_t x, uint16_t y, uint16_t width, uint16_t height)
   {
-    memset(used, 0, 256 * sizeof(*used));
-    const size_t byte_begin = std::min<size_t>(x >> 1, stride);
-    const size_t byte_end = std::min<size_t>(
-        (size_t(x) + width + 1) >> 1, stride);
-    const size_t row_begin = std::min<size_t>(y, panel_height);
-    const size_t row_end = std::min<size_t>(size_t(y) + height, panel_height);
-    size_t count = 0;
-    for (size_t row = row_begin; row < row_end; ++row) {
-      const uint8_t* from_row = physical + row * stride;
-      const uint8_t* to_row = target + row * stride;
-      for (size_t index = byte_begin; index < byte_end; ++index) {
-        const uint8_t from = from_row[index];
-        const uint8_t to = to_row[index];
-        const uint8_t high = (from & 0xF0) | (to >> 4);
-        const uint8_t low = ((from & 0x0F) << 4) | (to & 0x0F);
-        if (!used[high]) { used[high] = true; ++count; }
-        if (!used[low]) { used[low] = true; ++count; }
-      }
-    }
-    return count;
+    return lgfx_epd_stats::collect_rect(used, physical, target,
+        stride, panel_height, x, y, width, height);
   }
 
   static bool transitions_equal_for_used(
@@ -398,7 +381,7 @@ namespace lgfx
     }
   }
 
-  static size_t collect_active_groups_fullscreen(
+  __attribute__((optimize("O3"))) static size_t collect_active_groups_fullscreen(
       uint16_t* active_groups, size_t capacity,
       const uint8_t* physical, const uint8_t* target,
       size_t stride, size_t panel_height, const bool* driven)
@@ -728,6 +711,11 @@ namespace lgfx
     }
   }
 
+  struct du4_render_timing_t {
+    uint64_t clear_us = 0;
+    uint64_t pixels_us = 0;
+  };
+
   // DU4 has only four target buckets.  Collapse the two target nibbles to a
   // four-bit code and use a 4096-entry pair table instead of splitting and
   // looking up both pixels for every phase frame.  Exact unchanged 16-pixel
@@ -741,7 +729,8 @@ namespace lgfx
       uint16_t update_width, uint16_t update_height,
       const uint8_t* pair_lut, const uint8_t* target_code_lut,
       bool equal_pairs_idle,
-      const uint16_t* active_groups, size_t active_group_count)
+      const uint16_t* active_groups, size_t active_group_count,
+      du4_render_timing_t* timing = nullptr)
   {
     static constexpr uint8_t pair_shifts[8] = {
       4, 0, 12, 8, 20, 16, 28, 24
@@ -755,7 +744,10 @@ namespace lgfx
                           && scan_rows == panel_height;
 
     if (full_screen && active_groups != nullptr) {
+      const int64_t clear_begin = timing ? esp_timer_get_time() : 0;
       clear_du4_frame(output_frame, output_bytes);
+      const int64_t pixels_begin = timing ? esp_timer_get_time() : 0;
+      if (timing) timing->clear_us += pixels_begin - clear_begin;
       uint32_t* output = reinterpret_cast<uint32_t*>(output_frame);
       for (size_t active = 0; active < active_group_count; ++active) {
         const size_t group_index = active_groups[active];
@@ -774,12 +766,16 @@ namespace lgfx
         }
 #endif
       }
+      if (timing) timing->pixels_us += esp_timer_get_time() - pixels_begin;
       return;
     }
 
     if (!full_screen) {
+      const int64_t clear_begin = timing ? esp_timer_get_time() : 0;
       clear_du4_frame(output_frame, output_bytes);
+      if (timing) timing->clear_us += esp_timer_get_time() - clear_begin;
     }
+    const int64_t pixels_begin = timing ? esp_timer_get_time() : 0;
     const size_t byte_begin = full_screen ? 0
         : std::min<size_t>(update_x >> 1, stride);
     const size_t byte_end = full_screen ? stride : std::min<size_t>(
@@ -832,6 +828,7 @@ namespace lgfx
       }
 #endif
     }
+    if (timing) timing->pixels_us += esp_timer_get_time() - pixels_begin;
   }
 
   static constexpr int DU4_PIPELINE_MAX_PHASES = 64;
@@ -1804,6 +1801,19 @@ namespace lgfx
       du4_phase_pipeline_t du4_pipeline = {};
       animation_pipeline_t animation_pipeline = {};
       bool animation_deferred_source = false;
+      // Capture only on the power-on critical path; report after power-off
+      // and physical-state commit. In particular, preserve prime-only timing
+      // before the asynchronous producer updates its render counters.
+      struct {
+        bool valid = false;
+        bool fused = false;
+        bool reused = false;
+        uint64_t stats = 0, dedup = 0, workspace = 0, active = 0;
+        uint64_t prime = 0, worker = 0, precompute = 0;
+        uint64_t prime_lut = 0, prime_clear = 0, prime_pixels = 0;
+        size_t groups = 0, total_groups = 0, transitions = 0, bytes = 0;
+        int slots = 0, primed = 0;
+      } du4_prep;
 #if (defined(CONFIG_IDF_TARGET_ESP32P4) || defined(CONFIG_IDF_TARGET_ESP32S31)) \
  && MYPAPER_EPD_USE_2D_ENGINE && MYPAPER_EPD_2D_CONTINUOUS_SCAN \
  && MYPAPER_EPD_2D_PRECOMPUTE_WAVEFORM
@@ -1819,6 +1829,12 @@ namespace lgfx
       if (needs_phase_cache) {
         const int phase_count = selected.phases->phases;
         size_t used_transition_count = 256;
+        const int64_t stats_begin = esp_timer_get_time();
+        uint64_t stats_us = 0;
+        uint64_t dedup_us = 0;
+        uint64_t active_us = 0;
+        size_t fused_active_count = 0;
+        bool fused_stats = false;
 
 #if MYPAPER_EPD_2D_DU_PHASE_DEDUP
         if (selected.type == WAVEFORM_MODE_GC16
@@ -1835,10 +1851,29 @@ namespace lgfx
           if (phase_frame_map != nullptr && representative_phases != nullptr
            && unique_transitions != nullptr) {
             bool used_transitions[256];
-            used_transition_count = collect_used_transitions_4bpp(
-                used_transitions, me->_physical_buf, me->_target_buf,
-                stride, panel_h,
-                update.x, update.y, update.w, update.h);
+            const size_t total_groups = (memory_w >> 4) * scan_rows;
+            if (selected.type == WAVEFORM_MODE_DU4
+             && update.x == 0 && update.y == 0
+             && update.w == panel_w && update.h == panel_h
+             && panel_w == memory_w && scan_rows == panel_h
+             && memory_w % 16 == 0
+             && me->_du4_active_groups_2d != nullptr
+             && me->_du4_active_group_capacity_2d >= total_groups
+             && total_groups <= UINT16_MAX) {
+              bool driven[256];
+              build_driven_transition_mask(driven, selected.phases, selected.type);
+              used_transition_count = lgfx_epd_stats::collect(
+                  used_transitions, me->_du4_active_groups_2d, fused_active_count,
+                  me->_physical_buf, me->_target_buf, stride * panel_h, driven);
+              fused_stats = true;
+            } else {
+              used_transition_count = collect_used_transitions_4bpp(
+                  used_transitions, me->_physical_buf, me->_target_buf,
+                  stride, panel_h,
+                  update.x, update.y, update.w, update.h);
+            }
+            stats_us = esp_timer_get_time() - stats_begin;
+            const int64_t dedup_begin = esp_timer_get_time();
             cached_phase_count = 0;
             for (int phase = 0; phase < phase_count; ++phase) {
               const uint8_t* phase_lut = selected.phases->luts
@@ -1865,6 +1900,7 @@ namespace lgfx
               phase_frame_map[phase] = uint16_t(match);
             }
             deduplicated = true;
+            dedup_us = esp_timer_get_time() - dedup_begin;
           } else {
             ESP_LOGW(TAG_2D,
                      "DU phase dedup metadata allocation failed; using full phase cache");
@@ -1878,6 +1914,7 @@ namespace lgfx
         }
 #endif
 
+        const int64_t workspace_begin = esp_timer_get_time();
         const bool gc16_pair_renderer =
 #if MYPAPER_EPD_2D_GC16_PAIR_LUT
             (selected.type == WAVEFORM_MODE_GC16
@@ -2022,8 +2059,11 @@ namespace lgfx
         }
 
         const int64_t precompute_begin = esp_timer_get_time();
+        const uint64_t workspace_us = precompute_begin - workspace_begin;
         uint64_t pair_lut_build_us = 0;
         uint64_t phase_render_us = 0;
+        uint64_t du4_prime_lut_us = 0;
+        du4_render_timing_t du4_prime_timing;
         const size_t total_group_count = (memory_w >> 4) * scan_rows;
         size_t du4_active_group_count = total_group_count;
         const uint16_t* du4_active_groups = nullptr;
@@ -2034,6 +2074,10 @@ namespace lgfx
                                   && panel_w == memory_w
                                   && scan_rows == panel_h;
         if (du4_full_screen && me->_du4_active_groups_2d != nullptr) {
+          const int64_t active_begin = esp_timer_get_time();
+          if (fused_stats) {
+            du4_active_group_count = fused_active_count;
+          } else {
           bool driven_transitions[256];
           build_driven_transition_mask(
               driven_transitions, selected.phases, selected.type);
@@ -2042,6 +2086,8 @@ namespace lgfx
               me->_du4_active_group_capacity_2d,
               me->_physical_buf, me->_target_buf,
               stride, panel_h, driven_transitions);
+          }
+          active_us = esp_timer_get_time() - active_begin;
           // Clearing a complete frame is cheap, but sparse indexing stops
           // paying off when almost every 16-pixel group still needs work.
           if (du4_active_group_count * 8u < total_group_count * 7u) {
@@ -2114,6 +2160,8 @@ namespace lgfx
            && me->_du4_pair_lut_2d != nullptr) {
             const int64_t render_begin = esp_timer_get_time();
             build_du4_pair_lut(me->_du4_pair_lut_2d, render_transition);
+            if (du4_pipeline_active)
+              du4_prime_lut_us += esp_timer_get_time() - render_begin;
             render_du4_phase_frame(
                 phase_frames + size_t(cached) * phase_frame_bytes,
                 phase_frame_bytes, me->_physical_buf, me->_target_buf,
@@ -2122,7 +2170,8 @@ namespace lgfx
                 me->_du4_pair_lut_2d,
                 me->_du4_pair_lut_2d + DU4_PAIR_LUT_BYTES,
                 du4_equal_pairs_are_idle(render_transition),
-                du4_active_groups, du4_active_group_count);
+                du4_active_groups, du4_active_group_count,
+                du4_pipeline_active ? &du4_prime_timing : nullptr);
             phase_render_us += esp_timer_get_time() - render_begin;
           } else {
             const int64_t render_begin = esp_timer_get_time();
@@ -2183,6 +2232,7 @@ namespace lgfx
                    gc16_pipeline.external_stack ? "psram" : "internal");
         } else if (du4_pipeline_active) {
           du4_pipeline.frame_render_us = phase_render_us;
+          const int64_t worker_begin = esp_timer_get_time();
           const UBaseType_t current_priority = uxTaskPriorityGet(nullptr);
           const BaseType_t task_result = create_epd_pipeline_task(
               du4_phase_producer_task, "epd2d_du4", 4096,
@@ -2202,19 +2252,26 @@ namespace lgfx
             me->_physical_state_known = false;
             continue;
           }
-          ESP_LOGI(TAG_2D,
-                   "waveform pipeline primed before power-on: phases=%d cached=%d transitions=%u slots=%d primed=%d bytes=%u time=%lu.%03lu ms frame_render=%llu us renderer=du4-pair-lut-deferred workspace=%s active_groups=%u/%u path=%s stack=%s",
-                   phase_count, cached_phase_count,
-                   (unsigned)used_transition_count, phase_storage_count,
-                   initial_render_count, (unsigned)phase_cache_bytes,
-                   (unsigned long)(precompute_us / 1000),
-                   (unsigned long)(precompute_us % 1000),
-                   (unsigned long long)phase_render_us,
-                   du4_workspace_reused ? "reused" : "grown",
-                   (unsigned)du4_active_group_count,
-                   (unsigned)total_group_count,
-                   du4_active_groups != nullptr ? "sparse" : "full",
-                   du4_pipeline.external_stack ? "psram" : "internal");
+          const uint64_t worker_us = esp_timer_get_time() - worker_begin;
+          du4_prep.valid = true;
+          du4_prep.fused = fused_stats;
+          du4_prep.reused = du4_workspace_reused;
+          du4_prep.stats = stats_us;
+          du4_prep.dedup = dedup_us;
+          du4_prep.workspace = workspace_us;
+          du4_prep.active = active_us;
+          du4_prep.prime = phase_render_us;
+          du4_prep.prime_lut = du4_prime_lut_us;
+          du4_prep.prime_clear = du4_prime_timing.clear_us;
+          du4_prep.prime_pixels = du4_prime_timing.pixels_us;
+          du4_prep.worker = worker_us;
+          du4_prep.precompute = precompute_us;
+          du4_prep.groups = du4_active_group_count;
+          du4_prep.total_groups = total_group_count;
+          du4_prep.transitions = used_transition_count;
+          du4_prep.bytes = phase_cache_bytes;
+          du4_prep.slots = phase_storage_count;
+          du4_prep.primed = initial_render_count;
         } else {
           ESP_LOGI(TAG_2D,
                    "waveform preparation: stage=%s phases=%d cached=%d transitions=%u bytes=%u time=%lu.%03lu ms lut_build=%llu us frame_render=%llu us renderer=%s workspace=%s active_groups=%u/%u path=%s",
@@ -2719,6 +2776,25 @@ namespace lgfx
                  selected.phases->phases, (unsigned)retained);
       } else {
         me->_physical_state_known = false;
+      }
+      if (du4_prep.valid) {
+        ESP_LOGI(TAG_2D,
+                 "DU4 prep summary (after refresh): stats=%llu dedup=%llu workspace=%llu active=%llu prime=%llu prime_lut=%llu prime_clear=%llu prime_pixels=%llu worker=%llu precompute=%llu us fused=%u reused=%u primed=%d slots=%d transitions=%u groups=%u/%u bytes=%u scan_ok=%u",
+                 (unsigned long long)du4_prep.stats,
+                 (unsigned long long)du4_prep.dedup,
+                 (unsigned long long)du4_prep.workspace,
+                 (unsigned long long)du4_prep.active,
+                 (unsigned long long)du4_prep.prime,
+                 (unsigned long long)du4_prep.prime_lut,
+                 (unsigned long long)du4_prep.prime_clear,
+                 (unsigned long long)du4_prep.prime_pixels,
+                 (unsigned long long)du4_prep.worker,
+                 (unsigned long long)du4_prep.precompute,
+                 (unsigned)du4_prep.fused, (unsigned)du4_prep.reused,
+                 du4_prep.primed, du4_prep.slots,
+                 (unsigned)du4_prep.transitions,
+                 (unsigned)du4_prep.groups, (unsigned)du4_prep.total_groups,
+                 (unsigned)du4_prep.bytes, (unsigned)scan_ok);
       }
     }
   }
