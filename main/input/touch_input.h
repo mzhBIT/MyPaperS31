@@ -11,6 +11,10 @@ enum class TouchEventType {
     SwipeUp,
     SwipeDown,
     Back,
+    SwipeUpLeft,
+    SwipeUpRight,
+    SwipeDownLeft,
+    SwipeDownRight,
 };
 
 enum class BackSwipeEdge {

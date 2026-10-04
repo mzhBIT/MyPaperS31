@@ -1238,23 +1238,23 @@ public:
                 else begin_wallpaper_save();
                 return true;
             }
-            if (event.type == TouchEventType::SwipeLeft) {
-                next_article_page();
-                return true;
-            }
-            if (event.type == TouchEventType::SwipeRight) {
-                prev_article_page();
+            const int swipe_page=reader_swipe_page_direction(event);
+            if (swipe_page) {
+                _swipe_animation=reader_swipe_animation(event);
+                if (swipe_page>0) next_article_page(); else prev_article_page();
+                _swipe_animation=0;
                 return true;
             }
             if (event.type != TouchEventType::Tap) return false;
             int w = M5.Display.width();
-            if (event.x >= w / 3 && event.x <= (w * 2) / 3) {
+            const auto tap=reader_tap_action(event.x,event.y,w,M5.Display.height());
+            if (!tap.page) {
                 _reader_overlay.open(ReaderOverlay::Tab::Settings);
                 _reader_overlay.redraw();
-            } else if (event.x > w / 2) {
-                next_article_page();
             } else {
-                prev_article_page();
+                _swipe_animation=tap.animation;
+                if (tap.page>0) next_article_page(); else prev_article_page();
+                _swipe_animation=0;
             }
             return true;
         }
@@ -1315,6 +1315,7 @@ private:
     uint32_t _image_load_generation = 0;
     std::vector<RssImageRef> _pending_image_refs;
     ReaderOverlay _reader_overlay;
+    int _swipe_animation=0;
     ReaderAutoPage _auto_page;
     ReaderFrameCache _article_frame;
     ReaderFrameHistory _article_frames;
@@ -2730,7 +2731,8 @@ private:
             system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::LastPage), M5.Display.width() / 2, M5.Display.height() - 50);
         }
         if (_reader_overlay.visible()) _reader_overlay.draw();
-        reader_request_page_animation(_reader_overlay.visible() ? 0 : direction, mode, ReaderProfile::Rss);
+        reader_request_page_animation(_reader_overlay.visible() ? 0 :
+            (direction && _swipe_animation ? _swipe_animation : direction), mode, ReaderProfile::Rss);
         M5.Display.display();
         M5.Display.endWrite();
         if (mode != default_mode) M5.Display.setEpdMode(default_mode);

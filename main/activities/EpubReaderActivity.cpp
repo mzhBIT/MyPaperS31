@@ -568,14 +568,10 @@ public:
             return true;
         }
         if (!_ok) return false;
-        if (event.type == TouchEventType::SwipeLeft) {
-            next_page();
-            mark_progress_dirty();
-            redraw(w, h);
-            return true;
-        }
-        if (event.type == TouchEventType::SwipeRight) {
-            prev_page();
+        const int swipe_page=reader_swipe_page_direction(event);
+        if (swipe_page) {
+            if (swipe_page>0) next_page(); else prev_page();
+            if (_page_turn_direction) _page_turn_direction=reader_swipe_animation(event);
             mark_progress_dirty();
             redraw(w, h);
             return true;
@@ -593,15 +589,17 @@ public:
             ActivityManager::instance().pop();
             return true;
         }
-        if (event.x >= w / 3 && event.x <= (w * 2) / 3) {
+        const auto tap=reader_tap_action(event.x,event.y,w,h);
+        if (!tap.page) {
             _overlay.open(ReaderOverlay::Tab::Settings);
             _overlay.redraw();
             return true;
-        } else if (event.x > w / 2) {
+        } else if (tap.page>0) {
             next_page();
         } else {
             prev_page();
         }
+        if (_page_turn_direction) _page_turn_direction=tap.animation;
         mark_progress_dirty();
         redraw(w, h);
         return true;

@@ -1,6 +1,8 @@
 #pragma once
 #include "ui/reader_style.h"
 #include <M5Unified.h>
+#include "ui/ReaderSwipe.h"
+#include "ui/ReaderTap.h"
 
 inline void reader_request_page_animation(int direction, epd_mode_t mode,
                                          ReaderProfile profile = ReaderProfile::Shared)

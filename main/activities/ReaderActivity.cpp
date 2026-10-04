@@ -212,6 +212,7 @@ class ReaderActivity : public Activity {
     bool m_seen_show = false;
     BookReadingTimer m_reading_timer;
     ReaderOverlay m_overlay;
+    int m_swipe_animation=0;
     ReaderAutoPage m_auto_page;
     int m_non_quality_refresh_count = 0;
     ReaderFrameCache m_frame;
@@ -298,12 +299,11 @@ public:
             ActivityManager::instance().pop();
             return true;
         }
-        if (event.type == TouchEventType::SwipeLeft) {
-            next_page(w, h);
-            return true;
-        }
-        if (event.type == TouchEventType::SwipeRight) {
-            prev_page(w, h);
+        const int swipe_page=reader_swipe_page_direction(event);
+        if (swipe_page) {
+            m_swipe_animation=reader_swipe_animation(event);
+            if (swipe_page>0) next_page(w,h); else prev_page(w,h);
+            m_swipe_animation=0;
             return true;
         }
         if (event.type == TouchEventType::LongPress) {
@@ -317,13 +317,14 @@ public:
             ActivityManager::instance().pop();
             return true;
         }
-        if (event.x >= w / 3 && event.x <= (w * 2) / 3) {
+        const auto tap=reader_tap_action(event.x,event.y,w,h);
+        if (!tap.page) {
             m_overlay.open(ReaderOverlay::Tab::Settings);
             m_overlay.redraw();
-        } else if (event.x > w / 2) {
-            next_page(w, h);
         } else {
-            prev_page(w, h);
+            m_swipe_animation=tap.animation;
+            if (tap.page>0) next_page(w,h); else prev_page(w,h);
+            m_swipe_animation=0;
         }
         return true;
     }
@@ -416,7 +417,8 @@ public:
         if (!imported) draw_content(w, h);
         if (m_overlay.visible()) m_overlay.draw();
         int64_t t3 = esp_timer_get_time();
-        reader_request_page_animation(m_overlay.visible() ? 0 : direction, mode);
+        reader_request_page_animation(m_overlay.visible() ? 0 :
+            (direction && m_swipe_animation ? m_swipe_animation : direction), mode);
         M5.Display.display();
         int64_t t4 = esp_timer_get_time();
         M5.Display.endWrite();

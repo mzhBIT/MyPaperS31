@@ -56,7 +56,7 @@ namespace lgfx
       uint16_t h;
       epd_mode_t mode;
       int8_t animation_direction;
-      lgfx_epd_page_turn::Rect animation_bands[lgfx_epd_page_turn::bands];
+      uint8_t animation_rotation;
     };
 
     struct selected_waveform_t {
@@ -89,6 +89,9 @@ namespace lgfx
     volatile bool _physical_state_known = false;
     int _temperature_c = 25;
     int8_t _next_animation_direction = 0;
+    // Lazy geometry-only caches. Owned solely by task_update, like DU4 workspace.
+    // Panel lifetime is process lifetime; shutdown teardown remains passive.
+    lgfx_epd_page_turn::Layout _animation_layouts_2d[8]{};
   };
 
  }

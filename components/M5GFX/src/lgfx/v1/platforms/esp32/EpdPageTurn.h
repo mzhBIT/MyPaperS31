@@ -13,6 +13,149 @@ constexpr int local_phase(int phase, int logical_band, int direction)
     return phase - (direction > 0 ? bands-1-logical_band : logical_band)*stagger;
 }
 
+inline bool valid_direction(int direction) { return direction && direction>=-4 && direction<=4; }
+inline const char *direction_name(int direction) {
+    switch (direction) {
+    case 1: return "right-to-left"; case -1: return "left-to-right";
+    case 2: return "bottom-to-top"; case -2: return "top-to-bottom";
+    case 3: return "bottom-right-to-top-left"; case -3: return "top-left-to-bottom-right";
+    case 4: return "bottom-left-to-top-right"; case -4: return "top-right-to-bottom-left";
+    default: return "off";
+    }
+}
+
+// One band per physical 16-pixel bus group. Never split or rearrange packed
+// drive bytes. Projection in logical screen coordinates supports all rotations.
+inline int projected_band(int px,int py,int width,int height,int rotation,int direction) {
+    int x=px,y=py;
+    if ((1<<rotation)&0b11000110) x=width-1-x;
+    if ((1<<rotation)&0b10011100) y=height-1-y;
+    if (rotation&1) { const int t=x; x=y; y=t; }
+    const int w=(rotation&1)?height:width, h=(rotation&1)?width:height;
+    int position=0,extent=1;
+    switch (direction) {
+    case 1: position=w-1-x; extent=w; break;
+    case -1: position=x; extent=w; break;
+    case 2: position=h-1-y; extent=h; break;
+    case -2: position=y; extent=h; break;
+    case 3: position=w-1-x+h-1-y; extent=w+h-1; break;
+    case -3: position=x+y; extent=w+h-1; break;
+    case 4: position=x+h-1-y; extent=w+h-1; break;
+    case -4: position=w-1-x+y; extent=w+h-1; break;
+    }
+    return position*bands/extent;
+}
+inline void make_band_map(uint8_t *out,int width,int height,int rotation,int direction) {
+    for (int y=0;y<height;++y)
+        for (int group=0;group<width/16;++group)
+            out[size_t(y)*(width/16)+group]=uint8_t(projected_band(group*16+8,y,width,height,rotation,direction));
+}
+inline void compose_projected(uint8_t *out,size_t frame_bytes,size_t width,
+                             const uint8_t *base,const uint16_t *map,
+                             int waveform_phases,int phase,const uint8_t *band_map) {
+    std::memset(out,0,frame_bytes);
+    const size_t groups=width/16,rows=frame_bytes/(width/4);
+    for (size_t y=0;y<rows;++y) {
+        size_t first=0;
+        while (first<groups) {
+            const int band=band_map[y*groups+first];
+            size_t end=first+1;
+            while (end<groups && band_map[y*groups+end]==band) ++end;
+            const int local=phase-band*stagger;
+            if (local>=0 && local<waveform_phases) {
+                const size_t offset=(y*groups+first)*4;
+                const uint8_t *src=base+size_t(map?map[local]:local)*frame_bytes;
+                std::memcpy(out+offset,src+offset,(end-first)*4);
+            }
+            first=end;
+        }
+    }
+}
+
+struct Span { uint16_t first=0, count=0; }; // Whole 16-pixel groups.
+enum class LayoutKind { RowBlocks, ColumnBlocks, DiagonalRows };
+struct Layout {
+    int width=0,height=0,rotation=0,direction=0;
+    LayoutKind kind=LayoutKind::RowBlocks;
+    Rect rects[bands]{};
+    Span *rows=nullptr; // PSRAM, height * bands; diagonal directions only.
+    bool matches(int w,int h,int r,int d) const {
+        return width==w && height==h && rotation==r && direction==d;
+    }
+};
+inline bool prepare_layout(Layout &layout,int width,int height,int rotation,int direction,Span *rows) {
+    if (!valid_direction(direction) || rotation<0 || rotation>=8 || width<=0 || width%16 || height<=0) return false;
+    Layout next;
+    next.width=width; next.height=height; next.rotation=rotation; next.direction=direction;
+    if (direction>=-2 && direction<=2) {
+        const bool full_rows=projected_band(8,0,width,height,rotation,direction)==
+                             projected_band(width-8,0,width,height,rotation,direction);
+        next.kind=full_rows ? LayoutKind::RowBlocks : LayoutKind::ColumnBlocks;
+        const int length=full_rows ? height : width/16;
+        int first=0;
+        while (first<length) {
+            const int band=projected_band(full_rows?8:first*16+8,full_rows?first:0,width,height,rotation,direction);
+            int end=first+1;
+            while (end<length && projected_band(full_rows?8:end*16+8,full_rows?end:0,width,height,rotation,direction)==band) ++end;
+            next.rects[band]=full_rows ? Rect{0,uint16_t(first),uint16_t(width),uint16_t(end-first)}
+                                     : Rect{uint16_t(first*16),0,uint16_t((end-first)*16),uint16_t(height)};
+            first=end;
+        }
+    } else {
+        if (!rows) return false;
+        next.kind=LayoutKind::DiagonalRows; next.rows=rows;
+        for (int y=0;y<height;++y) {
+            for (int band=0;band<bands;++band) rows[size_t(y)*bands+band]=Span{};
+            for (int group=0;group<width/16;++group) {
+                const int band=projected_band(group*16+8,y,width,height,rotation,direction);
+                auto &span=rows[size_t(y)*bands+band];
+                if (!span.count) span.first=uint16_t(group);
+                ++span.count;
+            }
+        }
+    }
+    layout=next;
+    return true;
+}
+inline void write_span(uint8_t *out,const uint8_t *src,size_t offset,size_t bytes) {
+    if (src) std::memcpy(out+offset,src+offset,bytes);
+    else std::memset(out+offset,0,bytes); // Neutral drive, not a white pixel.
+}
+// Two disjoint passes: copy active bands, zero only inactive bands. Together
+// they write every output byte exactly once, even in a reused/dirty buffer.
+// Separate passes retain clear/copy timings without timers in row loops.
+inline void copy_layout(uint8_t *out,size_t frame_bytes,const uint8_t *base,const uint16_t *map,
+                        int waveform_phases,int phase,const Layout &layout,bool neutral_only=false) {
+    const size_t stride=size_t(layout.width)/4;
+    for (int band=0;band<bands;++band) {
+        const int local=phase-band*stagger;
+        const bool active=local>=0 && local<waveform_phases;
+        if (active==neutral_only) continue;
+        const uint8_t *src=active ? base+size_t(map?map[local]:local)*frame_bytes : nullptr;
+        if (layout.kind==LayoutKind::RowBlocks) {
+            const auto &r=layout.rects[band];
+            if (r.h) write_span(out,src,size_t(r.y)*stride,size_t(r.h)*stride);
+        } else if (layout.kind==LayoutKind::ColumnBlocks) {
+            const auto &r=layout.rects[band];
+            if (!r.w) continue;
+            for (int y=0;y<layout.height;++y) {
+                const size_t offset=size_t(y)*stride+r.x/4;
+                write_span(out,src,offset,r.w/4);
+            }
+        } else {
+            for (int y=0;y<layout.height;++y) {
+                const auto &span=layout.rows[size_t(y)*bands+band];
+                if (!span.count) continue;
+                const size_t offset=size_t(y)*stride+size_t(span.first)*4;
+                write_span(out,src,offset,size_t(span.count)*4);
+            }
+        }
+    }
+}
+inline void clear_inactive_layout(uint8_t *out,size_t frame_bytes,int waveform_phases,int phase,const Layout &layout) {
+    copy_layout(out,frame_bytes,nullptr,nullptr,waveform_phases,phase,layout,true);
+}
+
 // Copy only whole 16-pixel bus groups: their packed/permuted byte order stays intact.
 inline bool valid_rects(const Rect *rects, size_t width, size_t height)
 {

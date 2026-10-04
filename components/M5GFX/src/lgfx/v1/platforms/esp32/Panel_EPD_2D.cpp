@@ -1511,7 +1511,8 @@ namespace lgfx
     _next_animation_direction = 0;
     if (direction == 0) return true;
     if (displayBusy()) return false;
-    _next_animation_direction = direction > 0 ? 1 : -1;
+    if (!lgfx_epd_page_turn::valid_direction(direction)) return false;
+    _next_animation_direction = direction;
     return true;
   }
 
@@ -1553,21 +1554,9 @@ namespace lgfx
       .h = uint16_t(_range_mod.bottom - _range_mod.top + 1),
       .mode = _epd_mode,
       .animation_direction = _next_animation_direction,
-      .animation_bands = {},
+      .animation_rotation = uint8_t(_internal_rotation),
     };
     _next_animation_direction = 0;
-    if (update.animation_direction != 0) {
-      const uint_fast16_t logical_w = (_internal_rotation & 1) ? _cfg.panel_height : _cfg.panel_width;
-      const uint_fast16_t logical_h = (_internal_rotation & 1) ? _cfg.panel_width : _cfg.panel_height;
-      for (int band=0; band<lgfx_epd_page_turn::bands; ++band) {
-        uint_fast16_t bx = band*logical_w/lgfx_epd_page_turn::bands;
-        uint_fast16_t by = 0;
-        uint_fast16_t ex = (band+1)*logical_w/lgfx_epd_page_turn::bands-1;
-        uint_fast16_t ey = logical_h-1;
-        _rotate_pos(bx, by, ex, ey);
-        update.animation_bands[band] = {uint16_t(bx), uint16_t(by), uint16_t(ex-bx+1), uint16_t(ey-by+1)};
-      }
-    }
 
     // The sprite writeback deliberately does NOT happen here. It is a long,
     // non-interruptible walk over PSRAM, and this function runs on whichever
@@ -1686,7 +1675,8 @@ namespace lgfx
           selected.type == WAVEFORM_MODE_DU4 && selected.phases->phases == 15 &&
           panel_w == memory_w && scan_rows == panel_h &&
           me->_cfg.offset_x == 0 && me->_cfg.offset_y == 0 &&
-          lgfx_epd_page_turn::valid_rects(update.animation_bands, panel_w, panel_h);
+          panel_w%16 == 0 && update.animation_rotation<8 &&
+          lgfx_epd_page_turn::valid_direction(update.animation_direction);
 #endif
       if (animation_requested) {
         update.x = 0; update.y = 0; update.w = panel_w; update.h = panel_h;
@@ -2175,20 +2165,48 @@ namespace lgfx
       if (animation_requested && phase_frames != nullptr) {
         const int count = lgfx_epd_page_turn::phases(selected.phases->phases);
         const size_t bytes = size_t(count)*me->_scan_frame_bytes_2d;
+        const int64_t alloc_begin=esp_timer_get_time();
         animation_frames = static_cast<uint8_t*>(heap_caps_aligned_alloc(
             64, bytes, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
-        if (animation_frames != nullptr) {
-          const int64_t begin = esp_timer_get_time();
+        const int64_t alloc_done=esp_timer_get_time();
+        const int direction=update.animation_direction;
+        const int slot=direction>0 ? direction-1 : 4-direction-1;
+        auto &layout=me->_animation_layouts_2d[slot];
+        const bool layout_cached=layout.matches(memory_w,scan_rows,update.animation_rotation,direction);
+        bool layout_ready=layout_cached;
+        if (animation_frames && !layout_cached) {
+          heap_caps_free(layout.rows); layout=lgfx_epd_page_turn::Layout{};
+          auto *rows=(direction>2 || direction<-2) ?
+              static_cast<lgfx_epd_page_turn::Span*>(heap_caps_malloc(
+                  size_t(scan_rows)*lgfx_epd_page_turn::bands*sizeof(lgfx_epd_page_turn::Span),
+                  MALLOC_CAP_8BIT|MALLOC_CAP_SPIRAM)) : nullptr;
+          layout_ready=lgfx_epd_page_turn::prepare_layout(layout,memory_w,scan_rows,
+              update.animation_rotation,direction,rows);
+          if (!layout_ready) heap_caps_free(rows);
+        }
+        const int64_t layout_done=esp_timer_get_time();
+        if (animation_frames != nullptr && layout_ready) {
+          int64_t zero_us=0,copy_us=0;
           for (int phase=0; phase<count; ++phase) {
-            lgfx_epd_page_turn::compose(animation_frames+size_t(phase)*me->_scan_frame_bytes_2d,
-                me->_scan_frame_bytes_2d, memory_w, phase_frames, phase_frame_map,
-                selected.phases->phases, phase, update.animation_direction, update.animation_bands);
+            auto *out=animation_frames+size_t(phase)*me->_scan_frame_bytes_2d;
+            const int64_t zero_begin=esp_timer_get_time();
+            lgfx_epd_page_turn::clear_inactive_layout(out,me->_scan_frame_bytes_2d,
+                selected.phases->phases,phase,layout);
+            const int64_t copy_begin=esp_timer_get_time();
+            lgfx_epd_page_turn::copy_layout(out,me->_scan_frame_bytes_2d,phase_frames,phase_frame_map,
+                selected.phases->phases,phase,layout);
+            const int64_t copy_done=esp_timer_get_time();
+            zero_us+=copy_begin-zero_begin; copy_us+=copy_done-copy_begin;
           }
           sequence_phases = count;
-          ESP_LOGI(TAG_2D, "page turn prepared: direction=%s bands=4 stagger=3 phases=%d bytes=%u compose=%lld us",
-              update.animation_direction>0 ? "right-to-left" : "left-to-right",
-              count, unsigned(bytes), (long long)(esp_timer_get_time()-begin));
+          ESP_LOGI(TAG_2D, "page turn prepared: direction=%s bands=4 stagger=3 phases=%d bytes=%u compose=%lld us alloc=%lld layout=%lld zero=%lld copy=%lld us layout_cache=%d path=%s zero_scope=inactive",
+              lgfx_epd_page_turn::direction_name(direction),count,unsigned(bytes),
+              (long long)(esp_timer_get_time()-alloc_done),(long long)(alloc_done-alloc_begin),
+              (long long)(layout_done-alloc_done),(long long)zero_us,(long long)copy_us,
+              layout_cached?1:0,layout.kind==lgfx_epd_page_turn::LayoutKind::RowBlocks ? "row-blocks" :
+              layout.kind==lgfx_epd_page_turn::LayoutKind::ColumnBlocks ? "column-blocks" : "diagonal-spans");
         } else {
+          heap_caps_free(animation_frames); animation_frames=nullptr;
           ESP_LOGW(TAG_2D, "page turn cache allocation failed: bytes=%u; using normal DU4", unsigned(bytes));
         }
       }

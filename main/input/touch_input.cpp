@@ -108,6 +108,11 @@ TouchEventType classify_swipe(int dx, int dy)
 {
     int adx = abs_i(dx);
     int ady = abs_i(dy);
+    if (adx > SWIPE_MAX_OFF_AXIS_PX && ady > SWIPE_MAX_OFF_AXIS_PX &&
+        std::min(adx,ady)*1000 >= std::max(adx,ady)*414) {
+        return dy<0 ? (dx<0 ? TouchEventType::SwipeUpLeft : TouchEventType::SwipeUpRight)
+                    : (dx<0 ? TouchEventType::SwipeDownLeft : TouchEventType::SwipeDownRight);
+    }
     if (adx >= SWIPE_MIN_DISTANCE_PX && ady <= SWIPE_MAX_OFF_AXIS_PX) {
         return dx < 0 ? TouchEventType::SwipeLeft : TouchEventType::SwipeRight;
     }
@@ -121,6 +126,11 @@ TouchEventType classify_swipe_with_limits(int dx, int dy, int min_distance, int 
 {
     int adx = abs_i(dx);
     int ady = abs_i(dy);
+    if (adx >= min_distance && ady >= min_distance && adx>max_off_axis && ady>max_off_axis &&
+        std::min(adx,ady)*1000 >= std::max(adx,ady)*414) {
+        return dy<0 ? (dx<0 ? TouchEventType::SwipeUpLeft : TouchEventType::SwipeUpRight)
+                    : (dx<0 ? TouchEventType::SwipeDownLeft : TouchEventType::SwipeDownRight);
+    }
     if (adx >= min_distance && ady <= max_off_axis) {
         return dx < 0 ? TouchEventType::SwipeLeft : TouchEventType::SwipeRight;
     }
