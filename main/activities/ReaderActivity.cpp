@@ -4,6 +4,7 @@
 #include "activities/ReaderOverlay.h"
 #include "ui/ReaderAutoPage.h"
 #include "ui/ReaderPageAnimation.h"
+#include "ui/ReaderOpening.h"
 #include "parser/txt_parser.h"
 #include "recent_books.h"
 #include "reader_style.h"
@@ -564,5 +565,8 @@ private:
 };
 
 void launch_reader(const char *path) {
-    ActivityManager::instance().push(new ReaderActivity(path));
+    ReaderOpeningWhite opening;
+    auto *activity = new ReaderActivity(path);
+    opening.finish();
+    ActivityManager::instance().push(activity);
 }

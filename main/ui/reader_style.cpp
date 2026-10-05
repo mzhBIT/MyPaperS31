@@ -403,7 +403,7 @@ const char *reader_style_refresh_mode_name(int mode)
     case 5:
         return "HD";
     default:
-        return "Fast";
+        return "Text";
     }
 }
 
@@ -411,7 +411,7 @@ int reader_style_next_refresh_mode(int mode, int delta)
 {
     static constexpr int kOrder[] = {4, 3, 2, 5, 1};
     // Fastest, Fast, Text, HD, Quality.
-    int index = 1; // Default to Fast if the stored value is invalid.
+    int index = 2; // Default to Text if the stored value is invalid.
     for (int i = 0; i < (int)(sizeof(kOrder) / sizeof(kOrder[0])); ++i) {
         if (kOrder[i] == mode) {
             index = i;

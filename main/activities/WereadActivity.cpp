@@ -8,10 +8,12 @@
 #include "ui/SystemFont.h"
 #include "ui/HeaderLayout.h"
 #include "ui/UiLocale.h"
+#include "ui/ReaderOpening.h"
 #include "weread/WereadApi.h"
 #include "weread/WereadCrypto.h"
 #include "weread/WereadQr.h"
 #include "weread/WereadStore.h"
+#include "weread/WereadOffline.h"
 #include "wifi/wifi_setting.h"
 
 #include <M5Unified.h>
@@ -31,7 +33,8 @@
 #include <vector>
 #include <sys/stat.h>
 
-extern void launch_weread_reader(const char *path, int initial_spine);
+extern void launch_weread_reader(const char *path, int initial_spine,
+                                 ReaderOpeningWhite *opening);
 
 namespace {
 
@@ -160,7 +163,7 @@ void weread_task(void *argument)
         if (weread::store::load_chapters(job->book.id, &cached->chapters, &cached->format)) {
             weread::store::save_manifest(job->book, cached->chapters, cached->format);
             cached->cached = true;
-            cached->offline = !wifi_setting_is_connected();
+            cached->offline = weread::offline_mode() || !wifi_setting_is_connected();
             send_final(job.get(), std::move(cached), external_stack);
         }
     }
@@ -182,6 +185,10 @@ void weread_task(void *argument)
         }
     }
 
+    if (weread::offline_mode()) {
+        send_final(job.get(), error_result(job->kind == WorkKind::LoadChapter
+            ? "Chapter is not cached; connect online to download" : "Unavailable offline"), external_stack);
+    }
     if (wifi_setting_connect_saved(CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS) != ESP_OK) {
         if (job->kind == WorkKind::LoadCovers) {
             auto result = std::make_unique<WorkResult>();
@@ -203,6 +210,11 @@ void weread_task(void *argument)
                    external_stack);
     }
 
+    if (*job->cancelled) {
+        auto cancelled = std::make_unique<WorkResult>();
+        cancelled->kind = ResultKind::Cancelled;
+        send_final(job.get(), std::move(cancelled), external_stack);
+    }
     weread::HttpClient client;
     if (job->kind == WorkKind::LoadCovers) {
         auto result = std::make_unique<WorkResult>();
@@ -332,6 +344,16 @@ void weread_task(void *argument)
     }
 
     std::string shelf_error;
+    auto fallback_offline_shelf = [&]() {
+        if (job->kind != WorkKind::LoadShelf || *job->cancelled) return;
+        auto cached = std::make_unique<WorkResult>();
+        cached->kind = ResultKind::Shelf;
+        if (!weread::store::load_shelf(&cached->books)) return;
+        cached->cached = true;
+        cached->offline = true;
+        ESP_LOGI(TAG, "online shelf unavailable; using offline cache");
+        send_final(job.get(), std::move(cached), external_stack, &client);
+    };
     auto load_shelf = [&]() -> std::unique_ptr<WorkResult> {
         auto result = std::make_unique<WorkResult>();
         result->kind = ResultKind::Shelf;
@@ -346,12 +368,19 @@ void weread_task(void *argument)
         if (shelf) send_final(job.get(), std::move(shelf), external_stack, &client);
     }
     if (client.session().valid() && shelf_error != "login expired") {
+        fallback_offline_shelf();
         send_final(job.get(), error_result(shelf_error.empty() ? "Shelf loading failed" : shelf_error),
                    external_stack, &client);
     }
 
+    if (*job->cancelled) {
+        auto cancelled = std::make_unique<WorkResult>();
+        cancelled->kind = ResultKind::Cancelled;
+        send_final(job.get(), std::move(cancelled), external_stack, &client);
+    }
     std::string uid, login_url, error;
     if (!api.create_login(&uid, &login_url, &error)) {
+        fallback_offline_shelf();
         send_final(job.get(), error_result(error), external_stack, &client);
     }
     auto qr = std::make_unique<WorkResult>();
@@ -376,6 +405,7 @@ void weread_task(void *argument)
             sync_pending_progress();
             auto shelf = load_shelf();
             if (shelf) send_final(job.get(), std::move(shelf), external_stack, &client);
+            fallback_offline_shelf();
             send_final(job.get(), error_result("Login succeeded, but shelf loading failed"),
                        external_stack, &client);
         } else {
@@ -399,6 +429,8 @@ std::string localized_weread_error(const std::string &message)
         {"Login view closed", TextId::LoginViewClosed},
         {"Login succeeded, but shelf loading failed", TextId::LoginShelfFailed},
         {"Login failed", TextId::LoginFailed},
+        {"Chapter is not cached; connect online to download", TextId::WeReadChapterNotCached},
+        {"Unavailable offline", TextId::WeReadOfflineUnavailable},
         {"QR code expired", TextId::QrExpired},
     };
     for (const auto &entry : known) {
@@ -455,6 +487,7 @@ class WereadActivity final : public Activity {
 public:
     ~WereadActivity() override
     {
+        weread::set_offline_mode(false);
         _cancelled = true;
         if (_queue) {
             WorkResult *result = nullptr;
@@ -470,16 +503,37 @@ public:
     void on_create() override
     {
         _queue = xQueueCreate(3, sizeof(WorkResult *));
+        weread::set_offline_mode(false);
+        // Keep cached metadata ready for the QR offline button, but always
+        // attempt online sync first. Cache reads never validate the Cookie.
+        weread::store::load_shelf(&_books);
         start_work(WorkKind::LoadShelf, {});
     }
 
     void loop() override
     {
+        if (_view == View::OfflineNotice) {
+            if (esp_timer_get_time() >= _offline_notice_until_us) {
+                _busy = false;
+                _view = View::Shelf;
+                draw_shelf();
+            }
+            return;
+        }
         if (!_queue) return;
         WorkResult *raw = nullptr;
         if (xQueueReceive(_queue, &raw, 0) != pdTRUE) return;
         std::unique_ptr<WorkResult> result(raw);
+        if (_enter_offline_when_done && result->kind != ResultKind::LoginQr) {
+            _task = nullptr;
+            _busy = false;
+            _cover_prefetch_active = false;
+            _enter_offline_when_done = false;
+            enter_offline();
+            return;
+        }
         if (result->kind == ResultKind::LoginQr) {
+            if (_enter_offline_when_done) return;
             _view = View::Login;
             _login_url = std::move(result->login_url);
             draw_login();
@@ -529,7 +583,9 @@ public:
             _reviews.shrink_to_fit();
             _books.clear();
             _books.shrink_to_fit();
-            launch_weread_reader(result->reader_path.c_str(), result->reader_spine);
+            launch_weread_reader(result->reader_path.c_str(), result->reader_spine,
+                                 _reader_opening.get());
+            _reader_opening.reset();
             return;
         }
         if (result->kind == ResultKind::Shelf) {
@@ -539,10 +595,21 @@ public:
             _view = View::Shelf;
             _cached = result->cached;
             _offline = result->offline;
+            if (_offline) weread::set_offline_mode(true);
             _cover_pages_attempted.clear();
             _cover_prefetch_disabled = false;
             restore_selected_book_shelf_page();
-            draw_shelf();
+            if (_offline) {
+                _view = View::OfflineNotice;
+                _busy = true;
+                draw_loading(ui_locale::text(ui_locale::TextId::WeReadNetworkFailedOffline));
+                // Keep the notice visible after scanout without blocking the
+                // activity loop or losing the Back action.
+                M5.Display.waitDisplay();
+                _offline_notice_until_us = esp_timer_get_time() + 1500000;
+            } else {
+                draw_shelf();
+            }
         } else if (result->kind == ResultKind::Catalog) {
             _chapters = std::move(result->chapters);
             _format = std::move(result->format);
@@ -583,7 +650,7 @@ public:
                     weread::store::load_pending_progress(&pending) &&
                     pending.book_id == _selected_book.id;
                 const bool resume_saved = has_local &&
-                    (local_is_pending || cloud_spine < 0 || cloud_spine == local_spine);
+                    (weread::offline_mode() || local_is_pending || cloud_spine < 0 || cloud_spine == local_spine);
                 const int resume_spine = resume_saved ? local_spine :
                     (cloud_spine >= 0 ? cloud_spine : 0);
                 ESP_LOGI(TAG, "resume book: source=%s spine=%d/%u cloud=%d%%",
@@ -629,7 +696,7 @@ public:
                 _books.clear();
                 weread::store::load_shelf(&_books);
                 _cached = true;
-                _offline = !wifi_setting_is_connected();
+                _offline = weread::offline_mode() || !wifi_setting_is_connected();
                 ESP_LOGI(TAG, "reader returned: catalog restored chapters=%u",
                          static_cast<unsigned>(_chapters.size()));
                 draw_catalog();
@@ -659,7 +726,7 @@ public:
                     }
                 }
                 _cached = true;
-                _offline = !wifi_setting_is_connected();
+                _offline = weread::offline_mode() || !wifi_setting_is_connected();
                 _cover_pages_attempted.clear();
                 _cover_prefetch_disabled = false;
                 restore_selected_book_shelf_page();
@@ -677,6 +744,12 @@ public:
 
     bool on_touch(const TouchEvent &event) override
     {
+        if (event.type == TouchEventType::Tap && event.y >= 920 && event.y < 1010 &&
+            (_view == View::Login || _view == View::Error) &&
+            !_books.empty()) {
+            enter_offline();
+            return true;
+        }
         if (_book_menu_visible) return book_menu_touch(event);
         if (event.type == TouchEventType::Back ||
             (event.type == TouchEventType::Tap && header_layout::left_hit(event.x, event.y, 110))) {
@@ -685,6 +758,7 @@ public:
         }
         if (_busy) return true;
         if (_view == View::Error && event.type == TouchEventType::Tap) {
+            weread::set_offline_mode(false);
             start_work(WorkKind::LoadShelf, {});
             return true;
         }
@@ -704,7 +778,7 @@ public:
     bool allow_system_back() const override { return !_busy; }
 
 private:
-    enum class View { Loading, Login, Shelf, Catalog, Reviews, ReviewDetail, Error };
+    enum class View { Loading, Login, Shelf, Catalog, Reviews, ReviewDetail, Error, OfflineNotice };
     struct PendingWork {
         bool valid = false;
         WorkKind kind = WorkKind::LoadShelf;
@@ -720,6 +794,8 @@ private:
     bool _busy = false;
     bool _exit_when_done = false;
     bool _offline = false;
+    int64_t _offline_notice_until_us = 0;
+    bool _enter_offline_when_done = false;
     bool _cached = false;
     bool _reader_open = false;
     bool _resume_after_catalog = false;
@@ -741,9 +817,55 @@ private:
     std::vector<weread::Book> _books;
     std::vector<weread::Chapter> _chapters;
     std::vector<weread::Review> _reviews;
+    std::unique_ptr<ReaderOpeningWhite> _reader_opening;
+
+    void draw_offline_button()
+    {
+        if (_books.empty()) return;
+        M5.Display.drawRoundRect(80, 920, M5.Display.width() - 160, 90, 10, TFT_BLACK);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::WeReadOffline),
+                                 M5.Display.width() / 2, 944, TFT_BLACK);
+    }
+
+    void enter_offline()
+    {
+        if (_task) {
+            // Wait for the worker to release its queue/client before changing
+            // policy or opening a reader. Never forcibly delete a live worker.
+            _enter_offline_when_done = true;
+            _cancelled = true;
+            _pending_work = PendingWork();
+            _view = View::Loading;
+            draw_loading(ui_locale::text(ui_locale::TextId::Cancelling));
+            return;
+        }
+        if (!weread::store::load_shelf(&_books)) {
+            _view = View::Error;
+            _status = ui_locale::text(ui_locale::TextId::WeReadNoOfflineShelf);
+            draw_error();
+            return;
+        }
+        weread::set_offline_mode(true);
+        _cancelled = false;
+        _busy = false;
+        _exit_when_done = false;
+        _offline = _cached = true;
+        _resume_after_catalog = false;
+        _return_to_shelf_after_reader = false;
+        _book_menu_visible = false;
+        _view = View::Shelf;
+        restore_selected_book_shelf_page();
+        draw_shelf();
+    }
 
     void begin_frame(epd_mode_t mode = epd_mode_t::epd_text)
     {
+        // Any error/cancel/catalog screen must finish the outstanding white
+        // scan before it changes panel mode or writes the shared framebuffer.
+        if (_reader_opening) {
+            _reader_opening->finish();
+            _reader_opening.reset();
+        }
         M5.Display.startWrite();
         M5.Display.setEpdMode(mode);
         M5.Display.fillScreen(TFT_WHITE);
@@ -759,7 +881,12 @@ private:
     {
         begin_frame(epd_mode_t::epd_quality);
         draw_header(ui_locale::text(ui_locale::TextId::WeRead));
-        system_font::draw_center(M5.Display, message, M5.Display.width() / 2, 500, TFT_BLACK);
+        const auto lines = wrap_text(message, M5.Display.width() - 80);
+        const int line_height = system_font::line_height() + 10;
+        for (size_t i = 0; i < lines.size(); ++i) {
+            system_font::draw_center(M5.Display, lines[i], M5.Display.width() / 2,
+                                     500 + static_cast<int>(i) * line_height, TFT_BLACK);
+        }
         end_frame();
     }
 
@@ -776,6 +903,7 @@ private:
                                  M5.Display.width() / 2, 760, TFT_BLACK);
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::WaitingForConfirmation),
                                  M5.Display.width() / 2, 820, TFT_BLACK);
+        draw_offline_button();
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::TapBackToCancel), M5.Display.width() / 2,
                                  1060, TFT_DARKGRAY);
         end_frame();
@@ -965,6 +1093,7 @@ private:
         }
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::TapToRetry), M5.Display.width() / 2,
                                  first_y + static_cast<int>(lines.size()) * line_height + 45, TFT_BLACK);
+        draw_offline_button();
         end_frame();
     }
 
@@ -1095,6 +1224,31 @@ private:
                     int review_list_type = 3)
     {
         if (!_queue) return;
+        bool cached_reader_open = false;
+        if (kind == WorkKind::LoadCatalog && _resume_after_catalog) {
+            std::vector<weread::Chapter> cached_chapters;
+            std::string cached_format;
+            cached_reader_open = weread::store::load_chapters(
+                book.id, &cached_chapters, &cached_format) && !cached_chapters.empty();
+        } else if (kind == WorkKind::LoadChapter && chapter_index >= 0 &&
+                   chapter_index < static_cast<int>(_chapters.size())) {
+            struct stat epub_info = {};
+            cached_reader_open =
+                (stat(weread::store::epub_payload_path(book.id).c_str(), &epub_info) == 0 &&
+                 epub_info.st_size > 0) ||
+                weread::store::chapter_cached(book.id, _chapters[static_cast<size_t>(chapter_index)]);
+        }
+        auto show_work_feedback = [&]() {
+            if (cached_reader_open) {
+                // One white acknowledgement spans cached catalog lookup,
+                // resume selection and reader construction. No status redraw.
+                if (!_reader_opening)
+                    _reader_opening = std::make_unique<ReaderOpeningWhite>();
+            } else if (show_loading) {
+                draw_loading(work_loading_message(kind));
+                M5.Display.waitDisplay();
+            }
+        };
         if (_task) {
             if (_cover_prefetch_active) {
                 _cancelled = true;
@@ -1106,9 +1260,7 @@ private:
                 _pending_work.review_list_type = review_list_type;
                 _busy = true;
                 _view = View::Loading;
-                if (show_loading) {
-                    draw_loading(work_loading_message(kind));
-                }
+                show_work_feedback();
             }
             return;
         }
@@ -1117,10 +1269,7 @@ private:
         _cancelled = false;
         _exit_when_done = false;
         _view = View::Loading;
-        if (show_loading) {
-            draw_loading(work_loading_message(kind));
-            M5.Display.waitDisplay();
-        }
+        show_work_feedback();
 
         auto *job = new WorkJob;
         job->kind = kind;
@@ -1154,7 +1303,7 @@ private:
 
     void schedule_cover_prefetch()
     {
-        if (!_queue || _task || _busy || _cover_prefetch_disabled ||
+        if (weread::offline_mode() || !_queue || _task || _busy || _cover_prefetch_disabled ||
             _view != View::Shelf || _books.empty()) return;
         const int total_pages = std::max(1, static_cast<int>((_books.size() + LIST_ROWS - 1) / LIST_ROWS));
         if (static_cast<int>(_cover_pages_attempted.size()) != total_pages) {
@@ -1210,6 +1359,19 @@ private:
 
     void go_back()
     {
+        if (_view == View::OfflineNotice) {
+            ActivityManager::instance().pop();
+            return;
+        }
+        if (_enter_offline_when_done) {
+            _enter_offline_when_done = false;
+            _exit_when_done = true;
+            return;
+        }
+        if (_view == View::Error && weread::offline_mode()) {
+            enter_offline();
+            return;
+        }
         if (_book_menu_visible) {
             _book_menu_visible = false;
             draw_shelf();

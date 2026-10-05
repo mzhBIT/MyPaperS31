@@ -722,6 +722,17 @@ constexpr Translation kText[] = {
     {"Page animation (test)", "翻页动画（实验）", "翻頁動畫（實驗）"},
     {"Fast", "快", "快"},
     {"Slow", "慢", "慢"},
+    {"Restore defaults", "恢复默认设置", "恢復預設設定"},
+    {"Reset configuration and restart", "重置全部配置并重启", "重設全部設定並重新啟動"},
+    {"Clear Wi-Fi, keys and preferences?", "清除 Wi-Fi、应用密钥与偏好？", "清除 Wi-Fi、應用金鑰與偏好？"},
+    {"Books and history will be kept", "保留书籍、阅读记录与消息历史", "保留書籍、閱讀紀錄與訊息歷史"},
+    {"Reset & restart", "恢复并重启", "恢復並重新啟動"},
+    {"Reset incomplete; please retry", "恢复未完成，请重试", "恢復未完成，請重試"},
+    {"Offline reading", "离线阅读", "離線閱讀"},
+    {"No offline shelf; sync online first", "没有离线书架，请先联网同步", "沒有離線書架，請先連網同步"},
+    {"Chapter is not cached; connect online to download", "本章未缓存，请联网下载后阅读", "本章未快取，請連網下載後閱讀"},
+    {"Unavailable offline", "离线模式下不可用", "離線模式下不可用"},
+    {"Connection failed. Entering offline reading mode", "联网失败，进入离线阅读模式", "連網失敗，進入離線閱讀模式"},
 };
 static_assert(sizeof(kText) / sizeof(kText[0]) == static_cast<size_t>(TextId::Count));
 

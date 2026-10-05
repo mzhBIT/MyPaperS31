@@ -12,6 +12,8 @@
 #include "map/MapCache.h"
 #include "activities/OfflineMapPickerActivity.h"
 #include "storage/app_paths.h"
+#include "storage/settings_reset.h"
+#include <esp_system.h>
 #include "time/time_basis.h"
 #include "ui/SystemFont.h"
 #include "ui/HeaderLayout.h"
@@ -41,8 +43,8 @@ constexpr int PAD = 20;
 constexpr int SETTINGS_ROW_Y = HEADER_H;
 constexpr int SETTINGS_ROW_H = 110;
 constexpr int SETTINGS_ROW_GAP = 0;
-constexpr int SETTINGS_ITEM_COUNT = 8;
-constexpr int SETTINGS_VISIBLE_ROWS = 8;
+constexpr int SETTINGS_ITEM_COUNT = 9;
+constexpr int SETTINGS_VISIBLE_ROWS = 9;
 
 constexpr int SCAN_TOP = HEADER_H;
 constexpr int SCAN_ROW_H = 92;
@@ -1392,7 +1394,6 @@ private:
         };
         for (int i = 0; i < 3; ++i) {
             const int top = ROW_Y + i * ROW_H;
-            if (i == 0) M5.Display.drawFastHLine(PAD, top, width - 2 * PAD, TFT_BLACK);
             M5.Display.drawFastHLine(PAD, top + ROW_H - 1, width - 2 * PAD, TFT_BLACK);
             if (i == _focus) M5.Display.fillRect(PAD + 2, top + 22, 5, ROW_H - 44, TFT_BLACK);
             system_font::draw_left(M5.Display, titles[i], PAD + 20, top + 30, TFT_BLACK);
@@ -1555,7 +1556,6 @@ private:
         draw_header(text(TextId::AppSettings));
         for (int i = 0; i < 2; ++i) {
             const int top = ROW_Y + i * ROW_H;
-            if (i == 0) M5.Display.drawFastHLine(PAD, top, width - 2 * PAD, TFT_BLACK);
             M5.Display.drawFastHLine(PAD, top + ROW_H - 1, width - 2 * PAD, TFT_BLACK);
             if (i == _focus) M5.Display.fillRect(PAD + 2, top + 22, 5, ROW_H - 44, TFT_BLACK);
             system_font::draw_left(M5.Display, titles[i], PAD + 20, top + 30, TFT_BLACK);
@@ -1565,6 +1565,74 @@ private:
             system_font::draw_right(M5.Display, ">", width - PAD - 20,
                                     top + 58, TFT_BLACK);
         }
+        M5.Display.display();
+        M5.Display.endWrite();
+    }
+};
+
+class RestoreDefaultsActivity final : public Activity {
+public:
+    void on_create() override { draw(); }
+    bool on_touch(const TouchEvent &event) override
+    {
+        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+            ActivityManager::instance().pop();
+            return true;
+        }
+        if (event.type != TouchEventType::Tap) return false;
+        if (event.y >= 420 && event.y < 520) {
+            if (event.x < M5.Display.width() / 2) ActivityManager::instance().pop();
+            else restore();
+        }
+        return true;
+    }
+    bool on_key(int key) override
+    {
+        if (key == APP_KEY_BACK) ActivityManager::instance().pop();
+        else if (key == APP_KEY_UP || key == APP_KEY_DOWN) { _confirm = !_confirm; draw(); }
+        else if (key == APP_KEY_OK) {
+            if (_confirm) restore();
+            else ActivityManager::instance().pop();
+        } else return false;
+        return true;
+    }
+private:
+    bool _confirm = false; // Confirmation defaults to Cancel.
+    bool _failed = false;
+    void restore()
+    {
+        M5.Display.waitDisplay();
+        const esp_err_t result = settings_restore_defaults();
+        if (result == ESP_OK) esp_restart();
+        ESP_LOGE(TAG, "restore defaults failed: %s", esp_err_to_name(result));
+        _failed = true;
+        _confirm = false;
+        draw();
+    }
+    void draw()
+    {
+        using ui_locale::TextId;
+        using ui_locale::text;
+        const int width = M5.Display.width();
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
+        M5.Display.fillScreen(TFT_WHITE);
+        draw_header(text(TextId::RestoreDefaults));
+        system_font::draw_center(M5.Display, text(TextId::RestoreDefaultsWarning), width / 2, 150, TFT_BLACK);
+        system_font::draw_center(M5.Display, text(TextId::RestoreDefaultsKeep), width / 2, 230, TFT_BLACK);
+        system_font::draw_center(M5.Display, text(TextId::RestoreDefaultsDetail), width / 2, 310, TFT_BLACK);
+        const int button_w = (width - 60) / 2;
+        for (int i = 0; i < 2; ++i) {
+            const int x = 20 + i * (button_w + 20);
+            const bool selected = (_confirm ? 1 : 0) == i;
+            M5.Display.fillRect(x, 420, button_w, 100, selected ? TFT_BLACK : TFT_WHITE);
+            M5.Display.drawRect(x, 420, button_w, 100, TFT_BLACK);
+            system_font::draw_center(M5.Display,
+                text(i ? TextId::RestoreDefaultsRestart : TextId::Cancel),
+                x + button_w / 2, 420 + (100 - system_font::line_height()) / 2,
+                selected ? TFT_WHITE : TFT_BLACK);
+        }
+        if (_failed) system_font::draw_center(M5.Display, text(TextId::RestoreDefaultsFailed), width / 2, 570, TFT_BLACK);
         M5.Display.display();
         M5.Display.endWrite();
     }
@@ -1671,7 +1739,8 @@ private:
         else if (_focus == 4) launch_epd_diagnostics();
         else if (_focus == 5) ActivityManager::instance().push(new RssCacheSettingsActivity());
         else if (_focus == 6) ActivityManager::instance().push(new DateTimeSettingsActivity());
-        else {
+        else if (_focus == 8) ActivityManager::instance().push(new RestoreDefaultsActivity());
+        else if (_focus == 7) {
             const bool enabled = !home_icon_frames_enabled();
             const esp_err_t result = home_set_icon_frames_enabled(enabled);
             if (result != ESP_OK) {
@@ -1689,9 +1758,8 @@ private:
         if (index < _first_visible || index >= _first_visible + SETTINGS_VISIBLE_ROWS) return;
         const int top = SETTINGS_ROW_Y + (index - _first_visible) * (SETTINGS_ROW_H + SETTINGS_ROW_GAP);
         const bool selected = index == _focus;
-        if (index == _first_visible) {
-            M5.Display.drawFastHLine(PAD, top, width - PAD * 2, TFT_BLACK);
-        }
+        // The header owns the top separator. Drawing another at this row's
+        // top (one pixel below it) makes the middle of that line twice as thick.
         M5.Display.drawFastHLine(PAD, top + SETTINGS_ROW_H - 1,
                                 width - PAD * 2, TFT_BLACK);
         if (selected) {
@@ -1738,6 +1806,7 @@ private:
         draw_item(6, text(TextId::DateAndTime), time_basis_label());
         draw_item(7, text(TextId::HomeIconFrames),
                   home_icon_frames_enabled() ? text(TextId::On) : text(TextId::Off), false);
+        draw_item(8, text(TextId::RestoreDefaults), text(TextId::RestoreDefaultsDetail));
         M5.Display.display();
         M5.Display.endWrite();
     }

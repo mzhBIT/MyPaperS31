@@ -1,4 +1,5 @@
 #include "weread/WereadHttpClient.h"
+#include "weread/WereadOffline.h"
 #include "wifi/wifi_setting.h"
 
 #include <esp_crt_bundle.h>
@@ -413,6 +414,11 @@ HttpResponse HttpClient::request(const char *method, const std::string &url,
                                  bool persist_response_cookies, bool account_headers,
                                  const std::string *bearer, bool send_cookies)
 {
+    if (offline_mode()) {
+        HttpResponse blocked;
+        blocked.error = "Offline mode";
+        return blocked;
+    }
     HttpResponse response = perform_once(method, url, body, referer, html_response,
                                          persist_response_cookies, account_headers, bearer,
                                          send_cookies);

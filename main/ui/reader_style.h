@@ -9,8 +9,8 @@ struct ReaderStyle {
     int margin_right = 20;
     int margin_top = 5;
     int margin_bottom = 10;
-    int refresh_mode = 3;
-    int show_images = 0;
+    int refresh_mode = 2;           // epd_text
+    int show_images = 1;
     int first_line_indent = 2;      // Full-width character cells.
     int paragraph_spacing = 0;      // Tenths of a line: 0..20 means 0.0..2.0 lines.
     int full_refresh_pages = 30;    // Force one quality refresh after this many non-quality page refreshes.

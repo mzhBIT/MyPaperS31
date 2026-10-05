@@ -52,6 +52,7 @@ set(srcs
     "ui/home_preferences.cpp"
     "ui/music_icons_1bpp.cpp"
     "storage/app_paths.cpp"
+    "storage/settings_reset.cpp"
     "storage/storage_sdcard.c"
     "wifi/wifi_setting.c"
     "waveforms/my_waveform.c"

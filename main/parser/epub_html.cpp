@@ -1,4 +1,10 @@
 #include "parser/epub_html.h"
+#ifdef ESP_PLATFORM
+#include "utils/CooperativeYield.h"
+#else
+// Keep the parser available to standalone host regression tests.
+struct CooperativeYield { void ifDue() {} };
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -87,16 +93,23 @@ static void append_utf8(uint32_t cp, std::string *out)
 
 static std::string decode_entities(const std::string &s)
 {
+    CooperativeYield cooperative;
     std::string out;
     out.reserve(s.size());
 
     for (size_t i = 0; i < s.size();) {
+        if ((i & 4095u) == 0) cooperative.ifDue();
         if (s[i] != '&') {
             out.push_back(s[i++]);
             continue;
         }
 
-        size_t semi = s.find(';', i + 1);
+        // The accepted entity is <=16 bytes; searching the entire remaining
+        // chapter first is quadratic for many bare ampersands.
+        const size_t limit = std::min(s.size(), i + 17);
+        size_t semi = i + 1;
+        while (semi < limit && s[semi] != ';') ++semi;
+        if (semi == limit) semi = std::string::npos;
         if (semi == std::string::npos || semi - i > 16) {
             out.push_back(s[i++]);
             continue;
@@ -243,10 +256,12 @@ static int parse_positive_px(const std::string &value)
 
 static void append_normalized_text(const std::string &raw, std::string *current)
 {
+    CooperativeYield cooperative;
     std::string decoded = decode_entities(raw);
     bool last_space = current->empty() || current->back() == ' ' || current->back() == '\n';
 
     for (size_t i = 0; i < decoded.size(); ++i) {
+        if ((i & 4095u) == 0) cooperative.ifDue();
         unsigned char c = (unsigned char)decoded[i];
         if (std::isspace(c)) {
             if (!last_space) {
@@ -273,9 +288,11 @@ static std::string normalized_link_target(const std::string &item_href, const st
 
 static std::string plain_text_from_html(const std::string &html)
 {
+    CooperativeYield cooperative;
     std::string text;
     size_t pos = 0;
     while (pos < html.size()) {
+        cooperative.ifDue();
         const size_t tag = html.find('<', pos);
         if (tag == std::string::npos) {
             append_normalized_text(html.substr(pos), &text);
@@ -309,6 +326,7 @@ static void remember_footnote_definition(
 static std::unordered_map<std::string, std::string> collect_footnote_definitions(
     const std::string &xhtml, const std::string &item_href)
 {
+    CooperativeYield cooperative;
     std::unordered_map<std::string, std::string> definitions;
     std::string lower = xhtml;
     std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
@@ -316,6 +334,7 @@ static std::unordered_map<std::string, std::string> collect_footnote_definitions
     });
     size_t pos = 0;
     while ((pos = xhtml.find('<', pos)) != std::string::npos) {
+        cooperative.ifDue();
         const size_t tag_end = xhtml.find('>', pos + 1);
         if (tag_end == std::string::npos) break;
         const std::string raw = xhtml.substr(pos + 1, tag_end - pos - 1);
@@ -332,20 +351,21 @@ static std::unordered_map<std::string, std::string> collect_footnote_definitions
                 const std::string close = "</" + name;
                 const size_t close_start = lower.find(close, tag_end + 1);
                 if (close_start != std::string::npos) {
-                    const std::string inner = xhtml.substr(tag_end + 1, close_start - tag_end - 1);
                     // Avoid flattening/scanning a chapter-sized root <div>.
                     // Genuine footnotes are small; 12 KB leaves ample markup
                     // overhead for the 6 KB cleaned-text limit below.
-                    if (inner.size() > 12000) {
+                    if (close_start - tag_end - 1 > 12000) {
                         pos = tag_end + 1;
                         continue;
                     }
+                    const std::string inner = xhtml.substr(tag_end + 1, close_start - tag_end - 1);
                     remember_footnote_definition(&definitions, item_href, id, inner);
 
                     // A number of local EPUB generators put the target id on
                     // a child <a>/<span> instead of the enclosing note block.
                     size_t inner_pos = 0;
                     while ((inner_pos = inner.find('<', inner_pos)) != std::string::npos) {
+                        cooperative.ifDue();
                         const size_t inner_end = inner.find('>', inner_pos + 1);
                         if (inner_end == std::string::npos) break;
                         std::string child_name;
@@ -468,6 +488,7 @@ static bool image_html_looks_like_footnote(const std::string &inner)
 static std::unordered_set<std::string> collect_footnote_reference_targets(
     const std::string &xhtml, const std::string &item_href)
 {
+    CooperativeYield cooperative;
     std::unordered_set<std::string> targets;
     std::string lower = xhtml;
     std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
@@ -475,6 +496,7 @@ static std::unordered_set<std::string> collect_footnote_reference_targets(
     });
     size_t pos = 0;
     while ((pos = lower.find("<a", pos)) != std::string::npos) {
+        cooperative.ifDue();
         if (pos + 2 < lower.size() && !std::isspace(static_cast<unsigned char>(lower[pos + 2])) &&
             lower[pos + 2] != '>') {
             pos += 2;
@@ -592,10 +614,14 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
     if (!blocks) return false;
     blocks->clear();
 
+    CooperativeYield cooperative;
+
     std::string current;
     std::string base = dirname_of(item_href);
     const auto footnote_definitions = collect_footnote_definitions(xhtml, item_href);
+    cooperative.ifDue();
     const auto footnote_targets = collect_footnote_reference_targets(xhtml, item_href);
+    cooperative.ifDue();
     std::vector<EpubFootnoteRef> pending_footnotes;
     int64_t source_delta = 0;
     std::vector<EpubSourcePoint> pending_source_points;
@@ -629,6 +655,7 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
     size_t pos = 0;
 
     while (pos < xhtml.size()) {
+        cooperative.ifDue();
         size_t tag_start = xhtml.find('<', pos);
         if (tag_start == std::string::npos) {
             if (skip_depth == 0) append_text(xhtml.substr(pos));

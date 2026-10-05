@@ -10,6 +10,7 @@
 namespace weread {
 
 inline constexpr const char *ANNOTATION_COMMENT_SEPARATOR = "\x1eWR_COMMENT\x1e";
+inline constexpr const char *ANNOTATION_LIKES_SEPARATOR = "\x1eWR_LIKES\x1e";
 
 struct Book {
     std::string id;

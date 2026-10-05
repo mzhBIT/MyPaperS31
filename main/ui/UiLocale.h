@@ -717,6 +717,17 @@ enum class TextId : uint16_t {
     PageAnimation,
     AnimationFast,
     AnimationSlow,
+    RestoreDefaults,
+    RestoreDefaultsDetail,
+    RestoreDefaultsWarning,
+    RestoreDefaultsKeep,
+    RestoreDefaultsRestart,
+    RestoreDefaultsFailed,
+    WeReadOffline,
+    WeReadNoOfflineShelf,
+    WeReadChapterNotCached,
+    WeReadOfflineUnavailable,
+    WeReadNetworkFailedOffline,
     Count,
 };
 

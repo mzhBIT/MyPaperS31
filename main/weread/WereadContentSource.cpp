@@ -1,4 +1,7 @@
 #include "weread/WereadContentSource.h"
+#include "weread/WereadOffline.h"
+#include "weread/AnnotationBoundaryIndex.h"
+#include "utils/CooperativeYield.h"
 
 #include "parser/epub_parser.h"
 #include "parser/epub_zip.h"
@@ -198,12 +201,13 @@ bool parse_annotation_range(const std::string &range, size_t *start, size_t *end
     return true;
 }
 
-std::vector<size_t> utf8_offsets(const std::string &text)
+std::vector<size_t> utf8_offsets(const std::string &text, CooperativeYield &cooperative)
 {
     std::vector<size_t> offsets;
     offsets.reserve(text.size() / 2 + 1);
     size_t position = 0;
     while (position < text.size()) {
+        if ((offsets.size() & 4095u) == 0) cooperative.ifDue();
         offsets.push_back(position);
         const uint8_t lead = static_cast<uint8_t>(text[position]);
         size_t length = lead < 0x80 ? 1 : (lead < 0xE0 ? 2 : (lead < 0xF0 ? 3 : 4));
@@ -214,7 +218,8 @@ std::vector<size_t> utf8_offsets(const std::string &text)
     return offsets;
 }
 
-std::string wrap_annotation_text(const std::string &fragment, const std::string &range)
+std::string wrap_annotation_text(const std::string &fragment, const std::string &range,
+                                 CooperativeYield &cooperative)
 {
     std::string output;
     output.reserve(fragment.size() + 96);
@@ -224,6 +229,7 @@ std::string wrap_annotation_text(const std::string &fragment, const std::string 
         if (begin >= end) return;
         bool visible = false;
         for (size_t i = begin; i < end; ++i) {
+            if ((i & 4095u) == 0) cooperative.ifDue();
             if (!std::isspace(static_cast<unsigned char>(fragment[i]))) { visible = true; break; }
         }
         if (!visible) {
@@ -237,6 +243,7 @@ std::string wrap_annotation_text(const std::string &fragment, const std::string 
         output += "</span>";
     };
     for (size_t i = 0; i < fragment.size(); ++i) {
+        if ((i & 4095u) == 0) cooperative.ifDue();
         if (!in_tag && fragment[i] == '<') {
             append_text(text_start, i);
             in_tag = true;
@@ -252,54 +259,23 @@ std::string wrap_annotation_text(const std::string &fragment, const std::string 
     return output;
 }
 
-void snap_annotation_boundaries(const std::string &html, size_t *start, size_t *end)
-{
-    if (!start || !end || *start >= *end || *end > html.size()) return;
-    const size_t open_before_start = *start ? html.rfind('<', *start - 1) : std::string::npos;
-    const size_t close_before_start = *start ? html.rfind('>', *start - 1) : std::string::npos;
-    if (open_before_start != std::string::npos &&
-        (close_before_start == std::string::npos || open_before_start > close_before_start)) {
-        const size_t close = html.find('>', *start);
-        if (close == std::string::npos || close + 1 >= *end) { *start = *end; return; }
-        *start = close + 1;
-    }
-    const size_t open_before_end = *end ? html.rfind('<', *end - 1) : std::string::npos;
-    const size_t close_before_end = *end ? html.rfind('>', *end - 1) : std::string::npos;
-    if (open_before_end != std::string::npos &&
-        (close_before_end == std::string::npos || open_before_end > close_before_end)) {
-        *end = open_before_end;
-    }
-
-    const size_t amp_before_start = *start ? html.rfind('&', *start - 1) : std::string::npos;
-    const size_t semi_before_start = *start ? html.rfind(';', *start - 1) : std::string::npos;
-    if (amp_before_start != std::string::npos &&
-        (semi_before_start == std::string::npos || amp_before_start > semi_before_start) &&
-        *start - amp_before_start <= 12) {
-        const size_t semi = html.find(';', *start);
-        if (semi != std::string::npos && semi + 1 < *end) *start = semi + 1;
-    }
-    const size_t amp_before_end = *end ? html.rfind('&', *end - 1) : std::string::npos;
-    const size_t semi_before_end = *end ? html.rfind(';', *end - 1) : std::string::npos;
-    if (amp_before_end != std::string::npos &&
-        (semi_before_end == std::string::npos || amp_before_end > semi_before_end) &&
-        *end - amp_before_end <= 12) {
-        *end = amp_before_end;
-    }
-}
-
 void inject_annotations(const std::vector<ChapterAnnotation> &annotations, std::string *xhtml)
 {
     if (!xhtml || xhtml->empty() || annotations.empty()) return;
-    const std::vector<size_t> offsets = utf8_offsets(*xhtml);
+    const int64_t begin_us = esp_timer_get_time();
+    CooperativeYield cooperative;
+    const std::vector<size_t> offsets = utf8_offsets(*xhtml, cooperative);
+    const AnnotationBoundaryIndex boundaries(*xhtml, [&] { cooperative.ifDue(); });
     struct Replacement { size_t start; size_t end; std::string range; };
     std::vector<Replacement> replacements;
     replacements.reserve(annotations.size());
     for (const auto &annotation : annotations) {
+        cooperative.ifDue();
         size_t start = 0, end = 0;
         if (!parse_annotation_range(annotation.range, &start, &end) || end >= offsets.size()) continue;
         size_t byte_start = offsets[start];
         size_t byte_end = offsets[end];
-        snap_annotation_boundaries(*xhtml, &byte_start, &byte_end);
+        boundaries.snap(&byte_start, &byte_end);
         if (byte_start < byte_end) replacements.push_back({byte_start, byte_end, annotation.range});
     }
     std::sort(replacements.begin(), replacements.end(), [](const Replacement &a, const Replacement &b) {
@@ -309,15 +285,20 @@ void inject_annotations(const std::vector<ChapterAnnotation> &annotations, std::
     output.reserve(xhtml->size() + replacements.size() * 96);
     size_t copied = 0;
     for (const auto &replacement : replacements) {
+        cooperative.ifDue();
         if (replacement.start < copied || replacement.start >= replacement.end ||
             replacement.end > xhtml->size()) continue;
         output.append(*xhtml, copied, replacement.start - copied);
         output += wrap_annotation_text(
-            xhtml->substr(replacement.start, replacement.end - replacement.start), replacement.range);
+            xhtml->substr(replacement.start, replacement.end - replacement.start), replacement.range,
+            cooperative);
         copied = replacement.end;
     }
     output.append(*xhtml, copied, xhtml->size() - copied);
     *xhtml = std::move(output);
+    ESP_LOGI(TAG, "underline injection ranges=%u bytes=%u time=%lld ms",
+             static_cast<unsigned>(annotations.size()), static_cast<unsigned>(xhtml->size()),
+             (esp_timer_get_time() - begin_us) / 1000);
 }
 
 bool chapter_from_epub(const std::string &path, const Chapter &chapter, std::string *out)
@@ -340,6 +321,10 @@ bool load_chapter_content(const std::string &book_id, const Chapter &chapter,
     const std::string epub_path = store::epub_payload_path(book_id);
     const bool epub_cached = chapter_from_epub(epub_path, chapter, xhtml);
     const bool chapter_cached = epub_cached || store::chapter_cached(book_id, chapter, &kind, &path);
+    if (offline_mode() && !chapter_cached) {
+        if (error) *error = "Chapter is not cached; connect online to download";
+        return false;
+    }
     const bool comments_enabled = store::public_comments_enabled();
     const bool annotations_missing = comments_enabled &&
                                      !store::annotations_cached(book_id, chapter);
@@ -349,7 +334,7 @@ bool load_chapter_content(const std::string &book_id, const Chapter &chapter,
     // cached chapter could permanently miss its underline markers.  Backfill a
     // missing range cache without making an already cached chapter unavailable
     // when the device happens to be offline.
-    if (!chapter_cached || annotations_missing) {
+    if (!offline_mode() && (!chapter_cached || annotations_missing)) {
         const bool online =
             wifi_setting_connect_saved(CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS) == ESP_OK;
         if (!online && !chapter_cached) {
@@ -461,7 +446,7 @@ bool extract_resource(const std::string &book_id, const Chapter *chapter,
             const std::string package_key = md5_hex(
                 reinterpret_cast<const uint8_t *>(chapter->uid.data()), chapter->uid.size());
             const std::string package_path = resource_dir + "/" + package_key + ".pkg";
-            if (!file_exists(package_path) &&
+            if (!offline_mode() && !file_exists(package_path) &&
                 wifi_setting_connect_saved(CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS) == ESP_OK) {
                 HttpClient client;
                 const std::string url = absolute_resource_url(chapter->resource_url);
@@ -496,7 +481,7 @@ bool extract_resource(const std::string &book_id, const Chapter *chapter,
         }
         return false;
     }
-    if (wifi_setting_connect_saved(CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS) != ESP_OK) return false;
+    if (offline_mode() || wifi_setting_connect_saved(CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS) != ESP_OK) return false;
     HttpClient client;
     HttpResponse response = client.get(href);
     const bool ok = response.ok() && store::save_response_file(out_path, response.data(), response.size());

@@ -4,6 +4,8 @@
 #include "activities/ReaderOverlay.h"
 #include "ui/ReaderAutoPage.h"
 #include "ui/ReaderPageAnimation.h"
+#include "ui/ReaderOpening.h"
+#include "ui/weread_icons.h"
 #include "parser/epub_html.h"
 #include "parser/markdown_parser.h"
 #include "parser/reflow_book.h"
@@ -22,6 +24,7 @@
 #include "ui/reader_background.h"
 #include "weread/WereadApi.h"
 #include "weread/WereadHttpClient.h"
+#include "weread/WereadOffline.h"
 #include "weread/WereadStore.h"
 
 #include <M5Unified.h>
@@ -2635,6 +2638,7 @@ private:
     struct FootnotePopupLine {
         std::string text;
         bool separator = false;
+        bool likes = false;
     };
 
     std::vector<FootnotePopupLine> footnote_popup_lines(int text_width)
@@ -2646,10 +2650,30 @@ private:
             const size_t end = _footnote_popup_annotation
                 ? _footnote_popup_text.find(separator, begin)
                 : std::string::npos;
-            const std::string part = _footnote_popup_text.substr(
+            std::string part = _footnote_popup_text.substr(
                 begin, end == std::string::npos ? std::string::npos : end - begin);
+            std::string likes;
+            if (_footnote_popup_annotation) {
+                // Recognize cached old responses as well as the new structured marker.
+                const std::string marker = weread::ANNOTATION_LIKES_SEPARATOR;
+                size_t pos = part.rfind(marker);
+                size_t length = marker.size();
+                if (pos == std::string::npos) {
+                    pos = part.rfind("  Likes ");
+                    length = 8;
+                }
+                if (pos != std::string::npos) {
+                    const std::string count = part.substr(pos + length);
+                    if (!count.empty() && std::all_of(count.begin(), count.end(),
+                        [](char c) { return c >= '0' && c <= '9'; })) {
+                        likes = count;
+                        part.resize(pos);
+                    }
+                }
+            }
             const auto wrapped = reader_text_renderer().layoutUtf8Paragraph(part, text_width, 0);
             for (const auto &line : wrapped) output.push_back({line.text, false});
+            if (!likes.empty()) output.push_back({likes, false, true});
             if (end == std::string::npos) break;
             output.push_back({{}, true});
             begin = end + separator.size();
@@ -2708,7 +2732,7 @@ private:
                                 const weread::ChapterAnnotation &annotation,
                                 bool append)
     {
-        if (!weread::store::public_comments_enabled()) return;
+        if (weread::offline_mode() || !weread::store::public_comments_enabled()) return;
         if (_annotation_loading || _annotation_task || _pending_annotation_job ||
             !_annotation_result_queue || !_annotation_done) return;
         const auto *chapter = g_epub.weread_chapter(_spine_index);
@@ -2894,7 +2918,8 @@ private:
             } else {
                 annotation.range = range;
                 _footnote_popup_annotation_data = annotation;
-                _footnote_popup_text = ui_locale::text(ui_locale::TextId::CommentsLoading);
+                _footnote_popup_text = ui_locale::text(weread::offline_mode()
+                    ? ui_locale::TextId::WeReadOfflineUnavailable : ui_locale::TextId::CommentsLoading);
                 queue_annotation_fetch(ref.target, annotation, false);
             }
         } else if (!resolve_footnote_content(ref, &_footnote_popup_text)) {
@@ -2983,6 +3008,11 @@ private:
             if (y + line_h > box_y + box_h) break;
             if (line.separator) {
                 gfx.drawFastHLine(text_x, y + line_h / 2, text_w, TFT_DARKGRAY);
+            } else if (line.likes) {
+                const int icon_size = weread_icons::heart_size;
+                gfx.drawBitmap(text_x, y + (line_h - icon_size) / 2,
+                               weread_icons::heart, icon_size, icon_size, TFT_BLACK, TFT_WHITE);
+                renderer.drawUtf8Line(gfx, line.text, text_x + icon_size + 10, y, TFT_BLACK, 0);
             } else {
                 renderer.drawUtf8Line(gfx, line.text, text_x, y, TFT_BLACK, 0);
             }
@@ -3560,25 +3590,45 @@ private:
 
 void launch_epub_reader(const char *path)
 {
-    ActivityManager::instance().push(new EpubReaderActivity(path));
+    ReaderOpeningWhite opening;
+    auto *activity = new EpubReaderActivity(path);
+    opening.finish();
+    ActivityManager::instance().push(activity);
 }
 
 void launch_mobi_reader(const char *path)
 {
-    ActivityManager::instance().push(new EpubReaderActivity(path));
+    ReaderOpeningWhite opening;
+    auto *activity = new EpubReaderActivity(path);
+    opening.finish();
+    ActivityManager::instance().push(activity);
 }
 
 void launch_fb2_reader(const char *path)
 {
-    ActivityManager::instance().push(new EpubReaderActivity(path));
+    ReaderOpeningWhite opening;
+    auto *activity = new EpubReaderActivity(path);
+    opening.finish();
+    ActivityManager::instance().push(activity);
 }
 
 void launch_markdown_reader(const char *path)
 {
-    ActivityManager::instance().push(new EpubReaderActivity(path));
+    ReaderOpeningWhite opening;
+    auto *activity = new EpubReaderActivity(path);
+    opening.finish();
+    ActivityManager::instance().push(activity);
 }
 
-void launch_weread_reader(const char *path, int initial_spine)
+void launch_weread_reader(const char *path, int initial_spine,
+                          ReaderOpeningWhite *existing_opening)
 {
-    ActivityManager::instance().push(new EpubReaderActivity(path, initial_spine));
+    // Cached WeRead opening may already have submitted white feedback while
+    // its catalog was being read. Do not submit a second white refresh.
+    std::unique_ptr<ReaderOpeningWhite> opening;
+    if (!existing_opening) opening = std::make_unique<ReaderOpeningWhite>();
+    auto *activity = new EpubReaderActivity(path, initial_spine);
+    if (existing_opening) existing_opening->finish();
+    else opening->finish();
+    ActivityManager::instance().push(activity);
 }

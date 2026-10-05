@@ -722,7 +722,7 @@ bool Api::get_annotation_comments(const std::string &book_id, const Chapter &cha
                 }
                 annotation->popup_text += author + "\n" + content;
                 const int likes = field_int(page_review, "likesCount");
-                if (likes > 0) annotation->popup_text += "  Likes " + std::to_string(likes);
+                if (likes > 0) annotation->popup_text += ANNOTATION_LIKES_SEPARATOR + std::to_string(likes);
                 ++annotation->comment_count;
                 ++added;
             }
