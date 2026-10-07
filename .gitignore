@@ -21,6 +21,10 @@
 build/
 /build-p4/
 /build-s31/
+/build-p4-debug/
+/build-p4-release/
+/build-s31-debug/
+/build-s31-release/
 *.o
 *.a
 *.out

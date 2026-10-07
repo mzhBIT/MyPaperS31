@@ -60,25 +60,27 @@ static int reader_header_height()
     return reader_header_visible() ? TOP_H : 0;
 }
 
-static void draw_page_number(int w) {
+static void draw_page_number(lgfx::LGFXBase &gfx, int w, uint32_t offset) {
     if (!reader_header_visible()) return;
     // Clear old page number area then draw new one
-    M5.Display.fillRect(w - 170, 0, 170, TOP_H, TFT_WHITE);
-    M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+    gfx.fillRect(w - 170, 0, 170, TOP_H, TFT_WHITE);
+    gfx.setTextColor(TFT_BLACK, TFT_WHITE);
     uint32_t size = g_book.file_size();
-    double pct = size ? ((double)g_page.start_offset * 100.0 / (double)size) : 0.0;
+    double pct = size ? ((double)offset * 100.0 / (double)size) : 0.0;
     if (pct > 100.0) pct = 100.0;
     char pg[32]; snprintf(pg, sizeof(pg), "%.2f%%", pct);
-    system_font::draw_right(M5.Display, pg, w - 5, 3);
+    system_font::draw_right(gfx, pg, w - 5, 3);
 }
+static void draw_page_number(int w) { draw_page_number(M5.Display, w, g_page.start_offset); }
 
-static void draw_topbar(int w) {
+static void draw_topbar(lgfx::LGFXBase &gfx, int w, uint32_t offset) {
     if (!reader_header_visible()) return;
-    M5.Display.fillRect(0, 0, w, TOP_H, TFT_WHITE);
-    M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-    system_font::draw_center(M5.Display, system_font::ellipsize(g_book.title, w - 180), w / 2, 3);
-    draw_page_number(w);
+    gfx.fillRect(0, 0, w, TOP_H, TFT_WHITE);
+    gfx.setTextColor(TFT_BLACK, TFT_WHITE);
+    system_font::draw_center(gfx, system_font::ellipsize(g_book.title, w - 180), w / 2, 3);
+    draw_page_number(gfx, w, offset);
 }
+static void draw_topbar(int w) { draw_topbar(M5.Display, w, g_page.start_offset); }
 
 static void draw_text_underline(lgfx::LGFXBase &gfx, int x, int y, int width, int line_h)
 {
@@ -477,6 +479,12 @@ private:
                      &m_next_page, m_frame.item++, &m_frame.cursor);
         m_frame.buffer->endWrite();
         m_frame.ready = m_frame.item >= m_next_page.lines.size();
+        if (m_frame.ready && reader_header_visible())
+            draw_topbar(*m_frame.buffer, M5.Display.width(), m_next_page.start_offset);
+        if (m_frame.ready) M5.Display.getPanel()->preparePhysicalGrayscale4Stats(
+            static_cast<const uint8_t*>(m_frame.buffer->getBuffer()),
+            m_frame.buffer->physicalWidth(), m_frame.buffer->physicalHeight(),
+            M5.Display.getRotation(), reader_epd_mode());
         if (m_frame.ready) ESP_LOGI(TAG, "prefetch framebuffer ready offset=%lu vertical=%d",
             (unsigned long)m_next_page.start_offset, m_next_page.vertical);
 #endif

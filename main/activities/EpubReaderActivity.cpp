@@ -2432,6 +2432,16 @@ private:
             (!page.empty() && page.front().vertical
                 ? prefetch->framebuffer_y <= content_x() : prefetch->framebuffer_y >= h);
         if (!prefetch->framebuffer_ready) return true;
+        // Foreground import redraws the dynamic header. Include the same
+        // target-spine header before statistics, otherwise exact validation
+        // correctly rejects every page whose header was still blank here.
+        if (header_visible()) draw_topbar(*sprite, w, prefetch->spine);
+        // The page buffer is immutable now, and the prior physical refresh
+        // has completed. Prepare statistics only; never submit a display here.
+        M5.Display.getPanel()->preparePhysicalGrayscale4Stats(
+            static_cast<const uint8_t*>(sprite->getBuffer()),
+            sprite->physicalWidth(), sprite->physicalHeight(),
+            prefetch->framebuffer_rotation, epub_reader_epd_mode());
         ESP_LOGI(TAG,
                  "prefetch framebuffer ready spine=%d page=%d size=%dx%d packed_bpp=%d images=%u render=%lld us",
                  prefetch->spine + 1,
@@ -3079,7 +3089,7 @@ private:
         }
     }
 
-    void draw_topbar(lgfx::LGFXBase &gfx, int w)
+    void draw_topbar(lgfx::LGFXBase &gfx, int w, int target_spine = -1)
     {
         if (!header_visible()) return;
         gfx.fillRect(0, 0, w, TOP_H, TFT_WHITE);
@@ -3090,7 +3100,9 @@ private:
 
         if (_ok) {
             char pg[32];
-            snprintf(pg, sizeof(pg), "%d/%d", _spine_index + 1, g_epub.spine_count());
+            snprintf(pg, sizeof(pg), "%d/%d",
+                     (target_spine >= 0 ? target_spine : _spine_index) + 1,
+                     g_epub.spine_count());
             system_font::draw_right(gfx, pg, w - 5, 3);
         }
     }

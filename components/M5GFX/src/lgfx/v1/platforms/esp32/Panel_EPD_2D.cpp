@@ -1,5 +1,6 @@
 #include "Panel_EPD_2D.hpp"
 #include "EpdTransitionStats.h"
+#include "EpdDu4Triple.h"
 
 #if SOC_LCD_I80_SUPPORTED && (defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32P4) || defined(CONFIG_IDF_TARGET_ESP32S31))
 
@@ -831,6 +832,40 @@ namespace lgfx
     if (timing) timing->pixels_us += esp_timer_get_time() - pixels_begin;
   }
 
+  __attribute__((optimize("O3"))) static void render_du4_three_frames(
+      uint8_t* frames, size_t frame_bytes, const uint8_t* physical,
+      const uint8_t* target, size_t total_groups, const uint16_t* active_groups,
+      size_t active_count, const uint8_t* codes, const uint8_t* lut0,
+      const uint8_t* lut1, const uint8_t* lut2, du4_render_timing_t& timing)
+  {
+    const int64_t clear_begin = esp_timer_get_time();
+    if (active_groups) {
+      for (unsigned frame = 0; frame < 3; ++frame)
+        clear_du4_frame(frames + frame * frame_bytes, frame_bytes);
+    }
+    const int64_t pixels_begin = esp_timer_get_time();
+    timing.clear_us += pixels_begin - clear_begin;
+    auto* out0 = reinterpret_cast<uint32_t*>(frames);
+    auto* out1 = reinterpret_cast<uint32_t*>(frames + frame_bytes);
+    auto* out2 = reinterpret_cast<uint32_t*>(frames + frame_bytes * 2);
+    const size_t count = active_groups ? active_count : total_groups;
+    for (size_t active = 0; active < count; ++active) {
+      const size_t group = active_groups ? active_groups[active] : active;
+      uint32_t word0, word1, word2;
+      lgfx_epd_du4::group3(physical + (group << 3), target + (group << 3),
+                         codes, lut0, lut1, lut2, word0, word1, word2);
+      out0[group] = permute_epd_output(word0);
+      out1[group] = permute_epd_output(word1);
+      out2[group] = permute_epd_output(word2);
+#if MYPAPER_EPD_2D_DU4_BUS_RELIEF_GROUPS > 0
+      // Keep external-memory burst relief proportional to three outputs.
+      if ((active + 1) % std::max<unsigned>(1, MYPAPER_EPD_2D_DU4_BUS_RELIEF_GROUPS / 3) == 0)
+        du4_bus_relief();
+#endif
+    }
+    timing.pixels_us += esp_timer_get_time() - pixels_begin;
+  }
+
   static constexpr int DU4_PIPELINE_MAX_PHASES = 64;
 
   struct du4_phase_pipeline_t
@@ -1109,6 +1144,13 @@ namespace lgfx
     return retained;
   }
 
+  // Refresh owns the physical state for the whole batch. Idle preparation
+  // only tries the same mutex; no concurrent scan/cache read or worker task.
+  struct StatsLock {
+    SemaphoreHandle_t semaphore;
+    ~StatsLock() { xSemaphoreGive(semaphore); }
+  };
+
   Panel_EPD_2D::Panel_EPD_2D(void)
   : Panel_EPD()
   {
@@ -1260,6 +1302,8 @@ namespace lgfx
       return false;
     }
 
+    _stats_mutex = xSemaphoreCreateMutex();
+    if (!_stats_mutex) return false;
     _update_queue_2d = xQueueCreate(8, sizeof(update_data_t));
     if (_update_queue_2d == nullptr) {
       ESP_LOGE(TAG_2D, "queue creation failed");
@@ -1405,6 +1449,62 @@ namespace lgfx
   {
     waitDisplay();
     return getBusEPD2D()->measureVCOM(vcom_mV, timeout_ms);
+  }
+
+  bool Panel_EPD_2D::preparePhysicalGrayscale4Stats(
+      const uint8_t* frame, uint16_t width, uint16_t height,
+      uint8_t rotation, epd_mode_t mode)
+  {
+    if (!frame || !_stats_mutex || displayBusy() || !_physical_state_known
+     || getDither() || width != _cfg.panel_width || height != _cfg.panel_height
+     || width != _cfg.memory_width || height != _cfg.memory_height
+     || width % 16 || _cfg.offset_x || _cfg.offset_y || rotation != getRotation()
+     || xSemaphoreTake(_stats_mutex, 0) != pdTRUE) return false;
+    StatsLock lock{_stats_mutex};
+    if (displayBusy() || !_physical_state_known) return false;
+    _prepared_stats.valid = false;
+    const auto selected = selectWaveform(mode);
+    if (!selected.phases || !selected.phases->luts) return false;
+    const size_t bytes = size_t(width / 2) * height;
+    const size_t groups = (size_t(width) >> 4) * height;
+    if (!_prepared_stats.target)
+      _prepared_stats.target = static_cast<uint8_t*>(heap_caps_malloc(bytes,
+          MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    if (!_prepared_stats.target) return false;
+    const int64_t started = esp_timer_get_time();
+    // Own a copy: reader buffers can be moved, freed or recycled before use.
+    memcpy(_prepared_stats.target, frame, bytes);
+    if (selected.type == WAVEFORM_MODE_DU || selected.type == WAVEFORM_MODE_A2)
+      quantize_binary_target_rect_4bpp(_prepared_stats.target, width / 2,
+                                     width, height, 0, 0, width, height);
+    _prepared_stats.fused = false;
+    if (selected.type == WAVEFORM_MODE_DU4 && groups <= UINT16_MAX) {
+      if (!_prepared_stats.groups)
+        _prepared_stats.groups = static_cast<uint16_t*>(heap_caps_malloc(
+            groups * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+      if (_prepared_stats.groups) {
+        bool driven[256];
+        build_driven_transition_mask(driven, selected.phases, selected.type);
+        _prepared_stats.transition_count = lgfx_epd_stats::collect(
+            _prepared_stats.used, _prepared_stats.groups, _prepared_stats.group_count,
+            _physical_buf, _prepared_stats.target, bytes, driven);
+        _prepared_stats.fused = true;
+      }
+    }
+    if (!_prepared_stats.fused)
+      _prepared_stats.transition_count = collect_used_transitions_4bpp(
+          _prepared_stats.used, _physical_buf, _prepared_stats.target,
+          width / 2, height, 0, 0, width, height);
+    // The caller passes logical rotation for import validation; update_data_t
+    // carries physical/internal rotation (including panel offset). Match keys
+    // in that same coordinate system without changing animation rotation.
+    _prepared_stats.key = {_physical_generation, _internal_rotation, selected.type, selected.phases};
+    _prepared_stats.valid = true;
+    ESP_LOGI(TAG_2D, "prefetch statistics ready: type=%u transitions=%u groups=%u time=%lld us",
+             (unsigned)selected.type, (unsigned)_prepared_stats.transition_count,
+             (unsigned)(_prepared_stats.fused ? _prepared_stats.group_count : 0),
+             (long long)(esp_timer_get_time() - started));
+    return true;
   }
 
   bool Panel_EPD_2D::writePhysicalGrayscale4(const uint8_t* physical_frame,
@@ -1683,6 +1783,13 @@ namespace lgfx
       const int64_t received_at_us = esp_timer_get_time();
       const int64_t queue_wait_us = received_at_us - update.queued_at_us;
       me->_display_busy_2d = true;
+      xSemaphoreTake(me->_stats_mutex, portMAX_DELAY);
+      StatsLock stats_lock{me->_stats_mutex};
+      // Every submitted batch invalidates the prior physical generation,
+      // including failed scans and menus. Cache matching uses the old value.
+      const uint64_t previous_generation = me->_physical_generation++;
+      bool prepared_stats_hit = false;
+      unsigned prepared_stats_miss = 10; // Statistics cache not checked on this path.
 
       // Coalesce everything already pending into one stable framebuffer batch.
       update_data_t pending;
@@ -1815,6 +1922,7 @@ namespace lgfx
         bool valid = false;
         bool fused = false;
         bool reused = false;
+        bool triple_prime = false;
         uint64_t stats = 0, dedup = 0, workspace = 0, active = 0;
         uint64_t prime = 0, worker = 0, precompute = 0;
         uint64_t prime_lut = 0, prime_clear = 0, prime_pixels = 0;
@@ -1859,7 +1967,24 @@ namespace lgfx
            && unique_transitions != nullptr) {
             bool used_transitions[256];
             const size_t total_groups = (memory_w >> 4) * scan_rows;
-            if (selected.type == WAVEFORM_MODE_DU4
+            prepared_stats_miss = lgfx_epd_stats::prepared_miss_reason(
+                me->_prepared_stats.valid, me->_physical_state_known,
+                me->_prepared_stats.key,
+                {previous_generation, update.animation_rotation, selected.type, selected.phases},
+                update.x == 0 && update.y == 0 && update.w == panel_w && update.h == panel_h,
+                me->_prepared_stats.target, me->_target_buf, frame_bytes);
+            if (prepared_stats_miss == 0) {
+              memcpy(used_transitions, me->_prepared_stats.used, sizeof(used_transitions));
+              used_transition_count = me->_prepared_stats.transition_count;
+              if (me->_prepared_stats.fused && me->_du4_active_groups_2d
+               && me->_du4_active_group_capacity_2d >= total_groups) {
+                fused_active_count = me->_prepared_stats.group_count;
+                memcpy(me->_du4_active_groups_2d, me->_prepared_stats.groups,
+                       fused_active_count * sizeof(uint16_t));
+                fused_stats = true;
+              }
+              prepared_stats_hit = true;
+            } else if (selected.type == WAVEFORM_MODE_DU4
              && update.x == 0 && update.y == 0
              && update.w == panel_w && update.h == panel_h
              && panel_w == memory_w && scan_rows == panel_h
@@ -1879,6 +2004,7 @@ namespace lgfx
                   stride, panel_h,
                   update.x, update.y, update.w, update.h);
             }
+            me->_prepared_stats.valid = false;
             stats_us = esp_timer_get_time() - stats_begin;
             const int64_t dedup_begin = esp_timer_get_time();
             cached_phase_count = 0;
@@ -2138,7 +2264,35 @@ namespace lgfx
             ? gc16_pipeline.next_unique
             : du4_pipeline_active ? int(du4_pipeline.next_unique)
                                   : animation_deferred_source ? 0 : cached_phase_count;
-        for (int cached = 0; cached < initial_render_count; ++cached) {
+        int rendered_prime_count = 0;
+#if MYPAPER_EPD_2D_DU4_TRIPLE_PRIME
+        if (du4_pipeline_active && du4_full_screen && du4_active_groups && deduplicated
+         && initial_render_count == 3 && me->_du4_pair_lut_2d) {
+          if (!me->_du4_prime_pair_luts_2d)
+            me->_du4_prime_pair_luts_2d = static_cast<uint8_t*>(heap_caps_malloc(
+                2 * DU4_PAIR_LUT_BYTES, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+          if (me->_du4_prime_pair_luts_2d) {
+            const int64_t render_begin = esp_timer_get_time();
+            uint8_t* lut0 = me->_du4_pair_lut_2d;
+            uint8_t* lut1 = me->_du4_prime_pair_luts_2d;
+            uint8_t* lut2 = lut1 + DU4_PAIR_LUT_BYTES;
+            build_du4_pair_lut(lut0, unique_transitions);
+            build_du4_pair_lut(lut1, unique_transitions + 256);
+            build_du4_pair_lut(lut2, unique_transitions + 512);
+            du4_prime_lut_us += esp_timer_get_time() - render_begin;
+            render_du4_three_frames(phase_frames, phase_frame_bytes,
+                me->_physical_buf, me->_target_buf, total_group_count,
+                du4_active_groups, du4_active_group_count,
+                lut0 + DU4_PAIR_LUT_BYTES, lut0, lut1, lut2, du4_prime_timing);
+            phase_render_us += esp_timer_get_time() - render_begin;
+            for (int cached = 0; cached < 3; ++cached)
+              __atomic_store_n(&du4_pipeline.ready[cached], true, __ATOMIC_RELEASE);
+            rendered_prime_count = 3;
+            du4_prep.triple_prime = true;
+          }
+        }
+#endif
+        for (int cached = rendered_prime_count; cached < initial_render_count; ++cached) {
           const int phase = deduplicated ? representative_phases[cached]
                                          : cached;
           const uint8_t* render_transition = nullptr;
@@ -2786,7 +2940,7 @@ namespace lgfx
       }
       if (du4_prep.valid) {
         ESP_LOGI(TAG_2D,
-                 "DU4 prep summary (after refresh): stats=%llu dedup=%llu workspace=%llu active=%llu prime=%llu prime_lut=%llu prime_clear=%llu prime_pixels=%llu worker=%llu precompute=%llu us fused=%u reused=%u primed=%d slots=%d transitions=%u groups=%u/%u bytes=%u scan_ok=%u",
+                 "DU4 prep summary (after refresh): stats=%llu dedup=%llu workspace=%llu active=%llu prime=%llu prime_lut=%llu prime_clear=%llu prime_pixels=%llu worker=%llu precompute=%llu us fused=%u reused=%u primed=%d slots=%d transitions=%u groups=%u/%u bytes=%u scan_ok=%u prime_fused=%u",
                  (unsigned long long)du4_prep.stats,
                  (unsigned long long)du4_prep.dedup,
                  (unsigned long long)du4_prep.workspace,
@@ -2801,11 +2955,12 @@ namespace lgfx
                  du4_prep.primed, du4_prep.slots,
                  (unsigned)du4_prep.transitions,
                  (unsigned)du4_prep.groups, (unsigned)du4_prep.total_groups,
-                 (unsigned)du4_prep.bytes, (unsigned)scan_ok);
+                 (unsigned)du4_prep.bytes, (unsigned)scan_ok, (unsigned)du4_prep.triple_prime);
       }
       ESP_LOGI(TAG_2D,
-               "dispatch summary (after refresh): queue_wait=%lld snapshot=%lld us merged=%u",
-               (long long)queue_wait_us, (long long)snapshot_us, merged);
+               "dispatch summary (after refresh): queue_wait=%lld snapshot=%lld us merged=%u stats_cache=%u stats_miss=%u",
+               (long long)queue_wait_us, (long long)snapshot_us, merged,
+               (unsigned)prepared_stats_hit, prepared_stats_miss);
     }
   }
 

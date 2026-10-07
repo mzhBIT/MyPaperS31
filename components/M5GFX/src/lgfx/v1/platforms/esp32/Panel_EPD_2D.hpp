@@ -3,6 +3,8 @@
 #include "Panel_EPD.hpp"
 #include "EpdWaveform2D.h"
 #include "EpdPageTurn.h"
+#include "EpdPreparedStats.h"
+#include <freertos/semphr.h>
 
 #if SOC_LCD_I80_SUPPORTED
 
@@ -47,6 +49,9 @@ namespace lgfx
     void waveformTemperature(int celsius) { _temperature_c = celsius; }
     int waveformTemperature(void) const { return _temperature_c; }
     bool measureVCOM(uint32_t* vcom_mV, uint32_t timeout_ms = 500);
+    bool preparePhysicalGrayscale4Stats(const uint8_t* frame, uint16_t width,
+                                        uint16_t height, uint8_t rotation,
+                                        epd_mode_t mode) override;
 
   private:
     struct update_data_t {
@@ -81,11 +86,23 @@ namespace lgfx
     uint8_t* _du4_phase_frames_2d = nullptr;
     size_t _du4_phase_frame_capacity_2d = 0;
     uint8_t* _du4_pair_lut_2d = nullptr;
+    uint8_t* _du4_prime_pair_luts_2d = nullptr; // Two extra 4096-byte internal tables.
     uint8_t* _gc16_pair_lut_2d = nullptr;
     uint16_t* _du4_active_groups_2d = nullptr;
     size_t _du4_active_group_capacity_2d = 0;
     uint8_t* _physical_buf = nullptr;
     uint8_t* _target_buf = nullptr;
+    SemaphoreHandle_t _stats_mutex = nullptr;
+    uint64_t _physical_generation = 0;
+    struct {
+      bool valid = false;
+      lgfx_epd_stats::PreparedKey key{};
+      uint8_t* target = nullptr;
+      uint16_t* groups = nullptr;
+      size_t group_count = 0, transition_count = 0;
+      bool used[256]{};
+      bool fused = false;
+    } _prepared_stats;
     const EpdWaveform* _waveform = nullptr;
     volatile bool _display_busy_2d = false;
     volatile bool _physical_state_known = false;

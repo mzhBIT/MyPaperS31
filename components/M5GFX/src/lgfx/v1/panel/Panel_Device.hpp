@@ -149,6 +149,9 @@ namespace lgfx
     void display(uint_fast16_t x, uint_fast16_t y, uint_fast16_t w, uint_fast16_t h) override;
     virtual bool writeNativeGrayscale4(const uint8_t*, uint16_t, uint16_t) { return false; }
     // Already rotated, high-nibble-first 4bpp full-panel image. No conversion.
+    // Optional idle-time statistics for an immutable, full physical 4bpp page.
+    virtual bool preparePhysicalGrayscale4Stats(const uint8_t*, uint16_t,
+                                               uint16_t, uint8_t, epd_mode_t) { return false; }
     virtual bool writePhysicalGrayscale4(const uint8_t*, uint16_t, uint16_t,
                                          uint8_t) { return false; }
     // One-shot page-turn request: +1 next (right first), -1 previous (left first).

@@ -91,6 +91,12 @@
 #define MYPAPER_EPD_2D_HD_PIPELINE_PRIME 10
 #endif
 
+// Fuse the first three full-screen DU4 drive frames. Allocation/geometry
+// failure falls back to the established per-frame renderer.
+#ifndef MYPAPER_EPD_2D_DU4_TRIPLE_PRIME
+#define MYPAPER_EPD_2D_DU4_TRIPLE_PRIME 1
+#endif
+
 // DU4 keeps its complete unique-frame workspace, but only renders this many
 // frames before power-on.  The remaining frames are filled by a lower-priority
 // task on the scan core while GDMA is shifting the already-ready frames.
