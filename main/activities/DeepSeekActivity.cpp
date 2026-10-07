@@ -1,4 +1,5 @@
 #include "activities/DeepSeekActivity.h"
+#include "ui/ListFocus.h"
 #include "activities/DeepSeekImagePickerActivity.h"
 
 #include "activities/Activity.h"
@@ -364,20 +365,19 @@ private:
             if (index >= session_row_count()) break;
             int y = SESSION_TOP + row * SESSION_ROW_H;
             bool selected = index == _session_focus;
-            uint16_t bg = selected ? TFT_BLACK : TFT_WHITE;
-            uint16_t fg = selected ? TFT_WHITE : TFT_BLACK;
-            M5.Display.fillRect(PAD, y, width - PAD * 2, SESSION_ROW_H - 4, bg);
+            constexpr uint16_t fg = TFT_BLACK;
+            list_focus::draw(M5.Display, PAD, y, SESSION_ROW_H, selected);
             if (index == 0) {
                 system_font::draw_left(M5.Display,
                                        std::string("+  ") + ui_locale::text(ui_locale::TextId::NewChat),
-                                       PAD + 16, y + 24, fg);
+                                       PAD + list_focus::text_inset(), y + 24, fg);
             } else {
                 const auto &session = _sessions[index - 1];
                 system_font::draw_left(M5.Display,
                                        system_font::ellipsize(display_session_title(session.title), width - 230),
-                                       PAD + 16, y + 8, fg);
+                                       PAD + list_focus::text_inset(), y + 8, fg);
                 system_font::draw_left(M5.Display, deepseek_model_label(session.model),
-                                       PAD + 16, y + 53, fg);
+                                       PAD + list_focus::text_inset(), y + 53, fg);
             }
             M5.Display.drawFastHLine(PAD, y + SESSION_ROW_H - 4,
                                      width - PAD * 2, TFT_BLACK);

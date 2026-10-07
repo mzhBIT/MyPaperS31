@@ -7,6 +7,7 @@
 #include <driver/gpio.h>
 #include <nvs_flash.h>
 #include <M5Unified.h>
+#include <algorithm>
 
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
@@ -171,6 +172,7 @@ extern "C" void app_main(void)
     }
 
     while (true) {
+        bool dispatched_touch = false;
         touch_input_update();
 
         if (ml307_voice_take_ring_hint()) {
@@ -183,6 +185,7 @@ extern "C" void app_main(void)
             if (act) {
                 TouchEvent event;
                 while (touch_input_pop(&event)) {
+                    dispatched_touch = true;
                     auto &am = ActivityManager::instance();
                     act = am.current();
                     if (!act) break;
@@ -210,6 +213,11 @@ extern "C" void app_main(void)
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(20));
+        // While a finger is down, inspect release/motion every tick instead
+        // of adding 20 ms to each sample. Idle UI keeps the existing cadence.
+        // Always block for at least one tick so IDLE and lower-priority tasks
+        // can run; do not busy-poll or bypass tap/long-press recognition.
+        vTaskDelay(dispatched_touch || touch_input_needs_fast_poll()
+                       ? 1 : std::max<TickType_t>(1, pdMS_TO_TICKS(20)));
     }
 }

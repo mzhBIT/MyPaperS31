@@ -58,6 +58,7 @@ namespace lgfx
       int8_t animation_direction;
       uint8_t animation_rotation;
       uint8_t animation_speed;
+      int64_t queued_at_us;
     };
 
     struct selected_waveform_t {

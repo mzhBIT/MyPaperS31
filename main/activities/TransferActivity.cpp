@@ -1,4 +1,5 @@
 #include "activities/TransferActivity.h"
+#include "ui/ListFocus.h"
 
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
@@ -112,9 +113,9 @@ private:
     void draw_row(int y, const char *title, const char *detail, bool focused)
     {
         const int w = M5.Display.width();
-        if (focused) M5.Display.fillCircle(PAD + 9, y + 44, 5, TFT_BLACK);
-        system_font::draw_left(M5.Display, title, PAD + 20, y + 24, TFT_BLACK);
-        system_font::draw_left(M5.Display, detail, PAD + 20, y + 88, TFT_DARKGRAY);
+        list_focus::draw(M5.Display, PAD, y, ROW_H, focused);
+        system_font::draw_left(M5.Display, title, PAD + list_focus::text_inset(), y + 24, TFT_BLACK);
+        system_font::draw_left(M5.Display, detail, PAD + list_focus::text_inset(), y + 88, TFT_DARKGRAY);
         M5.Display.drawFastHLine(PAD, y + ROW_H - 1, w - PAD * 2, TFT_BLACK);
     }
 

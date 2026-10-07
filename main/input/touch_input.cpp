@@ -348,6 +348,11 @@ bool touch_input_pop(TouchEvent *event)
     return true;
 }
 
+bool touch_input_needs_fast_poll()
+{
+    return s_pressed || s_head != s_tail;
+}
+
 void touch_input_set_back_swipe_edge(BackSwipeEdge edge)
 {
     s_back_edge = edge;

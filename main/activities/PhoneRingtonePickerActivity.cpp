@@ -1,4 +1,5 @@
 #include "activities/PhoneRingtonePickerActivity.h"
+#include "ui/ListFocus.h"
 
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
@@ -134,10 +135,11 @@ private:
             if (index >= static_cast<int>(_entries.size())) break;
             const int y = HEADER_H + row * ROW_H;
             const auto &entry = _entries[static_cast<size_t>(index)];
+            list_focus::draw(M5.Display, PAD, y, ROW_H, index == _focus);
             system_font::draw_left(M5.Display,
                 system_font::ellipsize(entry.name + (entry.directory ? "/" : ""),
-                                       width - PAD * 2 - 20), PAD + 10, y + 16,
-                index == _focus ? TFT_BLACK : TFT_DARKGRAY);
+                                       width - PAD * 2 - list_focus::text_inset() - 10),
+                PAD + list_focus::text_inset(), y + 16, TFT_BLACK);
             M5.Display.drawFastHLine(PAD, y + ROW_H - 3, width - PAD * 2, TFT_DARKGRAY);
         }
         if (_entries.empty()) system_font::draw_center(M5.Display,

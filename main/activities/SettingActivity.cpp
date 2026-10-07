@@ -1,4 +1,5 @@
 #include "activities/SettingActivity.h"
+#include "ui/ListFocus.h"
 
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
@@ -265,15 +266,12 @@ private:
             if (index >= static_cast<int>(_aps.size())) break;
             int y = SCAN_TOP + row * SCAN_ROW_H;
             bool selected = index == _focus;
-            uint16_t background = selected ? TFT_BLACK : TFT_WHITE;
-            uint16_t foreground = selected ? TFT_WHITE : TFT_BLACK;
-            M5.Display.fillRoundRect(PAD, y, width - PAD * 2, SCAN_ROW_H - 7,
-                                     7, background);
-            M5.Display.drawRoundRect(PAD, y, width - PAD * 2, SCAN_ROW_H - 7,
-                                     7, TFT_BLACK);
+            constexpr uint16_t foreground = TFT_BLACK;
+            list_focus::draw(M5.Display, PAD, y, SCAN_ROW_H, selected);
+            M5.Display.drawFastHLine(PAD, y + SCAN_ROW_H - 1, width - PAD * 2, TFT_BLACK);
             system_font::draw_left(M5.Display,
                                    system_font::ellipsize(_aps[index].ssid, width - 250),
-                                   PAD + 14, y + 5, foreground);
+                                   PAD + list_focus::text_inset(), y + 5, foreground);
             char details[72] = {};
             const std::string saved = _aps[index].ssid == _saved_ssid
                                           ? std::string("  ") + ui_locale::text(ui_locale::TextId::Saved)
@@ -283,7 +281,7 @@ private:
                      _aps[index].secured ? ui_locale::text(ui_locale::TextId::Locked)
                                          : ui_locale::text(ui_locale::TextId::OpenNetwork),
                      saved.c_str());
-            system_font::draw_left(M5.Display, details, PAD + 14, y + 45, foreground);
+            system_font::draw_left(M5.Display, details, PAD + list_focus::text_inset(), y + 45, foreground);
         }
 
         M5.Display.fillRoundRect(PAD, SCAN_FOOTER_Y,
@@ -574,12 +572,11 @@ private:
     void draw_row(int y, const char *title, const std::string &detail, bool selected)
     {
         int width = M5.Display.width();
-        uint16_t bg = selected ? TFT_BLACK : TFT_WHITE;
-        uint16_t fg = selected ? TFT_WHITE : TFT_BLACK;
-        M5.Display.fillRoundRect(PAD, y, width - PAD * 2, 140, 8, bg);
-        M5.Display.drawRoundRect(PAD, y, width - PAD * 2, 140, 8, TFT_BLACK);
-        system_font::draw_left(M5.Display, title, PAD + 18, y + 14, fg);
-        system_font::draw_left(M5.Display, detail, PAD + 18, y + 74, fg);
+        constexpr uint16_t fg = TFT_BLACK;
+        list_focus::draw(M5.Display, PAD, y, 140, selected);
+        M5.Display.drawFastHLine(PAD, y + 139, width - PAD * 2, TFT_BLACK);
+        system_font::draw_left(M5.Display, title, PAD + list_focus::text_inset(), y + 14, fg);
+        system_font::draw_left(M5.Display, detail, PAD + list_focus::text_inset(), y + 74, fg);
         system_font::draw_right(M5.Display, ">", width - PAD - 20, y + 48, fg);
     }
 
@@ -705,14 +702,13 @@ private:
     void draw_row(int y, const char *title, const std::string &detail, bool selected)
     {
         const int width = M5.Display.width();
-        const uint16_t background = selected ? TFT_BLACK : TFT_WHITE;
-        const uint16_t foreground = selected ? TFT_WHITE : TFT_BLACK;
-        M5.Display.fillRoundRect(PAD, y, width - PAD * 2, 140, 8, background);
+        constexpr uint16_t foreground = TFT_BLACK;
+        list_focus::draw(M5.Display, PAD, y, 140, selected);
         M5.Display.drawFastHLine(PAD, y+139, width-PAD*2, TFT_BLACK);
-        system_font::draw_left(M5.Display, title, PAD + 18, y + 14, foreground);
+        system_font::draw_left(M5.Display, title, PAD + list_focus::text_inset(), y + 14, foreground);
         system_font::draw_left(M5.Display,
                                system_font::ellipsize(detail, width - PAD * 2 - 80),
-                               PAD + 18, y + 74, foreground);
+                               PAD + list_focus::text_inset(), y + 74, foreground);
         system_font::draw_right(M5.Display, ">", width - PAD - 20, y + 48, foreground);
     }
 
@@ -1015,11 +1011,9 @@ private:
     {
         const int top = row_top(index);
         M5.Display.drawFastHLine(PAD, top, M5.Display.width() - PAD * 2, TFT_BLACK);
-        if (_focus == index) {
-            M5.Display.fillRect(PAD + 2, top + 20, 5, 88, TFT_BLACK);
-        }
-        system_font::draw_left(M5.Display, title, PAD + 18, top + 20, TFT_BLACK);
-        system_font::draw_left(M5.Display, detail, PAD + 18, top + 68,
+        list_focus::draw(M5.Display, PAD, top, 126, _focus == index);
+        system_font::draw_left(M5.Display, title, PAD + list_focus::text_inset(), top + 20, TFT_BLACK);
+        system_font::draw_left(M5.Display, detail, PAD + list_focus::text_inset(), top + 68,
                                active ? TFT_BLACK : 0x8410);
         system_font::draw_right(M5.Display, active ? ui_locale::text(ui_locale::TextId::Selected) : "",
                                 M5.Display.width() - PAD - 18, top + 20, TFT_BLACK);
@@ -1053,15 +1047,15 @@ private:
         const int top = row_top(4);
         M5.Display.drawFastHLine(PAD, top, M5.Display.width() - PAD * 2, TFT_BLACK);
         M5.Display.drawFastHLine(PAD, top + 125, M5.Display.width() - PAD * 2, TFT_BLACK);
-        if (_focus == 4) M5.Display.fillRect(PAD + 2, top + 20, 5, 88, TFT_BLACK);
+        list_focus::draw(M5.Display, PAD, top, 126, _focus == 4);
         system_font::draw_left(M5.Display, ui_locale::text(ui_locale::TextId::Wifi),
-                               PAD + 18, top + 20, TFT_BLACK);
+                               PAD + list_focus::text_inset(), top + 20, TFT_BLACK);
         const std::string detail = configured
             ? std::string(ui_locale::text(ui_locale::TextId::DefaultNetwork)) + ssid
             : ui_locale::text(ui_locale::TextId::NotConfigured);
         system_font::draw_left(M5.Display,
                                system_font::ellipsize(detail, M5.Display.width() - PAD * 2 - 80),
-                               PAD + 18, top + 68, TFT_DARKGRAY);
+                               PAD + list_focus::text_inset(), top + 68, TFT_DARKGRAY);
         system_font::draw_right(M5.Display, ">", M5.Display.width() - PAD - 18,
                                 top + 20, TFT_BLACK);
         M5.Display.display();
@@ -1395,9 +1389,9 @@ private:
         for (int i = 0; i < 3; ++i) {
             const int top = ROW_Y + i * ROW_H;
             M5.Display.drawFastHLine(PAD, top + ROW_H - 1, width - 2 * PAD, TFT_BLACK);
-            if (i == _focus) M5.Display.fillRect(PAD + 2, top + 22, 5, ROW_H - 44, TFT_BLACK);
-            system_font::draw_left(M5.Display, titles[i], PAD + 20, top + 30, TFT_BLACK);
-            system_font::draw_left(M5.Display, details[i], PAD + 20, top + 95, TFT_DARKGRAY);
+            list_focus::draw(M5.Display, PAD, top, ROW_H, i == _focus);
+            system_font::draw_left(M5.Display, titles[i], PAD + list_focus::text_inset(), top + 30, TFT_BLACK);
+            system_font::draw_left(M5.Display, details[i], PAD + list_focus::text_inset(), top + 95, TFT_DARKGRAY);
             if (i == 2) system_font::draw_right(M5.Display, ">", width - PAD - 20,
                                                  top + 58, TFT_BLACK);
         }
@@ -1472,8 +1466,8 @@ private:
             const char *name = ui_locale::native_name(static_cast<ui_locale::Language>(i));
             M5.Display.drawFastHLine(PAD, y + row_h - 1,
                                     M5.Display.width() - PAD * 2, TFT_BLACK);
-            if (i == _focus) M5.Display.fillRect(PAD + 2, y + 35, 5, row_h - 70, TFT_BLACK);
-            system_font::draw_left(M5.Display, name, PAD + 25, y + 48, TFT_BLACK);
+            list_focus::draw(M5.Display, PAD, y, row_h, i == _focus);
+            system_font::draw_left(M5.Display, name, PAD + list_focus::text_inset(), y + 48, TFT_BLACK);
             if (i == static_cast<int>(ui_locale::get())) {
                 system_font::draw_right(M5.Display, "*", M5.Display.width() - PAD - 20,
                                         y + 48, TFT_BLACK);
@@ -1557,11 +1551,11 @@ private:
         for (int i = 0; i < 2; ++i) {
             const int top = ROW_Y + i * ROW_H;
             M5.Display.drawFastHLine(PAD, top + ROW_H - 1, width - 2 * PAD, TFT_BLACK);
-            if (i == _focus) M5.Display.fillRect(PAD + 2, top + 22, 5, ROW_H - 44, TFT_BLACK);
-            system_font::draw_left(M5.Display, titles[i], PAD + 20, top + 30, TFT_BLACK);
+            list_focus::draw(M5.Display, PAD, top, ROW_H, i == _focus);
+            system_font::draw_left(M5.Display, titles[i], PAD + list_focus::text_inset(), top + 30, TFT_BLACK);
             system_font::draw_left(M5.Display,
                                    system_font::ellipsize(details[i], width - 2 * PAD - 80),
-                                   PAD + 20, top + 95, TFT_DARKGRAY);
+                                   PAD + list_focus::text_inset(), top + 95, TFT_DARKGRAY);
             system_font::draw_right(M5.Display, ">", width - PAD - 20,
                                     top + 58, TFT_BLACK);
         }
@@ -1762,15 +1756,12 @@ private:
         // top (one pixel below it) makes the middle of that line twice as thick.
         M5.Display.drawFastHLine(PAD, top + SETTINGS_ROW_H - 1,
                                 width - PAD * 2, TFT_BLACK);
-        if (selected) {
-            M5.Display.fillRect(PAD + 2, top + 16, 5,
-                                SETTINGS_ROW_H - 32, TFT_BLACK);
-        }
-        system_font::draw_left(M5.Display, title, PAD + 18,
+        list_focus::draw(M5.Display, PAD, top, SETTINGS_ROW_H, selected);
+        system_font::draw_left(M5.Display, title, PAD + list_focus::text_inset(),
                                top + 10, TFT_BLACK);
         system_font::draw_left(M5.Display,
                                system_font::ellipsize(detail, width - PAD * 2 - 80),
-                               PAD + 18, top + 62, TFT_BLACK);
+                               PAD + list_focus::text_inset(), top + 62, TFT_BLACK);
         if (navigable) {
             system_font::draw_right(M5.Display, ">", width - PAD - 20,
                                     top + 36, TFT_BLACK);

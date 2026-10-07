@@ -1,4 +1,5 @@
 #include "activities/EpdDiagnosticActivity.h"
+#include "ui/ListFocus.h"
 
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
@@ -306,13 +307,10 @@ private:
         for (int i = 0; i < MENU_COUNT; ++i) {
             const int top = MENU_TOP + i * (MENU_ROW_H + MENU_ROW_GAP);
             const bool selected = i == _focus;
-            const uint16_t background = selected ? TFT_BLACK : TFT_WHITE;
-            const uint16_t foreground = selected ? TFT_WHITE : TFT_BLACK;
-            M5.Display.fillRoundRect(PAD, top, width - PAD * 2,
-                                     MENU_ROW_H, 8, background);
-            M5.Display.drawRoundRect(PAD, top, width - PAD * 2,
-                                     MENU_ROW_H, 8, TFT_BLACK);
-            system_font::draw_left(M5.Display, ui_locale::text(MENU_LABELS[i]), PAD + 18,
+            constexpr uint16_t foreground = TFT_BLACK;
+            list_focus::draw(M5.Display, PAD, top, MENU_ROW_H, selected);
+            M5.Display.drawFastHLine(PAD, top + MENU_ROW_H - 1, width - PAD * 2, TFT_BLACK);
+            system_font::draw_left(M5.Display, ui_locale::text(MENU_LABELS[i]), PAD + list_focus::text_inset(),
                                    top + std::max(0, (MENU_ROW_H - system_font::line_height()) / 2),
                                    foreground);
             system_font::draw_right(M5.Display, ">", width - PAD - 20,

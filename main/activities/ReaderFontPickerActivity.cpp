@@ -1,4 +1,5 @@
 #include "activities/Activity.h"
+#include "ui/ListFocus.h"
 #include "activities/ActivityManager.h"
 #include "reader_font.h"
 #include "reader_style.h"
@@ -124,11 +125,11 @@ private:
             if (idx >= (int)m_fonts.size()) break;
             int y = y0 + i * ROW_H;
             bool sel = idx == m_focus;
-            M5.Display.fillRoundRect(PAD, y, w - PAD * 2, ROW_H - 6, 6, sel ? TFT_BLACK : TFT_WHITE);
-            M5.Display.drawRoundRect(PAD, y, w - PAD * 2, ROW_H - 6, 6, TFT_BLACK);
-            M5.Display.setTextColor(sel ? TFT_WHITE : TFT_BLACK, sel ? TFT_BLACK : TFT_WHITE);
-            std::string label = system_font::ellipsize(base_name(m_fonts[idx].c_str()), w - PAD * 2 - 28);
-            system_font::draw_left(M5.Display, label, PAD + 14, y + 12, sel ? TFT_WHITE : TFT_BLACK);
+            list_focus::draw(M5.Display, PAD, y, ROW_H, sel);
+            M5.Display.drawFastHLine(PAD, y + ROW_H - 1, w - PAD * 2, TFT_BLACK);
+            M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
+            std::string label = system_font::ellipsize(base_name(m_fonts[idx].c_str()), w - PAD * 2 - list_focus::text_inset() - 14);
+            system_font::draw_left(M5.Display, label, PAD + list_focus::text_inset(), y + 12, TFT_BLACK);
         }
         M5.Display.display();
         M5.Display.endWrite();

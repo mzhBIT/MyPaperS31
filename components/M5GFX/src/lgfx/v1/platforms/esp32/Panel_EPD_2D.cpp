@@ -65,7 +65,7 @@ namespace lgfx
           max_chunk_us = std::max<uint32_t>(max_chunk_us,
               static_cast<uint32_t>(esp_timer_get_time() - chunk_begin));
         }
-        ESP_LOGI(TAG_2D, "cache writeback: %u bytes in %lld us max_chunk=%lu us",
+        ESP_LOGD(TAG_2D, "cache writeback: %u bytes in %lld us max_chunk=%lu us",
                  static_cast<unsigned>(end - start),
                  static_cast<long long>(esp_timer_get_time() - t0),
                  static_cast<unsigned long>(max_chunk_us));
@@ -1605,7 +1605,7 @@ namespace lgfx
     }
     if (_range_mod.empty()) {
       _next_animation_direction = 0;
-      ESP_LOGW(TAG_2D, "display skipped: update range is empty");
+      ESP_LOGD(TAG_2D, "display skipped: update range is empty");
       return;
     }
 
@@ -1629,6 +1629,7 @@ namespace lgfx
       .animation_direction = _next_animation_direction,
       .animation_rotation = uint8_t(_internal_rotation),
       .animation_speed = _next_animation_speed,
+      .queued_at_us = esp_timer_get_time(),
     };
     _next_animation_direction = 0;
 
@@ -1640,7 +1641,7 @@ namespace lgfx
     const bool queued = xQueueSend(_update_queue_2d, &update,
                                    128 / portTICK_PERIOD_MS) == pdTRUE;
     if (queued) {
-      ESP_LOGI(TAG_2D, "refresh queued: x=%u y=%u w=%u h=%u mode=%u",
+      ESP_LOGD(TAG_2D, "refresh queued: x=%u y=%u w=%u h=%u mode=%u",
                update.x, update.y, update.w, update.h, (unsigned)update.mode);
       _range_mod.top = INT16_MAX;
       _range_mod.left = INT16_MAX;
@@ -1677,6 +1678,10 @@ namespace lgfx
       if (xQueueReceive(me->_update_queue_2d, &update, portMAX_DELAY) != pdTRUE) {
         continue;
       }
+      // Queue send already wakes this task immediately; measure the actual
+      // handoff separately from snapshot work and report only after scanning.
+      const int64_t received_at_us = esp_timer_get_time();
+      const int64_t queue_wait_us = received_at_us - update.queued_at_us;
       me->_display_busy_2d = true;
 
       // Coalesce everything already pending into one stable framebuffer batch.
@@ -1728,12 +1733,14 @@ namespace lgfx
       // stall being chased is not this walk occupying core 0. It stays here
       // anyway: the scan core is the better place for it, and the ordering
       // requirement below is unchanged.
+      const int64_t snapshot_begin_us = esp_timer_get_time();
       {
         const size_t wb_top = std::min<size_t>(update.y, panel_h);
         const size_t wb_rows = std::min<size_t>(update.h, panel_h - wb_top);
         cache_writeback_2d(me->_buf + wb_top * stride, wb_rows * stride);
       }
       memcpy(me->_target_buf, me->_buf, frame_bytes);
+      const int64_t snapshot_us = esp_timer_get_time() - snapshot_begin_us;
       const selected_waveform_t selected = me->selectWaveform(update.mode);
       if (selected.phases == nullptr || selected.phases->luts == nullptr
        || selected.phases->phases <= 0) {
@@ -2796,6 +2803,9 @@ namespace lgfx
                  (unsigned)du4_prep.groups, (unsigned)du4_prep.total_groups,
                  (unsigned)du4_prep.bytes, (unsigned)scan_ok);
       }
+      ESP_LOGI(TAG_2D,
+               "dispatch summary (after refresh): queue_wait=%lld snapshot=%lld us merged=%u",
+               (long long)queue_wait_us, (long long)snapshot_us, merged);
     }
   }
 

@@ -1,4 +1,5 @@
 #include "activities/Activity.h"
+#include "ui/ListFocus.h"
 #include "activities/ActivityManager.h"
 #include "activities/MusicActivity.h"
 #include "activities/PlaceholderActivity.h"
@@ -140,15 +141,15 @@ static void draw_list() {
         const auto &e = g_entries[idx];
 
         M5.Display.fillRect(PAD, ry, w - PAD - 12, ROW_H - 2,
-                            sel ? TFT_BLACK : TFT_WHITE);
+                            TFT_WHITE);
+        list_focus::draw(M5.Display, PAD, ry, ROW_H, sel);
         M5.Display.drawFastHLine(PAD, ry + ROW_H - 2,
                                  w - PAD - 12, TFT_BLACK);
-        M5.Display.setTextColor(sel ? TFT_WHITE : TFT_BLACK,
-                                sel ? TFT_BLACK : TFT_WHITE);
+        M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
 
         std::string label = e.is_dir ? (e.name + "/") : e.name;
         label = system_font::ellipsize(label, w - PAD - 86);
-        system_font::draw_left(M5.Display, label, PAD + 12, ry + 14, sel ? TFT_WHITE : TFT_BLACK);
+        system_font::draw_left(M5.Display, label, PAD + list_focus::text_inset(), ry + 14, TFT_BLACK);
     }
 
     // Count indicator

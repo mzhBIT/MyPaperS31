@@ -1,4 +1,5 @@
 #include "activities/RadioActivity.h"
+#include "ui/ListFocus.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "activities/SettingActivity.h"
@@ -694,18 +695,19 @@ private:
             if (index >= STATION_COUNT) break;
             int y = top + row * row_height;
             bool selected = index == _focus;
-            uint16_t background = selected ? TFT_BLACK : TFT_WHITE;
-            uint16_t foreground = selected ? TFT_WHITE : TFT_BLACK;
-            M5.Display.fillRect(left, y + 2, width, row_height - 4, background);
+            constexpr uint16_t foreground = TFT_BLACK;
+            M5.Display.fillRect(left, y + 2, width, row_height - 4, TFT_WHITE);
+            list_focus::draw(M5.Display, left, y, row_height, selected);
             if (index == _current) {
-                M5.Display.fillRect(left + design_x(5), y + design_y(10),
-                                    std::max(2, design_x(4)),
-                                    row_height - design_y(20), foreground);
+                const int right = left + width - design_x(8);
+                const int center_y = y + row_height / 2;
+                M5.Display.fillTriangle(right - 9, center_y - 6,
+                                        right - 9, center_y + 6, right, center_y, TFT_BLACK);
             }
             system_font::draw_left(M5.Display,
                                    system_font::ellipsize(STATIONS[index].name,
-                                                          width - design_x(28)),
-                                   left + design_x(18), y + design_y(10), foreground);
+                                                          width - list_focus::text_inset() - design_x(28)),
+                                   left + list_focus::text_inset(), y + design_y(10), foreground);
         }
 
         char position[32] = {};

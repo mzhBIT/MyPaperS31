@@ -1,4 +1,5 @@
 #include "activities/ReaderOverlay.h"
+#include "ui/ListFocus.h"
 
 #include "reader_font.h"
 #include "reader_style.h"
@@ -615,6 +616,7 @@ void ReaderOverlay::draw_settings(const Geometry &g)
         constexpr uint16_t bg = TFT_WHITE;
         constexpr uint16_t fg = TFT_BLACK;
         M5.Display.fillRect(x, row_y0 + 1, w, row_h - 1, bg);
+        list_focus::draw(M5.Display, x, row_y0, row_h, index == m_setting_focus);
         if (index + 1 < count) {
             M5.Display.drawFastHLine(x, row_y1, w, TFT_BLACK);
         }
@@ -625,8 +627,10 @@ void ReaderOverlay::draw_settings(const Geometry &g)
         else setting_text(index, m_script_mode, m_script_load_failed,
                           m_writing_mode, m_profile, &name, &value);
         int text_y = row_y0 + std::max(1, (row_h - system_font::line_height()) / 2);
-        const int max_name_w = std::max(40, w - STEP_BOX_W * 2 - STEP_BOX_GAP * 2 - VALUE_W - 32);
-        system_font::draw_left(M5.Display, system_font::ellipsize(name, max_name_w), x + 12, text_y, fg);
+        const int max_name_w = std::max(40, w - STEP_BOX_W * 2 - STEP_BOX_GAP * 2 - VALUE_W
+                                           - list_focus::text_inset() - 20);
+        system_font::draw_left(M5.Display, system_font::ellipsize(name, max_name_w),
+                               x + list_focus::text_inset(), text_y, fg);
 
         const int beauty_index = m_tab == Tab::Beauty ? beauty_base_index(index) : -1;
         if ((m_tab == Tab::Settings && index == 0) ||
@@ -689,15 +693,16 @@ void ReaderOverlay::draw_chapters(const Geometry &g)
         int row_y1 = list_y + (i + 1) * list_h / rows;
         int row_h = row_y1 - row_y0;
         bool selected = index == m_chapter_focus;
-        uint16_t bg = selected ? TFT_BLACK : TFT_WHITE;
-        uint16_t fg = selected ? TFT_WHITE : TFT_BLACK;
+        constexpr uint16_t bg = TFT_WHITE;
+        constexpr uint16_t fg = TFT_BLACK;
         M5.Display.fillRect(g.x + PANEL_PAD, row_y0 + 1, g.w - PANEL_PAD * 2, row_h - 1, bg);
+        list_focus::draw(M5.Display, g.x + PANEL_PAD, row_y0, row_h, selected);
         if (i + 1 < rows && index + 1 < count) {
             M5.Display.drawFastHLine(g.x + PANEL_PAD, row_y1, g.w - PANEL_PAD * 2, TFT_BLACK);
         }
         int depth = m_chapters.depth ? std::max(0, m_chapters.depth(m_chapters.context, index)) : 0;
         std::string title = m_chapters.title ? m_chapters.title(m_chapters.context, index) : std::string();
-        int text_x = g.x + PANEL_PAD + 12 + std::min(depth, 4) * 18;
+        int text_x = g.x + PANEL_PAD + list_focus::text_inset() + std::min(depth, 4) * 18;
         title = system_font::ellipsize(title, g.x + g.w - PANEL_PAD - 18 - text_x);
         int text_y = row_y0 + std::max(1, (row_h - system_font::line_height()) / 2);
         system_font::draw_left(M5.Display, title, text_x, text_y, fg);

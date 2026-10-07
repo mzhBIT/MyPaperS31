@@ -1,4 +1,5 @@
 #include "activities/ReaderBackgroundPickerActivity.h"
+#include "ui/ListFocus.h"
 
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
@@ -237,9 +238,8 @@ private:
             if (index >= item_count()) break;
             int y = top + row * ROW_H;
             bool selected = index == m_focus;
-            uint16_t bg = selected ? TFT_BLACK : TFT_WHITE;
-            uint16_t fg = selected ? TFT_WHITE : TFT_BLACK;
-            M5.Display.fillRect(PAD, y, width - PAD * 2, ROW_H - 2, bg);
+            constexpr uint16_t fg = TFT_BLACK;
+            list_focus::draw(M5.Display, PAD, y, ROW_H, selected);
             M5.Display.drawFastHLine(PAD, y + ROW_H - 2, width - PAD * 2, TFT_BLACK);
             std::string label;
             if (index == 0) label = ui_locale::text(m_book_cover ? ui_locale::TextId::Off
@@ -249,8 +249,8 @@ private:
                 label = entry.name + (entry.directory ? "/" : "");
             }
             system_font::draw_left(M5.Display,
-                                   system_font::ellipsize(label, width - PAD * 2 - 28),
-                                   PAD + 12, y + 13, fg);
+                                   system_font::ellipsize(label, width - PAD * 2 - list_focus::text_inset() - 16),
+                                   PAD + list_focus::text_inset(), y + 13, fg);
         }
         if (!m_notice.empty()) {
             int box_width = std::min(width - 48, 820);

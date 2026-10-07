@@ -1,4 +1,5 @@
 #include "activities/OfflineMapPickerActivity.h"
+#include "ui/ListFocus.h"
 #include "activities/ActivityManager.h"
 #include "map/AmapConfig.h"
 #include "map/OfflineMapSource.h"
@@ -87,8 +88,8 @@ class Picker final : public Activity {
             int i = _page*rows()+r;
             if (i >= int(_entries.size())) break;
             int y = header_layout::height+r*ROW;
-            if (i == _focus) d.fillRect(0, y, w, ROW-1, TFT_LIGHTGREY);
-            system_font::draw_left(d, system_font::ellipsize((_entries[i].dir ? "[+] " : "")+_entries[i].name, w-36), 18, y+14);
+            list_focus::draw(d, 18, y, ROW, i == _focus);
+            system_font::draw_left(d, system_font::ellipsize((_entries[i].dir ? "[+] " : "")+_entries[i].name, w-36-list_focus::text_inset()), 18+list_focus::text_inset(), y+14);
             d.drawFastHLine(18, y+ROW-1, w-36, TFT_BLACK);
         }
         system_font::draw_left(d, system_font::ellipsize(_message.empty() ? _path : _message, w-36), 18, h-FOOT+12);
