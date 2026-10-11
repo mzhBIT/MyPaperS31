@@ -69,6 +69,11 @@
 #define MYPAPER_EPD_2D_GC16_PAIR_LUT 1
 #endif
 
+// GC16/HD index reuse, including partial updates. Set 0 for the original path.
+#ifndef MYPAPER_EPD_2D_GC16_PAIR_INDICES
+#define MYPAPER_EPD_2D_GC16_PAIR_INDICES 1
+#endif
+
 // Prime a bounded GC16 frame ring before power-on, then render the remaining
 // unique phases on the same CPU core while GDMA scans the prepared frames.
 // The scan task has the higher priority and therefore keeps phase boundaries

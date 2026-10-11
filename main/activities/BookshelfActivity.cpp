@@ -22,6 +22,7 @@
 #include <nvs.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_timer.h>
 
 extern void launch_file_browser(const char *path);
 extern void launch_reader(const char *path);
@@ -30,7 +31,7 @@ extern void launch_mobi_reader(const char *path);
 extern void launch_fb2_reader(const char *path);
 extern void launch_markdown_reader(const char *path);
 // Reuse the existing cached JPEG / software-decoder cover path.
-extern bool draw_bookshelf_cover(const RecentBook &, int, int, int, int);
+extern bool draw_bookshelf_cover(const RecentBook &, int, int, int, int, bool *);
 
 namespace {
 namespace layout = bookshelf_layout;
@@ -139,6 +140,12 @@ void glass(layout::Rect r) {
 }
 
 class BookshelfActivity final : public Activity {
+    // Accumulate during drawing; emit only after submitting the refresh.
+    struct DrawTiming {
+        int64_t cover_us = 0, fallback_us = 0, progress_us = 0;
+        std::array<int64_t, 9> slot_us{};
+        unsigned cover_ok = 0, cover_missing = 0, bin_hits = 0;
+    } draw_timing;
     std::vector<RecentBook> books;
     std::vector<RecentBookProgress> progress;
     std::vector<bool> progress_loaded;
@@ -187,18 +194,28 @@ class BookshelfActivity final : public Activity {
     void cover(int slot,int i) {
         auto r=layout::cover(style,slot);
         M5.Display.fillRect(r.x,r.y,r.w,r.h,TFT_WHITE);
-        if(!draw_bookshelf_cover(books[i],r.x,r.y,r.w,r.h)) {
+        const int64_t cover_begin = esp_timer_get_time();
+        bool bin_hit = false;
+        const bool cover_ok = draw_bookshelf_cover(books[i],r.x,r.y,r.w,r.h,&bin_hit);
+        if(bin_hit) ++draw_timing.bin_hits;
+        const int64_t cover_end = esp_timer_get_time();
+        draw_timing.cover_us += cover_end - cover_begin;
+        if (cover_ok) ++draw_timing.cover_ok; else ++draw_timing.cover_missing;
+        if(!cover_ok) {
             const int px=ui_px(26), step=std::max(px+5,system_font::line_height(px));
             auto lines=wrap(books[i].title,px,r.w-22,std::max(1,std::min(5,(r.h-20)/step)));
             int cy=r.y+r.h/2-int(lines.size())*step/2;
             for(auto &s:lines) { centered(s,r.x+r.w/2,cy+step/2,px,0,255); cy+=step; }
         }
+        draw_timing.fallback_us += esp_timer_get_time() - cover_end;
         M5.Display.drawRect(r.x,r.y,r.w,r.h,TFT_BLACK);
     }
     void list_row(int slot,int i) {
         if (!progress_loaded[i]) {
+            const int64_t begin = esp_timer_get_time();
             progress[i]=recent_book_progress(books[i]);
             progress_loaded[i]=true;
+            draw_timing.progress_us += esp_timer_get_time() - begin;
         }
         auto r=layout::card(style,slot); cover(slot,i);
         auto lines=wrap(books[i].title,27,378,2);
@@ -284,14 +301,16 @@ class BookshelfActivity final : public Activity {
     void show_styles() {
         styles_open=true;
         M5.Display.startWrite();
-        M5.Display.setEpdMode(epd_mode_t::epd_quality);
+        M5.Display.setEpdMode(epd_mode_t::epd_hd);
         style_dialog();
         M5.Display.display(90,370,504,432);
         M5.Display.endWrite();
     }
     void draw(bool full = true) {
+        const int64_t begin = esp_timer_get_time();
+        draw_timing = {};
         M5.Display.startWrite(); M5.Display.setDither(false);
-        M5.Display.setEpdMode(epd_mode_t::epd_quality);
+        M5.Display.setEpdMode(epd_mode_t::epd_hd);
         int32_t clip_x, clip_y, clip_w, clip_h;
         M5.Display.getClipRect(&clip_x,&clip_y,&clip_w,&clip_h);
         // Keep status/header and bottom navigation physically unchanged when
@@ -299,15 +318,22 @@ class BookshelfActivity final : public Activity {
         const int top = full ? 0 : 197;
         const int height = full ? 1216 : 899;
         M5.Display.setClipRect(0,top,684,height);
+        const int64_t setup_end = esp_timer_get_time();
         M5.Display.fillRect(0,top,684,height,gray(238));
+        const int64_t clear_end = esp_timer_get_time();
         if(full) header();
+        const int64_t header_end = esp_timer_get_time();
         if(style==Style::List) {
             M5.Display.fillRoundRect(36,216,612,788,20,TFT_WHITE);
             M5.Display.drawRoundRect(36,216,612,788,20,gray(80));
         }
         int first=page()*capacity();
-        for(int slot=0;slot<capacity() && first+slot<int(books.size());++slot)
+        for(int slot=0;slot<capacity() && first+slot<int(books.size());++slot) {
+            const int64_t slot_begin = esp_timer_get_time();
             if(style==Style::List) list_row(slot,first+slot); else cover(slot,first+slot);
+            draw_timing.slot_us[slot] = esp_timer_get_time() - slot_begin;
+        }
+        const int64_t items_end = esp_timer_get_time();
         if(style!=Style::List) for(int row=0;row<3;++row) {
             if(style==Style::Acrylic) glass(layout::rail(row));
             else {
@@ -317,6 +343,7 @@ class BookshelfActivity final : public Activity {
                 M5.Display.drawFastHLine(36,y+11,612,gray(16));
             }
         }
+        const int64_t rails_end = esp_timer_get_time();
         if(books.empty()) ui_centered(ui_locale::text(ui_locale::TextId::BookshelfEmpty),342,270,28,600,0,style==Style::List?255:238);
         if(keyboard_focus && !books.empty()) {
             auto r=layout::cover(style,focus%capacity());
@@ -324,7 +351,26 @@ class BookshelfActivity final : public Activity {
         }
         footer(); if(styles_open) style_dialog();
         M5.Display.setClipRect(clip_x,clip_y,clip_w,clip_h);
+        const int64_t footer_end = esp_timer_get_time();
         M5.Display.display(0,top,684,height); M5.Display.endWrite();
+        const int64_t end = esp_timer_get_time();
+        char slots[192] = {};
+        size_t at = 0;
+        for (int slot=0;slot<capacity() && first+slot<int(books.size());++slot) {
+            const int n = std::snprintf(slots+at,sizeof(slots)-at,"%s%lld",
+                slot ? "/" : "", (long long)draw_timing.slot_us[slot]);
+            if (n < 0 || size_t(n) >= sizeof(slots)-at) break;
+            at += size_t(n);
+        }
+        ESP_LOGI("BOOKSHELF", "draw timing us: style=%d full=%u page=%d setup=%lld clear=%lld header=%lld items=%lld rails=%lld footer_overlay=%lld submit=%lld total=%lld cover=%lld fallback=%lld progress=%lld covers=%u/%u bin_hits=%u slots=[%s]",
+            int(style),unsigned(full),page()+1,
+            (long long)(setup_end-begin),(long long)(clear_end-setup_end),
+            (long long)(header_end-clear_end),(long long)(items_end-header_end),
+            (long long)(rails_end-items_end),(long long)(footer_end-rails_end),
+            (long long)(end-footer_end),(long long)(end-begin),
+            (long long)draw_timing.cover_us,(long long)draw_timing.fallback_us,
+            (long long)draw_timing.progress_us,draw_timing.cover_ok,
+            draw_timing.cover_missing,draw_timing.bin_hits,slots);
     }
 public:
     ~BookshelfActivity() override {
@@ -332,10 +378,17 @@ public:
         request_home_quality_refresh();
     }
     void on_create() override {
+        const int64_t begin = esp_timer_get_time();
         nvs_handle_t h; uint8_t value=2;
         if(nvs_open("bookshelf_ui",NVS_READONLY,&h)==ESP_OK) { nvs_get_u8(h,"style",&value); nvs_close(h); }
         if(value==1 || value==2 || value==5) style=static_cast<Style>(value);
-        reload(); draw();
+        const int64_t settings_end = esp_timer_get_time();
+        reload();
+        const int64_t reload_end = esp_timer_get_time();
+        draw();
+        ESP_LOGI("BOOKSHELF", "open timing us: settings=%lld reload=%lld before_draw=%lld books=%u",
+            (long long)(settings_end-begin),(long long)(reload_end-settings_end),
+            (long long)(reload_end-begin),unsigned(books.size()));
     }
     void on_show() override { if(shown) { reload(); draw(); } else shown=true; }
     void loop() override {
@@ -344,7 +397,7 @@ public:
         if(time_basis_system_clock_valid()) time_basis_format_clock(std::time(nullptr),clock,sizeof(clock));
         if(last_clock==clock && last_wifi==wifi_setting_is_enabled()) return;
         M5.Display.startWrite();
-        M5.Display.setEpdMode(epd_mode_t::epd_quality);
+        M5.Display.setEpdMode(epd_mode_t::epd_hd);
         M5.Display.fillRect(0,0,684,72,gray(238));
         status();
         M5.Display.display(0,0,684,72);

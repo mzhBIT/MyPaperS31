@@ -296,9 +296,18 @@ static bool draw_epub_cover_image(const RecentBook &recent, int x, int y, int w,
 }
 
 
-bool draw_bookshelf_cover(const RecentBook &book, int x, int y, int w, int h)
+bool draw_bookshelf_cover(const RecentBook &book, int x, int y, int w, int h, bool *bin_hit)
 {
-    return draw_epub_cover_image(book, x, y, w, h, true);
+    if(bin_hit) *bin_hit=false;
+    if(book.cover_path.empty()) return false;
+    if(cover_thumbnail::draw_bitmap(M5.Display,book.cover_path,x,y,w,h)) {
+        if(bin_hit) *bin_hit=true;
+        return true;
+    }
+    if(!draw_epub_cover_image(book, x, y, w, h, true)) return false;
+    // Legacy JPEG-only caches migrate lazily, before shelf decorations are drawn.
+    cover_thumbnail::save_bitmap(M5.Display,book.cover_path,x,y,w,h);
+    return true;
 }
 static void go_bookshelf() { launch_bookshelf(); }
 

@@ -88,6 +88,8 @@ namespace lgfx
     uint8_t* _du4_pair_lut_2d = nullptr;
     uint8_t* _du4_prime_pair_luts_2d = nullptr; // Two extra 4096-byte internal tables.
     uint8_t* _gc16_pair_lut_2d = nullptr;
+    uint16_t* _gc16_pair_indices_2d = nullptr;
+    size_t _gc16_pair_indices_capacity_2d = 0;
     uint16_t* _du4_active_groups_2d = nullptr;
     size_t _du4_active_group_capacity_2d = 0;
     uint8_t* _physical_buf = nullptr;

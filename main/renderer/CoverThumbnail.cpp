@@ -1,6 +1,8 @@
 #include "renderer/CoverThumbnail.h"
 
 #include "renderer/TurboJpegDecoder.h"
+#include "renderer/CoverBitmapFormat.h"
+#include "renderer/ReaderPageBuffer.h"
 
 #include <M5GFX.h>
 #include "driver/jpeg_encode.h"
@@ -14,6 +16,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
+#include <esp_heap_caps.h>
 #include <sys/stat.h>
 
 namespace cover_thumbnail {
@@ -230,6 +234,102 @@ static bool encode_hardware_jpeg(lgfx::LGFX_Sprite *sprite, const std::string &o
 
 } // namespace
 
+namespace {
+using PixelBuffer = std::unique_ptr<uint8_t, decltype(&heap_caps_free)>;
+std::string bitmap_path(const std::string &source, int w, int h) {
+    // Include the source filename so unrelated covers in one directory cannot collide.
+    return source + ".shelf_" + std::to_string(w) + "x" + std::to_string(h) + "_v1.bin";
+}
+bool source_identity(const std::string &source, struct stat &st) {
+    return stat(source.c_str(), &st) == 0 && S_ISREG(st.st_mode)
+        && st.st_size > 0 && uint64_t(st.st_size) <= UINT32_MAX;
+}
+bool whole_rect(lgfx::LGFXBase &gfx, int x, int y, int w, int h) {
+    int32_t cx,cy,cw,ch;
+    gfx.getClipRect(&cx,&cy,&cw,&ch);
+    return w>0 && w<=512 && !(w&1) && h>0 && h<=1024
+        && x>=0 && y>=0 && x+w<=gfx.width() && y+h<=gfx.height()
+        && x>=cx && y>=cy && x+w<=cx+cw && y+h<=cy+ch;
+}
+} // namespace
+
+bool draw_bitmap(lgfx::LGFX_Device &gfx, const std::string &source,
+                 int x, int y, int w, int h) {
+    struct stat st{};
+    if (!whole_rect(gfx,x,y,w,h) || !source_identity(source,st)) return false;
+    FILE *fp = std::fopen(bitmap_path(source,w,h).c_str(), "rb");
+    if (!fp) return false;
+    BitmapHeader header{};
+    bool ok = std::fread(&header,1,sizeof(header),fp)==sizeof(header)
+        && bitmap_header_valid(header,w,h,uint32_t(st.st_size),uint32_t(st.st_mtime));
+    PixelBuffer data(ok ? static_cast<uint8_t *>(heap_caps_malloc(
+        header.payload_bytes,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)) : nullptr, heap_caps_free);
+    ok = ok && data && std::fread(data.get(),1,header.payload_bytes,fp)==header.payload_bytes
+        && std::fgetc(fp)==EOF && !std::ferror(fp);
+    std::fclose(fp);
+    if (!ok || bitmap_checksum(data.get(),header.payload_bytes)!=header.checksum) return false;
+    // Use the panel's native nibble copy when available: no RGB expansion or
+    // second gray quantization. Generic destinations retain a compatible fallback.
+    if (gfx.getPanel() && gfx.getPanel()->writeNativeGrayscale4Rect(data.get(),w,h,x,y)) return true;
+    gfx.pushGrayscaleImage(x,y,w,h,data.get(),lgfx::color_depth_t::grayscale_4bit,
+                           uint32_t(0),uint32_t(0xffffff));
+    return true;
+}
+
+bool save_bitmap(lgfx::LGFXBase &gfx, const std::string &source,
+                 int x, int y, int w, int h) {
+    struct stat st{};
+    if (!whole_rect(gfx,x,y,w,h) || !source_identity(source,st)) return false;
+    const int64_t begin = esp_timer_get_time();
+    const size_t bytes = size_t(w/2)*h;
+    PixelBuffer data(static_cast<uint8_t *>(heap_caps_malloc(
+        bytes,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)),heap_caps_free);
+    if (!data) return false;
+    lgfx::rgb565_t row[512];
+    for (int sy=0;sy<h;++sy) {
+        gfx.readRect(x,y+sy,w,1,row);
+        for (int sx=0;sx<w;sx+=2) {
+            // Reading a panel gray nibble through RGB565 is exactly reversible.
+            const unsigned a=(unsigned(row[sx].r5)*15+15)/31;
+            const unsigned b=(unsigned(row[sx+1].r5)*15+15)/31;
+            data.get()[size_t(sy)*(w/2)+sx/2]=uint8_t((a<<4)|b);
+        }
+    }
+    const BitmapHeader header{0x34435643u,1,uint32_t(w),uint32_t(h),
+        uint32_t(st.st_size),uint32_t(st.st_mtime),uint32_t(bytes),bitmap_checksum(data.get(),bytes)};
+    const std::string path=bitmap_path(source,w,h), temp=path+".tmp";
+    FILE *fp=std::fopen(temp.c_str(),"wb");
+    bool ok=fp && std::fwrite(&header,1,sizeof(header),fp)==sizeof(header)
+        && std::fwrite(data.get(),1,bytes,fp)==bytes;
+    if(fp && std::fclose(fp)!=0) ok=false;
+    if(ok) {
+        // Only replace this derived cache, never the source/JPEG.
+        std::remove(path.c_str());
+        ok=std::rename(temp.c_str(),path.c_str())==0;
+    }
+    if(!ok) std::remove(temp.c_str());
+    ESP_LOGI(TAG,"shelf bin created=%u size=%dx%d bytes=%u time=%lld us",
+        unsigned(ok),w,h,unsigned(bytes),(long long)(esp_timer_get_time()-begin));
+    return ok;
+}
+
+static void create_shelf_bitmaps(const std::string &source, const std::string &jpeg) {
+    int iw=0,ih=0; bool progressive=false;
+    if (!probe_image(jpeg,".jpg",&iw,&ih,&progressive)) return;
+    // Same panel quantizer as live drawing; no physical scan/bus/task involved.
+    for (const auto &size : {std::pair<int,int>{164,214},{120,156}}) {
+        ReaderPageBuffer image;
+        if(!image.createSprite(size.first,size.second)) continue;
+        image.setDither(false);
+        const float scale=std::max(float(size.first)/iw,float(size.second)/ih);
+        const int dw=std::max(1,int(iw*scale+0.5f)), dh=std::max(1,int(ih*scale+0.5f));
+        image.fillScreen(TFT_WHITE);
+        if(image.drawJpgFile(jpeg.c_str(),(size.first-dw)/2,(size.second-dh)/2,
+                             dw,dh,0,0,scale,scale))
+            save_bitmap(image,source,0,0,size.first,size.second);
+    }
+}
+
 std::string cache_path_for(const std::string &source_path)
 {
     size_t slash = source_path.find_last_of('/');
@@ -280,7 +380,12 @@ static bool ensure_sized(const std::string &source_path, const std::string &thum
 
 bool ensure(const std::string &source_path, const std::string &thumbnail_path)
 {
-    return ensure_sized(source_path, thumbnail_path, THUMB_WIDTH, THUMB_HEIGHT);
+    const bool existed=valid_jpeg_file(thumbnail_path);
+    const bool ok=ensure_sized(source_path, thumbnail_path, THUMB_WIDTH, THUMB_HEIGHT);
+    // Readers retain the JPEG path and may delete the extracted original.
+    // Bind initial BINs to that retained JPEG, not the disposable source.
+    if(ok && !existed) create_shelf_bitmaps(thumbnail_path,thumbnail_path);
+    return ok;
 }
 
 bool ensure_square(const std::string &source_path, const std::string &thumbnail_path)

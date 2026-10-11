@@ -1,6 +1,7 @@
 #include "Panel_EPD_2D.hpp"
 #include "EpdTransitionStats.h"
 #include "EpdDu4Triple.h"
+#include "EpdPairIndices.h"
 
 #if SOC_LCD_I80_SUPPORTED && (defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32P4) || defined(CONFIG_IDF_TARGET_ESP32S31))
 
@@ -519,6 +520,14 @@ namespace lgfx
     }
   }
 
+  // Batch-owned diagnostics: no logging or per-pixel timers on the scan path.
+  struct drive_frame_timing_t {
+    uint64_t lut_us = 0, clear_us = 0, pixels_us = 0, total_us = 0;
+    unsigned count = 1; // Fused rendering is measured as a group, never divided artificially.
+    int phase = -1;
+    bool prime = false;
+  };
+
   // GC16 Quality always scans the complete panel.  A 64 KiB pair LUT maps
   // the two old 4bpp pixels and two target 4bpp pixels directly to their two
   // 2-bit drive values, removing the hot loop's masks and dual transition
@@ -529,7 +538,9 @@ namespace lgfx
       size_t memory_width, size_t scan_rows,
       const uint8_t* pair_lut,
       uint16_t update_x, uint16_t update_y,
-      uint16_t update_width, uint16_t update_height)
+      uint16_t update_width, uint16_t update_height,
+      drive_frame_timing_t* timing = nullptr,
+      const uint16_t* indices = nullptr)
   {
     static constexpr uint8_t pair_shifts[8] = {
       4, 0, 12, 8, 20, 16, 28, 24
@@ -538,11 +549,14 @@ namespace lgfx
     const size_t groups_per_row = memory_width >> 4;
     const size_t output_stride = memory_width >> 2;
 
+    const int64_t pixels_begin = timing ? esp_timer_get_time() : 0;
     // Outside a partial update every source must remain neutral, including
     // pixels sharing a 16-pixel output word with the requested rectangle.
     if (update_x != 0 || update_y != 0
      || update_width != memory_width || update_height != scan_rows) {
       memset(output_frame, 0, output_stride * scan_rows);
+      const int64_t clear_end = timing ? esp_timer_get_time() : 0;
+      if (timing) timing->clear_us = clear_end - pixels_begin;
       const size_t byte_begin = update_x >> 1;
       const size_t byte_end = std::min(stride, size_t(update_x + update_width) >> 1);
       const size_t row_end = std::min(scan_rows, size_t(update_y + update_height));
@@ -553,7 +567,16 @@ namespace lgfx
         for (size_t group = byte_begin >> 3; group < (byte_end + 7) >> 3; ++group) {
           const size_t base = group << 3;
           uint32_t packed = 0;
-          if (base >= byte_begin && base + 8 <= byte_end) {
+          if (indices) {
+            const auto* index_group = indices + y * stride + base;
+            if (base >= byte_begin && base + 8 <= byte_end) {
+              packed = lgfx_epd_pair_indices::group(index_group, pair_lut);
+            } else {
+              packed = lgfx_epd_pair_indices::group_range(index_group, pair_lut,
+                  unsigned(std::max(base, byte_begin) - base),
+                  unsigned(std::min(base + 8, byte_end) - base));
+            }
+          } else if (base >= byte_begin && base + 8 <= byte_end) {
             // Interior groups use the same branch-free hot loop as full-screen.
             for (unsigned pair = 0; pair < 8; ++pair) {
               const unsigned index = (unsigned(from_row[base + pair]) << 8)
@@ -572,6 +595,19 @@ namespace lgfx
           output[group] = permute_epd_output(packed);
         }
       }
+      if (timing) timing->pixels_us = esp_timer_get_time() - clear_end;
+      return;
+    }
+
+    if (indices) {
+      for (size_t y = 0; y < scan_rows; ++y) {
+        auto* output = reinterpret_cast<uint32_t*>(output_frame + y * output_stride);
+        const uint16_t* index_row = indices + y * stride;
+        for (size_t group = 0; group < groups_per_row; ++group)
+          output[group] = permute_epd_output(
+              lgfx_epd_pair_indices::group(index_row + (group << 3), pair_lut));
+      }
+      if (timing) timing->pixels_us = esp_timer_get_time() - pixels_begin;
       return;
     }
 
@@ -591,6 +627,7 @@ namespace lgfx
         output[group] = permute_epd_output(packed);
       }
     }
+    if (timing) timing->pixels_us = esp_timer_get_time() - pixels_begin;
   }
 
   static constexpr int GC16_PIPELINE_MAX_PHASES = 64;
@@ -619,6 +656,8 @@ namespace lgfx
 
   struct gc16_phase_pipeline_t
   {
+    drive_frame_timing_t* timings = nullptr;
+    const uint16_t* indices = nullptr;
     uint8_t* frames = nullptr;
     size_t frame_bytes = 0;
     const uint8_t* physical = nullptr;
@@ -654,14 +693,18 @@ namespace lgfx
         ctx->unique_transitions + size_t(unique) * 256;
     const int64_t lut_begin = esp_timer_get_time();
     build_gc16_pair_lut(ctx->pair_lut, transition);
-    ctx->lut_build_us += esp_timer_get_time() - lut_begin;
     const int64_t render_begin = esp_timer_get_time();
+    ctx->lut_build_us += render_begin - lut_begin;
+    auto* timing = ctx->timings ? &ctx->timings[unique] : nullptr;
+    if (timing) timing->lut_us = render_begin - lut_begin;
     render_gc16_pair_phase_frame(
         ctx->frames + size_t(slot) * ctx->frame_bytes,
         ctx->physical, ctx->target,
         ctx->memory_width, ctx->scan_rows, ctx->pair_lut,
-        ctx->update_x, ctx->update_y, ctx->update_width, ctx->update_height);
+        ctx->update_x, ctx->update_y, ctx->update_width, ctx->update_height,
+        timing, ctx->indices);
     ctx->frame_render_us += esp_timer_get_time() - render_begin;
+    if (timing) timing->total_us = esp_timer_get_time() - lut_begin;
     __atomic_store_n(&ctx->unique_slot[unique], slot, __ATOMIC_RELEASE);
     __atomic_store_n(&ctx->ready_unique[slot], unique, __ATOMIC_RELEASE);
   }
@@ -911,6 +954,7 @@ namespace lgfx
 
   struct du4_phase_pipeline_t
   {
+    drive_frame_timing_t* timings = nullptr;
     uint8_t* frames = nullptr;
     size_t frame_bytes = 0;
     const uint8_t* physical = nullptr;
@@ -946,6 +990,8 @@ namespace lgfx
         ctx->unique_transitions + size_t(unique) * 256;
     const int64_t render_begin = esp_timer_get_time();
     build_du4_pair_lut(ctx->pair_lut, transition);
+    const int64_t lut_end = esp_timer_get_time();
+    du4_render_timing_t detail;
     render_du4_phase_frame(
         ctx->frames + size_t(unique) * ctx->frame_bytes,
         ctx->frame_bytes, ctx->physical, ctx->target,
@@ -955,8 +1001,15 @@ namespace lgfx
         ctx->update_width, ctx->update_height,
         ctx->pair_lut, ctx->pair_lut + DU4_PAIR_LUT_BYTES,
         du4_equal_pairs_are_idle(transition),
-        ctx->active_groups, ctx->active_group_count);
+        ctx->active_groups, ctx->active_group_count, &detail);
     ctx->frame_render_us += esp_timer_get_time() - render_begin;
+    if (ctx->timings) {
+      auto& timing = ctx->timings[unique];
+      timing.lut_us = lut_end - render_begin;
+      timing.clear_us = detail.clear_us;
+      timing.pixels_us = detail.pixels_us;
+      timing.total_us = esp_timer_get_time() - render_begin;
+    }
     __atomic_store_n(&ctx->ready[unique], true, __ATOMIC_RELEASE);
   }
 
@@ -1703,14 +1756,16 @@ namespace lgfx
       }
     }
 
-    // The reader currently submits a full logical page after the import. Mark
-    // the full panel dirty so this native copy participates in that batch even
-    // though it bypasses the ordinary M5GFX pixel writers.
-    _range_mod.left = 0;
-    _range_mod.top = 0;
-    _range_mod.right = _cfg.panel_width - 1;
-    _range_mod.bottom = _cfg.panel_height - 1;
-    ESP_LOGI(TAG_2D,
+    // Native covers also serve partial shelf redraws. Mark only the imported
+    // rectangle, just like the ordinary pixel writer (including rotation).
+    uint_fast16_t xs=logical_x, ys=logical_y;
+    uint_fast16_t xe=logical_x+logical_width-1, ye=logical_y+logical_height-1;
+    _rotate_pos(xs,ys,xe,ye);
+    _range_mod.left = std::min<int32_t>(_range_mod.left,xs);
+    _range_mod.top = std::min<int32_t>(_range_mod.top,ys);
+    _range_mod.right = std::max<int32_t>(_range_mod.right,xe);
+    _range_mod.bottom = std::max<int32_t>(_range_mod.bottom,ye);
+    ESP_LOGD(TAG_2D,
              "native 4bpp rect import: src=%ux%u dst=%d,%d rotation=%u time=%lld ms",
              (unsigned)logical_width, (unsigned)logical_height,
              (int)logical_x, (int)logical_y, (unsigned)r,
@@ -1947,10 +2002,18 @@ namespace lgfx
       bool deduplicated = false;
       bool gc16_pipeline_active = false;
       gc16_phase_pipeline_t gc16_pipeline = {};
+      // Only task_update owns batches; workers finish before reuse. Keep the
+      // bounded record array off the already busy display task stack.
+      static drive_frame_timing_t frame_timings[GC16_PIPELINE_MAX_PHASES];
+      for (auto& timing : frame_timings) timing = drive_frame_timing_t{};
+      gc16_pipeline.timings = frame_timings;
+      const uint16_t* pair_indices = nullptr;
+      uint64_t pair_indices_us = 0;
       bool du4_pipeline_active = false;
       uint8_t* animation_frames = nullptr;
       int sequence_phases = selected.phases->phases;
       du4_phase_pipeline_t du4_pipeline = {};
+      du4_pipeline.timings = frame_timings;
       animation_pipeline_t animation_pipeline = {};
       bool animation_deferred_source = false;
       // Capture only on the power-on critical path; report after power-off
@@ -2196,6 +2259,36 @@ namespace lgfx
           continue;
         }
 
+        // Build only from this batch's immutable target/physical snapshots.
+        // Do not cache validity across batches or alter the calibrated waveform.
+        // Prioritize scan-frame allocation; inability to reserve indices falls back.
+#if MYPAPER_EPD_2D_GC16_PAIR_INDICES
+        if (gc16_pair_renderer && cached_phase_count >= 3) {
+          const size_t count = (memory_w >> 1) * scan_rows;
+          if (me->_gc16_pair_indices_capacity_2d < count) {
+            auto* expanded = static_cast<uint16_t*>(heap_caps_aligned_alloc(
+                64, count * sizeof(uint16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+            if (expanded) {
+              heap_caps_free(me->_gc16_pair_indices_2d);
+              me->_gc16_pair_indices_2d = expanded;
+              me->_gc16_pair_indices_capacity_2d = count;
+            }
+          }
+          if (me->_gc16_pair_indices_capacity_2d >= count) {
+            const int64_t begin = esp_timer_get_time();
+            const size_t index_stride = memory_w >> 1;
+            lgfx_epd_pair_indices::build_rows(me->_gc16_pair_indices_2d,
+                me->_physical_buf, me->_target_buf, index_stride,
+                std::min(index_stride, size_t(update.x) >> 1),
+                std::min(index_stride, (size_t(update.x) + update.w) >> 1),
+                std::min(scan_rows, size_t(update.y)),
+                std::min(scan_rows, size_t(update.y) + update.h));
+            pair_indices_us = esp_timer_get_time() - begin;
+            pair_indices = me->_gc16_pair_indices_2d;
+          }
+        }
+#endif
+        gc16_pipeline.indices = pair_indices;
         if (gc16_pipeline_requested) {
           gc16_pipeline_active = true;
           gc16_pipeline.frames = phase_frames;
@@ -2313,6 +2406,8 @@ namespace lgfx
             : du4_pipeline_active ? int(du4_pipeline.next_unique)
                                   : animation_deferred_source ? 0 : cached_phase_count;
         int rendered_prime_count = 0;
+        for (int cached = 0; cached < std::min(cached_phase_count, GC16_PIPELINE_MAX_PHASES); ++cached)
+          frame_timings[cached].phase = deduplicated ? representative_phases[cached] : cached;
 #if MYPAPER_EPD_2D_DU4_TRIPLE_PRIME
         if (du4_pipeline_active && du4_full_screen && du4_active_groups && deduplicated
          && initial_render_count == 3 && me->_du4_pair_lut_2d) {
@@ -2328,10 +2423,17 @@ namespace lgfx
             build_du4_pair_lut(lut1, unique_transitions + 256);
             build_du4_pair_lut(lut2, unique_transitions + 512);
             du4_prime_lut_us += esp_timer_get_time() - render_begin;
+            auto& detail = frame_timings[0];
+            detail.lut_us = esp_timer_get_time() - render_begin;
+            detail.count = 3;
+            detail.prime = true;
             render_du4_three_frames(phase_frames, phase_frame_bytes,
                 me->_physical_buf, me->_target_buf, total_group_count,
                 du4_active_groups, du4_active_group_count,
                 lut0 + DU4_PAIR_LUT_BYTES, lut0, lut1, lut2, du4_prime_timing);
+            detail.clear_us = du4_prime_timing.clear_us;
+            detail.pixels_us = du4_prime_timing.pixels_us;
+            detail.total_us = esp_timer_get_time() - render_begin;
             phase_render_us += esp_timer_get_time() - render_begin;
             for (int cached = 0; cached < 3; ++cached)
               __atomic_store_n(&du4_pipeline.ready[cached], true, __ATOMIC_RELEASE);
@@ -2341,6 +2443,10 @@ namespace lgfx
         }
 #endif
         for (int cached = rendered_prime_count; cached < initial_render_count; ++cached) {
+          drive_frame_timing_t* detail = cached < GC16_PIPELINE_MAX_PHASES
+              ? &frame_timings[cached] : nullptr;
+          const int64_t frame_begin = esp_timer_get_time();
+          if (detail) detail->prime = true;
           const int phase = deduplicated ? representative_phases[cached]
                                          : cached;
           const uint8_t* render_transition = nullptr;
@@ -2360,16 +2466,20 @@ namespace lgfx
                 me->_gc16_pair_lut_2d, render_transition);
             pair_lut_build_us += esp_timer_get_time() - lut_begin;
             const int64_t render_begin = esp_timer_get_time();
+            if (detail) detail->lut_us = render_begin - lut_begin;
             render_gc16_pair_phase_frame(
                 phase_frames + size_t(cached) * phase_frame_bytes,
                 me->_physical_buf, me->_target_buf,
                 memory_w, scan_rows, me->_gc16_pair_lut_2d,
-                update.x, update.y, update.w, update.h);
+                update.x, update.y, update.w, update.h, detail, pair_indices);
             phase_render_us += esp_timer_get_time() - render_begin;
           } else if (selected.type == WAVEFORM_MODE_DU4
            && me->_du4_pair_lut_2d != nullptr) {
             const int64_t render_begin = esp_timer_get_time();
             build_du4_pair_lut(me->_du4_pair_lut_2d, render_transition);
+            const int64_t lut_end = esp_timer_get_time();
+            du4_render_timing_t frame_detail;
+            if (detail) detail->lut_us = lut_end - render_begin;
             if (du4_pipeline_active)
               du4_prime_lut_us += esp_timer_get_time() - render_begin;
             render_du4_phase_frame(
@@ -2381,7 +2491,15 @@ namespace lgfx
                 me->_du4_pair_lut_2d + DU4_PAIR_LUT_BYTES,
                 du4_equal_pairs_are_idle(render_transition),
                 du4_active_groups, du4_active_group_count,
-                du4_pipeline_active ? &du4_prime_timing : nullptr);
+                &frame_detail);
+            if (du4_pipeline_active) {
+              du4_prime_timing.clear_us += frame_detail.clear_us;
+              du4_prime_timing.pixels_us += frame_detail.pixels_us;
+            }
+            if (detail) {
+              detail->clear_us = frame_detail.clear_us;
+              detail->pixels_us = frame_detail.pixels_us;
+            }
             phase_render_us += esp_timer_get_time() - render_begin;
           } else {
             const int64_t render_begin = esp_timer_get_time();
@@ -2392,6 +2510,7 @@ namespace lgfx
                 update.x, update.y, update.w, update.h, render_transition);
             phase_render_us += esp_timer_get_time() - render_begin;
           }
+          if (detail) detail->total_us = esp_timer_get_time() - frame_begin;
           if (gc16_pipeline_active) {
             const int slot = cached;
             __atomic_store_n(&gc16_pipeline.unique_slot[cached], slot,
@@ -2438,7 +2557,7 @@ namespace lgfx
                    (unsigned long long)pair_lut_build_us,
                    (unsigned long long)phase_render_us,
                    selected.type == WAVEFORM_MODE_HD
-                       ? "hd-gray8-pair-lut-ring" : "gc16-pair-lut-ring",
+                       ? "hd-gl16-pair-lut-ring" : "gc16-pair-lut-ring",
                    gc16_pipeline.external_stack ? "psram" : "internal");
         } else if (du4_pipeline_active) {
           du4_pipeline.frame_render_us = phase_render_us;
@@ -2493,7 +2612,7 @@ namespace lgfx
                    (unsigned long long)phase_render_us,
                    gc16_pair_renderer
                        ? (selected.type == WAVEFORM_MODE_HD
-                           ? "hd-gray8-pair-lut" : "gc16-pair-lut")
+                           ? "hd-gl16-pair-lut" : "gc16-pair-lut")
                      : selected.type == WAVEFORM_MODE_DU4
                      && me->_du4_pair_lut_2d != nullptr
                        ? "du4-pair-lut" : "generic",
@@ -2986,6 +3105,25 @@ namespace lgfx
                  selected.phases->phases, (unsigned)retained);
       } else {
         me->_physical_state_known = false;
+      }
+      if (selected.type == WAVEFORM_MODE_GC16 || selected.type == WAVEFORM_MODE_HD) {
+        ESP_LOGI(TAG_2D,
+                 "pair indices (after refresh): enabled=%u build=%llu us bytes=%u",
+                 (unsigned)(pair_indices != nullptr),
+                 (unsigned long long)pair_indices_us,
+                 (unsigned)(pair_indices ? (memory_w >> 1) * scan_rows * sizeof(uint16_t) : 0));
+      }
+      for (int unique = 0; unique < std::min(cached_phase_count, GC16_PIPELINE_MAX_PHASES); ++unique) {
+        const auto& timing = frame_timings[unique];
+        if (!timing.total_us) continue;
+        ESP_LOGI(TAG_2D,
+                 "drive frame (after refresh): type=%u unique0=%d phase0=%d count=%u stage=%s lut=%llu clear=%llu pixels=%llu total=%llu us",
+                 (unsigned)selected.type, unique, timing.phase, timing.count,
+                 timing.prime ? "prime" : "worker",
+                 (unsigned long long)timing.lut_us,
+                 (unsigned long long)timing.clear_us,
+                 (unsigned long long)timing.pixels_us,
+                 (unsigned long long)timing.total_us);
       }
       if (du4_prep.valid) {
         ESP_LOGI(TAG_2D,
