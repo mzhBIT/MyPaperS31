@@ -19,6 +19,8 @@ esp_err_t set_size(int pixels);
 uint32_t generation();
 int line_height(int pixels = 0);
 int measure(const std::string &text, int pixels = 0);
+// Top coordinate that centers actual ink (including fallback glyphs), not em box.
+int centered_y(const std::string &text, int center_y, int pixels);
 std::string ellipsize(const std::string &text, int max_width);
 
 void draw_left(lgfx::LGFXBase &gfx, const std::string &text, int x, int y, uint16_t color = TFT_BLACK);
@@ -28,5 +30,7 @@ void draw_left_sized(lgfx::LGFXBase &gfx, const std::string &text, int x, int y,
                      uint16_t color = TFT_BLACK);
 void draw_right_sized(lgfx::LGFXBase &gfx, const std::string &text, int right_x, int y, int pixels,
                       uint16_t color = TFT_BLACK);
+void draw_on_background(lgfx::LGFXBase &gfx, const std::string &text, int x, int y, int pixels,
+                        uint16_t color, uint16_t background);
 
 } // namespace system_font

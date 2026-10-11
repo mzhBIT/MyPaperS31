@@ -420,7 +420,9 @@ esp_err_t storage_sdcard_mount(void)
 
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
         .format_if_mount_failed = false,
-        .max_files = 5,
+        // Twelve UI banks: at most 24 SD primary/fallback font handles.
+        // Reserve another 8 for reader fonts, ZIP, covers and application I/O.
+        .max_files = 32,
         .allocation_unit_size = 16 * 1024,
     };
 

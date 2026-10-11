@@ -768,6 +768,15 @@ int TextRenderer::lineHeight() const
     return _style.font_size + _style.line_spacing;
 }
 
+bool TextRenderer::glyphInkExtents(uint32_t codepoint, int &above, int &below)
+{
+    const auto *glyph = getGlyph(codepoint);
+    if (!glyph) return false;
+    above = glyph->bitmap_top;
+    below = glyph->height - glyph->bitmap_top;
+    return true;
+}
+
 int TextRenderer::baseline() const
 {
     if (_ft_ready || _bin_ready) return _baseline;
@@ -2182,6 +2191,16 @@ void TextRenderer::drawGlyphScaled(lgfx::LGFXBase &gfx, const Glyph &glyph,
 
 void TextRenderer::drawGlyphRuns(lgfx::LGFXBase &gfx, const Glyph &glyph, int x, int baseline_y, uint16_t color)
 {
+    const auto ink = [&](uint8_t level) -> uint16_t {
+        if (_text_background == TFT_WHITE) {
+            uint8_t v = color == TFT_WHITE ? level * 17 : 255 - level * 17;
+            return (color == TFT_BLACK || color == TFT_WHITE) ? gray565(v) : color;
+        }
+        unsigned r = (((color >> 11) & 31) * level + ((_text_background >> 11) & 31) * (15 - level) + 7) / 15;
+        unsigned g = (((color >> 5) & 63) * level + ((_text_background >> 5) & 63) * (15 - level) + 7) / 15;
+        unsigned b = ((color & 31) * level + (_text_background & 31) * (15 - level) + 7) / 15;
+        return (r << 11) | (g << 5) | b;
+    };
     if (glyph.data_size == 0 || glyph.width <= 0 || glyph.height <= 0) return;
     if (glyph.data_offset + glyph.data_size > _glyph_pool_used) return;
 
@@ -2197,8 +2216,7 @@ void TextRenderer::drawGlyphRuns(lgfx::LGFXBase &gfx, const Glyph &glyph, int x,
 
             if (level == 0) {
                 if (run_start >= 0) {
-                    uint8_t v = color == TFT_WHITE ? (uint8_t)(run_level * 17) : (uint8_t)(255 - run_level * 17);
-                    uint16_t draw_color = (color == TFT_BLACK || color == TFT_WHITE) ? gray565(v) : color;
+                    uint16_t draw_color = ink(run_level);
                     gfx.writeFastHLine(gx + run_start, gy + row, col - run_start, draw_color);
                     run_start = -1;
                 }
@@ -2209,16 +2227,14 @@ void TextRenderer::drawGlyphRuns(lgfx::LGFXBase &gfx, const Glyph &glyph, int x,
                 run_start = col;
                 run_level = level;
             } else if (level != run_level) {
-                uint8_t v = color == TFT_WHITE ? (uint8_t)(run_level * 17) : (uint8_t)(255 - run_level * 17);
-                uint16_t draw_color = (color == TFT_BLACK || color == TFT_WHITE) ? gray565(v) : color;
+                uint16_t draw_color = ink(run_level);
                 gfx.writeFastHLine(gx + run_start, gy + row, col - run_start, draw_color);
                 run_start = col;
                 run_level = level;
             }
         }
         if (run_start >= 0) {
-            uint8_t v = color == TFT_WHITE ? (uint8_t)(run_level * 17) : (uint8_t)(255 - run_level * 17);
-            uint16_t draw_color = (color == TFT_BLACK || color == TFT_WHITE) ? gray565(v) : color;
+            uint16_t draw_color = ink(run_level);
             gfx.writeFastHLine(gx + run_start, gy + row, glyph.width - run_start, draw_color);
         }
     }

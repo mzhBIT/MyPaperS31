@@ -34,7 +34,7 @@ esp_err_t settings_restore_defaults()
         "wifi_cfg", "frontlight", "home_ui", "time_basis", "ds_chat", "amap",
         "reader_style", "rss_reader", "reader_bg", "rss_reader_bg",
         "reader_cover", "rss_reader_cover", "script_mode", "writing_mode",
-        "audio_out", "text_input", "weread_pref", "system_ui", "system_font"
+        "audio_out", "text_input", "weread_pref", "system_ui", "system_font", "bookshelf_ui"
     };
     const char *files[] = {app_paths::reader_style_file(), app_paths::reader_font_file()};
     // Remove old SD fallbacks too, so they cannot resurrect prior preferences.

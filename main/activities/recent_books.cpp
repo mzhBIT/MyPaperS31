@@ -1,4 +1,5 @@
 #include "recent_books.h"
+#include "RecentBookCapacity.h"
 #include "parser/epub_parser.h"
 #include "storage/app_paths.h"
 
@@ -12,7 +13,6 @@
 #include <esp_timer.h>
 #include <esp_log.h>
 
-static constexpr size_t RECENT_BOOK_LIMIT = 20;
 static constexpr uint32_t TXT_PROGRESS_MAGIC = 0x54585032; // TXP2
 static constexpr uint32_t TXT_PROGRESS_VERSION = 1;
 static constexpr uint32_t EPUB_PROGRESS_MAGIC = 0x45504231; // EPB1
@@ -381,11 +381,12 @@ size_t recent_books_load(std::vector<RecentBook> *books)
 {
     if (!books) return 0;
     books->clear();
+    if (!recent_book_capacity::reserve_one(*books)) return 0;
 
     FILE *fp = std::fopen(app_paths::recent_books_file(), "rb");
     if (!fp) return 0;
 
-    while (books->size() < RECENT_BOOK_LIMIT) {
+    while (true) {
         RecentBook book;
         if (!read_line(fp, &book.path)) break;
         if (!read_line(fp, &book.type) || !read_line(fp, &book.title) || !read_line(fp, &book.cover_path)) break;
@@ -402,7 +403,13 @@ size_t recent_books_load(std::vector<RecentBook> *books)
                 break;
             }
         }
-        if (!duplicate) books->push_back(std::move(book));
+        if (!duplicate) {
+            if (!recent_book_capacity::reserve_one(*books)) {
+                ESP_LOGE("BOOKSHELF", "record capacity exhausted");
+                break;
+            }
+            books->push_back(std::move(book));
+        }
     }
     std::fclose(fp);
     return books->size();
@@ -448,8 +455,8 @@ bool recent_book_save(const char *path, const char *type, const char *title, con
         books.erase(it);
         break;
     }
+    if (!recent_book_capacity::reserve_one(books)) return false;
     books.insert(books.begin(), std::move(current));
-    if (books.size() > RECENT_BOOK_LIMIT) books.resize(RECENT_BOOK_LIMIT);
 
     app_paths::ensure_data_dir();
     std::string temp_path = std::string(app_paths::recent_books_file()) + ".tmp";
@@ -497,7 +504,11 @@ bool recent_books_rename_path(const char *old_path, const char *new_path)
     if (!fp) return true;  // No shelf state to migrate.
 
     std::vector<RecentBook> books;
-    while (books.size() < RECENT_BOOK_LIMIT) {
+    if (!recent_book_capacity::reserve_one(books)) {
+        std::fclose(fp);
+        return false;
+    }
+    while (true) {
         RecentBook book;
         if (!read_line(fp, &book.path)) break;
         if (!read_line(fp, &book.type) || !read_line(fp, &book.title) || !read_line(fp, &book.cover_path)) break;
@@ -508,6 +519,10 @@ bool recent_books_rename_path(const char *old_path, const char *new_path)
         if (book.path == old_path) {
             book.path = new_path;
             book.title = recent_book_file_stem(new_path);
+        }
+        if (!recent_book_capacity::reserve_one(books)) {
+            std::fclose(fp);
+            return false; // Never replace the index with a truncated list.
         }
         books.push_back(std::move(book));
     }

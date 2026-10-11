@@ -1,5 +1,6 @@
 #include "activities/Activity.h"
 #include "activities/HomeActivity.h"
+#include "activities/BookshelfActivity.h"
 #include "activities/ActivityManager.h"
 #include "activities/DeepSeekActivity.h"
 #include "activities/MusicActivity.h"
@@ -246,9 +247,8 @@ static bool probe_image(const std::string &path, const std::string &ext, int *w,
     return ok;
 }
 
-static bool draw_epub_cover_image(const RecentBook &recent, int x, int y, int w, int h) {
-    if ((recent.type != "epub" && recent.type != "mobi" && recent.type != "fb2") ||
-        recent.cover_path.empty() || !file_exists(recent.cover_path)) return false;
+static bool draw_epub_cover_image(const RecentBook &recent, int x, int y, int w, int h, bool fill = false) {
+    if (recent.cover_path.empty() || !file_exists(recent.cover_path)) return false;
     std::string image_path = recent.cover_path;
     std::string thumbnail_path = cover_thumbnail::cache_path_for(image_path);
     if (image_path != thumbnail_path && cover_thumbnail::ensure(image_path, thumbnail_path)) {
@@ -261,15 +261,26 @@ static bool draw_epub_cover_image(const RecentBook &recent, int x, int y, int w,
     int ih = 0;
     bool progressive = false;
     if (!probe_image(image_path, ext, &iw, &ih, &progressive)) return false;
-    if (ext == ".jpg" && !progressive && p4_jpeg::draw_file(M5.Display, image_path.c_str(), x, y, w, h)) {
-        return true;
-    }
-    float scale = std::min((float)w / (float)iw, (float)h / (float)ih);
+    float scale = fill ? std::max((float)w / (float)iw, (float)h / (float)ih)
+                       : std::min((float)w / (float)iw, (float)h / (float)ih);
     if (scale <= 0.0f) return false;
     int draw_w = std::max(1, (int)((float)iw * scale + 0.5f));
     int draw_h = std::max(1, (int)((float)ih * scale + 0.5f));
-    int draw_x = x + std::max(0, (w - draw_w) / 2);
-    int draw_y = y + std::max(0, (h - draw_h) / 2);
+    int draw_x = x + (w - draw_w) / 2;
+    int draw_y = y + (h - draw_h) / 2;
+    struct Clip {
+        int32_t x, y, w, h;
+        Clip(int32_t cx, int32_t cy, int32_t cw, int32_t ch) {
+            M5.Display.getClipRect(&x, &y, &w, &h);
+            int right = std::min(x+w, cx+cw), bottom = std::min(y+h, cy+ch);
+            cx = std::max(cx,x); cy = std::max(cy,y);
+            M5.Display.setClipRect(cx,cy,std::max<int32_t>(0,right-cx),std::max<int32_t>(0,bottom-cy));
+        }
+        ~Clip() { M5.Display.setClipRect(x,y,w,h); }
+    } clip(x,y,w,h);
+    if (ext == ".jpg" && !progressive && p4_jpeg::draw_file(M5.Display, image_path.c_str(), draw_x, draw_y, draw_w, draw_h)) {
+        return true;
+    }
 
     bool ok = false;
     if (ext == ".jpg" && progressive) {
@@ -284,301 +295,12 @@ static bool draw_epub_cover_image(const RecentBook &recent, int x, int y, int w,
     return ok;
 }
 
-static constexpr int RECENT_HEADER_H = header_layout::height;
-static constexpr int RECENT_PAGE_SIZE = 4;
-static constexpr int RECENT_PAD = 22;
-static constexpr int RECENT_GAP = 10;
 
-static void recent_card_rect(int slot, int *x, int *y, int *w, int *h)
+bool draw_bookshelf_cover(const RecentBook &book, int x, int y, int w, int h)
 {
-    int screen_w = M5.Display.width();
-    int screen_h = M5.Display.height();
-    int content_y = RECENT_HEADER_H;
-    int content_h = screen_h - content_y - 16;
-    int row_h = (content_h - RECENT_GAP * (RECENT_PAGE_SIZE - 1)) / RECENT_PAGE_SIZE;
-    if (x) *x = RECENT_PAD;
-    if (y) *y = content_y + slot * (row_h + RECENT_GAP);
-    if (w) *w = screen_w - RECENT_PAD * 2;
-    if (h) *h = row_h;
+    return draw_epub_cover_image(book, x, y, w, h, true);
 }
-
-class RecentBooksActivity : public Activity {
-public:
-    void on_create() override
-    {
-        ESP_LOGI(TAG, "bookshelf create");
-        reload();
-        redraw();
-    }
-
-    void on_show() override
-    {
-        if (!m_seen_show) {
-            m_seen_show = true;
-            return;
-        }
-        reload();
-        redraw();
-    }
-
-    bool on_touch(const TouchEvent &event) override
-    {
-        if (event.type == TouchEventType::Back) {
-            ActivityManager::instance().pop();
-            return true;
-        }
-        if (event.type == TouchEventType::SwipeUp) {
-            change_page(1);
-            return true;
-        }
-        if (event.type == TouchEventType::SwipeDown) {
-            change_page(-1);
-            return true;
-        }
-        if (event.type != TouchEventType::Tap) return false;
-        if (header_layout::left_hit(event.x, event.y, 140)) {
-            ActivityManager::instance().pop();
-            return true;
-        }
-
-        int first = current_page() * RECENT_PAGE_SIZE;
-        for (int slot = 0; slot < RECENT_PAGE_SIZE; ++slot) {
-            int idx = first + slot;
-            if (idx >= (int)m_books.size()) break;
-            int x = 0, y = 0, w = 0, h = 0;
-            recent_card_rect(slot, &x, &y, &w, &h);
-            if (event.x >= x && event.x < x + w && event.y >= y && event.y < y + h) {
-                open_book(idx);
-                return true;
-            }
-        }
-        return false;
-    }
-
-    bool on_key(int key) override
-    {
-        if (key == APP_KEY_BACK) {
-            ActivityManager::instance().pop();
-            return true;
-        }
-        if (m_books.empty()) return false;
-        if (key == APP_KEY_UP && m_focus > 0) {
-            --m_focus;
-            redraw();
-            return true;
-        }
-        if (key == APP_KEY_DOWN && m_focus + 1 < (int)m_books.size()) {
-            ++m_focus;
-            redraw();
-            return true;
-        }
-        if (key == APP_KEY_OK) {
-            open_focused();
-            return true;
-        }
-        return false;
-    }
-
-private:
-    std::vector<RecentBook> m_books;
-    std::vector<RecentBookProgress> m_progress;
-    std::vector<uint8_t> m_progress_loaded;
-    int m_focus = 0;
-    bool m_seen_show = false;
-
-    int current_page() const
-    {
-        return m_focus / RECENT_PAGE_SIZE;
-    }
-
-    int page_count() const
-    {
-        return std::max(1, ((int)m_books.size() + RECENT_PAGE_SIZE - 1) / RECENT_PAGE_SIZE);
-    }
-
-    void reload()
-    {
-        std::string focused_path;
-        if (m_focus >= 0 && m_focus < (int)m_books.size()) focused_path = m_books[m_focus].path;
-        recent_books_load(&m_books);
-        m_progress.assign(m_books.size(), RecentBookProgress{});
-        m_progress_loaded.assign(m_books.size(), 0);
-        m_focus = 0;
-        if (!focused_path.empty()) {
-            for (size_t i = 0; i < m_books.size(); ++i) {
-                if (m_books[i].path == focused_path) {
-                    m_focus = (int)i;
-                    break;
-                }
-            }
-        }
-    }
-
-    void change_page(int delta)
-    {
-        if (m_books.empty()) return;
-        int page = std::max(0, std::min(page_count() - 1, current_page() + delta));
-        int next = page * RECENT_PAGE_SIZE;
-        if (next == (current_page() * RECENT_PAGE_SIZE)) return;
-        m_focus = std::min(next, (int)m_books.size() - 1);
-        redraw();
-    }
-
-    void open_focused()
-    {
-        open_book(m_focus);
-    }
-
-    void open_book(int index)
-    {
-        if (index < 0 || index >= (int)m_books.size()) return;
-        const RecentBook &book = m_books[index];
-        ESP_LOGI(TAG, "open bookshelf item: %s", book.path.c_str());
-        if (book.type == "epub" || book.type == "docx" || book.type == "comic") launch_epub_reader(book.path.c_str());
-        else if (book.type == "mobi") launch_mobi_reader(book.path.c_str());
-        else if (book.type == "fb2") launch_fb2_reader(book.path.c_str());
-        else if (book.type == "markdown") launch_markdown_reader(book.path.c_str());
-        else launch_reader(book.path.c_str());
-    }
-
-    void draw_header()
-    {
-        int w = M5.Display.width();
-        M5.Display.fillRect(0, 0, w, RECENT_HEADER_H, TFT_WHITE);
-        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Bookshelf), w / 2, header_layout::text_y(), TFT_BLACK);
-        if (!m_books.empty()) {
-            char count[24];
-            std::snprintf(count, sizeof(count), "%d / %d", current_page() + 1, page_count());
-            system_font::draw_right(M5.Display, count, w - 20, header_layout::text_y(), TFT_BLACK);
-        }
-        header_layout::draw_separator(M5.Display);
-    }
-
-    void draw_placeholder_cover(const RecentBook &book, int x, int y, int w, int h)
-    {
-        M5.Display.fillRoundRect(x, y, w, h, 3, TFT_WHITE);
-        M5.Display.drawRoundRect(x, y, w, h, 3, TFT_BLACK);
-        int spine_x = x + std::max(7, w / 7);
-        M5.Display.drawLine(spine_x, y, spine_x, y + h, TFT_BLACK);
-        std::string type = book.type == "comic" ? "CBZ" : book.type == "docx" ? "DOCX" : book.type == "epub" ? "EPUB" :
-                           (book.type == "mobi" ? "MOBI" :
-                            (book.type == "fb2" ? "FB2" :
-                             (book.type == "markdown" ? "MD" : "TXT")));
-        system_font::draw_center(M5.Display, type, x + w / 2 + 4,
-                                 y + std::max(4, (h - system_font::line_height()) / 2), TFT_BLACK);
-    }
-
-    const RecentBookProgress &progress_for(int index)
-    {
-        static const RecentBookProgress empty;
-        if (index < 0 || index >= (int)m_books.size()) return empty;
-        if (index >= (int)m_progress.size()) {
-            m_progress.resize(m_books.size());
-            m_progress_loaded.resize(m_books.size(), 0);
-        }
-        if (!m_progress_loaded[index]) {
-            m_progress[index] = recent_book_progress(m_books[index]);
-            m_progress[index].percent = std::max(0, std::min(100, m_progress[index].percent));
-            m_progress_loaded[index] = 1;
-        }
-        return m_progress[index];
-    }
-
-    void draw_card(const RecentBook &book, int index, int slot)
-    {
-        int x = 0, y = 0, w = 0, h = 0;
-        recent_card_rect(slot, &x, &y, &w, &h);
-        constexpr uint16_t fg = TFT_BLACK;
-        if (slot > 0) {
-            const int divider_y = y - (RECENT_GAP + 1) / 2;
-            M5.Display.drawFastHLine(x, divider_y, w, fg);
-        }
-
-        int cover_y = y + 11;
-        int cover_h = std::max(60, h - 22);
-        int cover_w = std::max(40, cover_h * 2 / 3);
-        int cover_x = x + 16;
-        M5.Display.fillRect(cover_x, cover_y, cover_w, cover_h, TFT_WHITE);
-        M5.Display.drawRect(cover_x, cover_y, cover_w, cover_h, TFT_BLACK);
-        if (!draw_epub_cover_image(book, cover_x + 2, cover_y + 2, cover_w - 4, cover_h - 4)) {
-            draw_placeholder_cover(book, cover_x, cover_y, cover_w, cover_h);
-        }
-
-        const RecentBookProgress &progress = progress_for(index);
-        bool has_chapters = progress.chapter > 0 && progress.chapter_count > 0;
-        int text_x = cover_x + cover_w + 28;
-        int text_right = x + w - 32;
-        int text_w = std::max(40, text_right - text_x);
-        std::string title = system_font::ellipsize(book.title, text_w);
-        int line_h = system_font::line_height();
-        int line_count = has_chapters ? 4 : 3;
-        int gap = std::max(1, (h - line_h * line_count) / (line_count + 1));
-        int title_y = y + gap;
-        system_font::draw_left(M5.Display, title, text_x, title_y, fg);
-
-        int progress_y = title_y + line_h + gap;
-        if (has_chapters) {
-            char chapter_text[64];
-            std::snprintf(chapter_text, sizeof(chapter_text), "%s %d / %d",
-                          ui_locale::text(ui_locale::TextId::Chapter),
-                          progress.chapter, progress.chapter_count);
-            system_font::draw_left(M5.Display, chapter_text, text_x, progress_y, fg);
-            progress_y += line_h + gap;
-        }
-
-        char progress_text[64];
-        std::snprintf(progress_text, sizeof(progress_text), "%s %d%%",
-                      ui_locale::text(ui_locale::TextId::Progress), progress.percent);
-        system_font::draw_left(M5.Display, progress_text, text_x, progress_y, fg);
-
-        int bar_x = text_x + system_font::measure(progress_text) + 24;
-        int bar_w = std::max(0, text_right - bar_x);
-        if (bar_w > 0) {
-            int bar_y = progress_y + line_h / 2;
-            M5.Display.fillRect(bar_x, bar_y + 1, bar_w, 2, fg);
-            int filled = (int)(((int64_t)bar_w * progress.percent + 50) / 100);
-            if (filled > 0) M5.Display.fillRect(bar_x, bar_y, filled, 4, fg);
-        }
-        char reading_time[128];
-        const uint64_t seconds = progress.reading_seconds;
-        std::snprintf(reading_time, sizeof(reading_time),
-                      ui_locale::text(ui_locale::TextId::ReadingTimeFormat),
-                      (unsigned long long)(seconds / 3600),
-                      (unsigned long long)((seconds / 60) % 60));
-        system_font::draw_left(M5.Display, system_font::ellipsize(reading_time, text_w),
-                               text_x, progress_y + line_h + gap, fg);
-    }
-
-    void redraw()
-    {
-        M5.Display.startWrite();
-        M5.Display.setDither(false);
-        // Keep the recent-books view on the text waveform to reduce the
-        // noticeable flashing caused by full quality refreshes.
-        M5.Display.setEpdMode(epd_mode_t::epd_text);
-        M5.Display.fillScreen(TFT_WHITE);
-        draw_header();
-
-        if (m_books.empty()) {
-            int cy = M5.Display.height() / 2;
-            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::BookshelfEmpty), M5.Display.width() / 2,
-                                     cy - system_font::line_height(), TFT_BLACK);
-            system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::BookshelfEmptyHint),
-                                     M5.Display.width() / 2, cy + 12, TFT_BLACK);
-        } else {
-            int first = current_page() * RECENT_PAGE_SIZE;
-            for (int slot = 0; slot < RECENT_PAGE_SIZE; ++slot) {
-                int idx = first + slot;
-                if (idx >= (int)m_books.size()) break;
-                draw_card(m_books[idx], idx, slot);
-            }
-        }
-        M5.Display.display();
-        M5.Display.endWrite();
-    }
-};
-
-static void go_bookshelf() { ActivityManager::instance().push(new RecentBooksActivity()); }
+static void go_bookshelf() { launch_bookshelf(); }
 
 // ─── Drawing ───────────────────────────────────────────────────────
 
@@ -802,7 +524,7 @@ public:
         const bool quality = g_quality_on_return;
         g_quality_on_return = false;
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_text);
-        if (quality) ESP_LOGI(TAG, "one-shot Quality refresh after leaving map");
+        if (quality) ESP_LOGI(TAG, "one-shot Quality refresh on return to home");
         draw_home_page();
         M5.Display.display();
         M5.Display.endWrite();

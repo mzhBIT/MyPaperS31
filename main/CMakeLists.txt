@@ -65,6 +65,7 @@ set(srcs
     "audio/mp3_duration.c"
     "audio/phone_ringtone.cpp"
     "activities/HomeActivity.cpp"
+    "activities/BookshelfActivity.cpp"
     "activities/FileBrowserActivity.cpp"
     "activities/ImageViewerActivity.cpp"
     "activities/ReaderActivity.cpp"

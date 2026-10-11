@@ -34,12 +34,16 @@ public:
     TextRenderer(const TextRenderer &) = delete;
     TextRenderer &operator=(const TextRenderer &) = delete;
     bool begin(const ReaderTextStyle &style = ReaderTextStyle());
+    void end() { resetFont(); }
     bool hasGlyph(uint32_t codepoint) const;
+    // UI surfaces may use a non-white background; readers retain white.
+    void setTextBackground(uint16_t color) { _text_background = color; }
     bool usingFreeType() const { return _ft_ready; }
     bool usingBinFont() const { return _bin_ready; }
 
     int lineHeight() const;
     int baseline() const;
+    bool glyphInkExtents(uint32_t codepoint, int &above, int &below);
     int measureCodepoint(uint32_t codepoint);
     int measureCodepointForLayout(uint32_t codepoint);
     int measureKerningForLayout(uint32_t left, uint32_t right);
@@ -165,6 +169,7 @@ private:
     void resetBinFont();
 
     ReaderTextStyle _style;
+    uint16_t _text_background = TFT_WHITE;
     std::string _active_font_path;
     bool _ft_ready = false;
     bool _bin_ready = false;

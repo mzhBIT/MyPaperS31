@@ -527,7 +527,9 @@ namespace lgfx
       uint8_t* output_frame,
       const uint8_t* physical, const uint8_t* target,
       size_t memory_width, size_t scan_rows,
-      const uint8_t* pair_lut)
+      const uint8_t* pair_lut,
+      uint16_t update_x, uint16_t update_y,
+      uint16_t update_width, uint16_t update_height)
   {
     static constexpr uint8_t pair_shifts[8] = {
       4, 0, 12, 8, 20, 16, 28, 24
@@ -535,6 +537,43 @@ namespace lgfx
     const size_t stride = memory_width >> 1;
     const size_t groups_per_row = memory_width >> 4;
     const size_t output_stride = memory_width >> 2;
+
+    // Outside a partial update every source must remain neutral, including
+    // pixels sharing a 16-pixel output word with the requested rectangle.
+    if (update_x != 0 || update_y != 0
+     || update_width != memory_width || update_height != scan_rows) {
+      memset(output_frame, 0, output_stride * scan_rows);
+      const size_t byte_begin = update_x >> 1;
+      const size_t byte_end = std::min(stride, size_t(update_x + update_width) >> 1);
+      const size_t row_end = std::min(scan_rows, size_t(update_y + update_height));
+      for (size_t y = update_y; y < row_end; ++y) {
+        auto* output = reinterpret_cast<uint32_t*>(output_frame + y * output_stride);
+        const uint8_t* from_row = physical + y * stride;
+        const uint8_t* to_row = target + y * stride;
+        for (size_t group = byte_begin >> 3; group < (byte_end + 7) >> 3; ++group) {
+          const size_t base = group << 3;
+          uint32_t packed = 0;
+          if (base >= byte_begin && base + 8 <= byte_end) {
+            // Interior groups use the same branch-free hot loop as full-screen.
+            for (unsigned pair = 0; pair < 8; ++pair) {
+              const unsigned index = (unsigned(from_row[base + pair]) << 8)
+                                   | unsigned(to_row[base + pair]);
+              packed |= uint32_t(pair_lut[index]) << pair_shifts[pair];
+            }
+          } else {
+            const unsigned first = unsigned(std::max(base, byte_begin) - base);
+            const unsigned end = unsigned(std::min(base + 8, byte_end) - base);
+            for (unsigned pair = first; pair < end; ++pair) {
+              const unsigned index = (unsigned(from_row[base + pair]) << 8)
+                                   | unsigned(to_row[base + pair]);
+              packed |= uint32_t(pair_lut[index]) << pair_shifts[pair];
+            }
+          }
+          output[group] = permute_epd_output(packed);
+        }
+      }
+      return;
+    }
 
     for (size_t y = 0; y < scan_rows; ++y) {
       uint32_t* output = reinterpret_cast<uint32_t*>(
@@ -588,6 +627,7 @@ namespace lgfx
     const uint8_t* unique_transitions = nullptr;
     size_t memory_width = 0;
     size_t scan_rows = 0;
+    uint16_t update_x = 0, update_y = 0, update_width = 0, update_height = 0;
     int unique_count = 0;
     int slot_count = 0;
     int next_unique = 0;
@@ -619,7 +659,8 @@ namespace lgfx
     render_gc16_pair_phase_frame(
         ctx->frames + size_t(slot) * ctx->frame_bytes,
         ctx->physical, ctx->target,
-        ctx->memory_width, ctx->scan_rows, ctx->pair_lut);
+        ctx->memory_width, ctx->scan_rows, ctx->pair_lut,
+        ctx->update_x, ctx->update_y, ctx->update_width, ctx->update_height);
     ctx->frame_render_us += esp_timer_get_time() - render_begin;
     __atomic_store_n(&ctx->unique_slot[unique], slot, __ATOMIC_RELEASE);
     __atomic_store_n(&ctx->ready_unique[slot], unique, __ATOMIC_RELEASE);
@@ -1818,11 +1859,8 @@ namespace lgfx
           ESP_LOGW(TAG_2D, "physical state unknown; promoting first update to Quality");
         }
         update.mode = epd_mode_t::epd_quality;
-      }
-      if (update.mode == epd_mode_t::epd_quality
-       || update.mode == epd_mode_t::epd_hd) {
-        // GC16 and HD are full-refresh waveforms. Keep their old/new state
-        // coherent by always treating them as one full batch.
+        // Only recovery from unknown physical state requires a full refresh.
+        // GC16/HD otherwise honor the caller's dirty rectangle.
         update.x = 0;
         update.y = 0;
         update.w = panel_w;
@@ -2053,15 +2091,21 @@ namespace lgfx
             (selected.type == WAVEFORM_MODE_GC16
           || selected.type == WAVEFORM_MODE_HD)
          && me->_gc16_pair_lut_2d != nullptr
-         && update.x == 0 && update.y == 0
-         && update.w == panel_w && update.h == panel_h
          && panel_w == memory_w && scan_rows == panel_h;
 #else
             false;
 #endif
-        const int gc16_pipeline_prime = selected.type == WAVEFORM_MODE_HD
+        int gc16_pipeline_prime = selected.type == WAVEFORM_MODE_HD
             ? MYPAPER_EPD_2D_HD_PIPELINE_PRIME
             : MYPAPER_EPD_2D_GC16_PIPELINE_PRIME;
+        // Dense cover grids may contain ~40 distinct frames. At ~20-23ms per
+        // frame, 14 primed frames leave ~26*23ms of work for ~530ms scanout
+        // (plus power-on), which is too close to the deadline. Use the spare
+        // existing ring slots for these batches; no additional frame memory.
+        if (selected.type == WAVEFORM_MODE_GC16 && cached_phase_count > 32) {
+          gc16_pipeline_prime = std::max<int>(gc16_pipeline_prime,
+              std::min<int>(MYPAPER_EPD_2D_GC16_PIPELINE_SLOTS, cached_phase_count));
+        }
         // At the 16 us line period both GC16 and HD may need every ring slot
         // pre-rendered before power-on. The producer only reuses a slot after
         // that frame has been consumed by scanout.
@@ -2162,6 +2206,10 @@ namespace lgfx
           gc16_pipeline.unique_transitions = unique_transitions;
           gc16_pipeline.memory_width = memory_w;
           gc16_pipeline.scan_rows = scan_rows;
+          gc16_pipeline.update_x = update.x;
+          gc16_pipeline.update_y = update.y;
+          gc16_pipeline.update_width = update.w;
+          gc16_pipeline.update_height = update.h;
           gc16_pipeline.unique_count = cached_phase_count;
           gc16_pipeline.slot_count = phase_storage_count;
           gc16_pipeline.next_unique = std::min<int>(
@@ -2315,7 +2363,8 @@ namespace lgfx
             render_gc16_pair_phase_frame(
                 phase_frames + size_t(cached) * phase_frame_bytes,
                 me->_physical_buf, me->_target_buf,
-                memory_w, scan_rows, me->_gc16_pair_lut_2d);
+                memory_w, scan_rows, me->_gc16_pair_lut_2d,
+                update.x, update.y, update.w, update.h);
             phase_render_us += esp_timer_get_time() - render_begin;
           } else if (selected.type == WAVEFORM_MODE_DU4
            && me->_du4_pair_lut_2d != nullptr) {

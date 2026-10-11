@@ -27,12 +27,22 @@ struct Lock {
 };
 // Independent FreeType caches: no reader/prefetch state is borrowed.
 struct Bank {
+    uint32_t last_used = 0;
     int px = 0;
     uint32_t revision = UINT32_MAX;
     TextRenderer primary, builtin, fallback;
     bool primary_ok = false, builtin_ok = false, fallback_tried = false, fallback_ok = false;
+    void clear() {
+        primary.end(); builtin.end(); fallback.end();
+        px = 0; revision = UINT32_MAX; last_used = 0;
+        primary_ok = builtin_ok = fallback_tried = fallback_ok = false;
+    }
 };
-std::array<Bank, 3> banks;
+// The shelf has fixed roles plus scaled buttons/navigation/dialogs. Eight banks
+// evicted active role sizes even without speculative fit sizes. Twelve retain
+// the normal working set; at most 24 SD faces leave 8 FAT handles for other I/O.
+std::array<Bank, 12> banks;
+uint32_t bank_tick = 0;
 bool font_file(const std::string &path) {
     const char *ext = strrchr(path.c_str(), '.');
     struct stat st = {};
@@ -81,10 +91,15 @@ ReaderTextStyle style(const std::string &path, int px) {
 Bank &bank(int px) {
     initialize();
     px = px > 0 ? std::max(8, std::min(system_font::max_size * 2, px)) : size_px;
-    for (auto &b : banks) if (b.px == px && b.revision == revision) return b;
-    Bank *slot = &banks[2];
+    for (auto &b : banks) if (b.px == px && b.revision == revision) { b.last_used = ++bank_tick; return b; }
+    Bank *slot = &*std::min_element(banks.begin(), banks.end(),
+        [](const Bank &a, const Bank &b) { return a.last_used < b.last_used; });
     for (auto &b : banks) if (b.px == 0 || b.revision != revision) { slot = &b; break; }
+    // Release all faces, including a previously used SD fallback. Resetting
+    // only primary left an unused fallback's file descriptor pinned.
+    slot->clear();
     slot->px = px;
+    slot->last_used = ++bank_tick;
     slot->revision = revision;
     slot->fallback_tried = slot->fallback_ok = false;
     const std::string resolved = embedded_font::matches(selected_path.c_str()) || !font_file(selected_path)
@@ -129,7 +144,8 @@ size_t next(const std::string &text, size_t pos, uint32_t &cp) {
     }
     return pos;
 }
-void draw(lgfx::LGFXBase &gfx, const std::string &text, int x, int y, int px, uint16_t color) {
+void draw(lgfx::LGFXBase &gfx, const std::string &text, int x, int y, int px, uint16_t color,
+          uint16_t background = TFT_WHITE) {
     auto &b = bank(px);
     TextRenderer *base = b.primary_ok ? &b.primary : b.builtin_ok ? &b.builtin : nullptr;
     if (!base) return;
@@ -141,7 +157,9 @@ void draw(lgfx::LGFXBase &gfx, const std::string &text, int x, int y, int px, ui
         if (cp == '\r' || cp == '\n') continue;
         auto *face = face_for(b, cp);
         if (!face) continue;
+        face->setTextBackground(background);
         face->drawUtf8Line(gfx, text.substr(start, pos - start), x, y + baseline - face->baseline(), color);
+        face->setTextBackground(TFT_WHITE);
         x += face->measureCodepoint(cp);
     }
 }
@@ -153,7 +171,10 @@ esp_err_t save(const std::string &path, int px) {
     if (err == ESP_OK) err = nvs_set_i32(h, "size", px);
     if (err == ESP_OK) err = nvs_commit(h);
     nvs_close(h);
-    if (err == ESP_OK) { selected_path = path; size_px = px; ++revision; }
+    if (err == ESP_OK) {
+        selected_path = path; size_px = px; ++revision;
+        for (auto &b : banks) b.clear();
+    }
     return err;
 }
 }
@@ -220,6 +241,26 @@ void draw_right(lgfx::LGFXBase &gfx, const std::string &text, int x, int y, uint
 }
 void draw_left_sized(lgfx::LGFXBase &gfx, const std::string &text, int x, int y, int px, uint16_t color) {
     Lock lock; draw(gfx, text, x, y, px, color);
+}
+void draw_on_background(lgfx::LGFXBase &gfx, const std::string &text, int x, int y, int px,
+                        uint16_t color, uint16_t background) {
+    Lock lock; draw(gfx, text, x, y, px, color, background);
+}
+int centered_y(const std::string &text, int cy, int px) {
+    Lock lock;
+    auto &b = bank(px);
+    auto *base = b.primary_ok ? &b.primary : b.builtin_ok ? &b.builtin : nullptr;
+    if (!base) return cy - px / 2;
+    int above = 0, below = 0;
+    for (size_t pos = 0; pos < text.size();) {
+        uint32_t cp; pos = next(text, pos, cp);
+        auto *face = face_for(b, cp);
+        int a, d;
+        if (face && face->glyphInkExtents(cp, a, d)) {
+            above = std::max(above, a); below = std::max(below, d);
+        }
+    }
+    return cy + (above - below) / 2 - base->baseline();
 }
 void draw_right_sized(lgfx::LGFXBase &gfx, const std::string &text, int x, int y, int px, uint16_t color) {
     Lock lock; draw(gfx, text, x - measure(text, px), y, px, color);
