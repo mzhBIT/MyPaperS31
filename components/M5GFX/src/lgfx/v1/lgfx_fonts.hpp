@@ -397,7 +397,6 @@ namespace lgfx
     extern const lgfx::LVGLfont lv_font_montserrat_48;
     extern const lgfx::LVGLfont lv_font_simsun_14_cjk;
     extern const lgfx::LVGLfont lv_font_simsun_16_cjk;
-    extern const lgfx::LVGLfont lv_font_SourceHanSansNormalCN_36;
     extern const lgfx::LVGLfont lv_font_unscii_8;
     extern const lgfx::LVGLfont lv_font_unscii_16;
 

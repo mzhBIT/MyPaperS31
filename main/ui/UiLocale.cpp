@@ -733,6 +733,11 @@ constexpr Translation kText[] = {
     {"Chapter is not cached; connect online to download", "本章未缓存，请联网下载后阅读", "本章未快取，請連網下載後閱讀"},
     {"Unavailable offline", "离线模式下不可用", "離線模式下不可用"},
     {"Connection failed. Entering offline reading mode", "联网失败，进入离线阅读模式", "連網失敗，進入離線閱讀模式"},
+    {"System font", "系统字体", "系統字型"},
+    {"Built-in UI font", "内置界面字体", "內建介面字型"},
+    {"TTF / OTF fonts in /sdcard/fonts", "字体放在 /sdcard/fonts 中", "字型放在 /sdcard/fonts 中"},
+    {"Font unavailable or save failed", "字体不可用或保存失败", "字型無法使用或儲存失敗"},
+    {"UI size: 24-48 px; reader size is independent", "界面字号 24-48 px，正文字号独立", "介面字級 24-48 px，正文字級獨立"},
 };
 static_assert(sizeof(kText) / sizeof(kText[0]) == static_cast<size_t>(TextId::Count));
 

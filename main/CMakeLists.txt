@@ -75,6 +75,7 @@ set(srcs
     "activities/MusicActivity.cpp"
     "activities/RadioActivity.cpp"
     "activities/SettingActivity.cpp"
+    "activities/SystemFontSettingsActivity.cpp"
     "frontlight/frontlight.cpp"
     "activities/TextInputActivity.cpp"
     "activities/EpdDiagnosticActivity.cpp"
@@ -120,6 +121,7 @@ set_source_files_properties("weread/qrcodegen.cpp" "weread/WereadQr.cpp"
                             PROPERTIES COMPILE_OPTIONS "-fexceptions")
 
 target_add_binary_data(${COMPONENT_LIB} "spiffs/fonts/reader.bin" BINARY)
+target_add_binary_data(${COMPONENT_LIB} "assets/system-ui.ttf" BINARY)
 
 if(NOT CONFIG_SOC_SDMMC_HOST_SUPPORTED)
     fail_at_build_time(sdmmc ""

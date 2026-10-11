@@ -728,6 +728,11 @@ enum class TextId : uint16_t {
     WeReadChapterNotCached,
     WeReadOfflineUnavailable,
     WeReadNetworkFailedOffline,
+    SystemFont,
+    EmbeddedUiFont,
+    SystemFontHint,
+    SystemFontFailed,
+    SystemSizeHint,
     Count,
 };
 

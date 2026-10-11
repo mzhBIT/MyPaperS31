@@ -1,6 +1,7 @@
 #include "renderer/TextRenderer.h"
 #include "renderer/TextLayout.h"
 #include "storage/storage_sdcard.h"
+#include "ui/EmbeddedFont.h"
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
@@ -317,7 +318,7 @@ static void font_stream_close(FT_Stream /*stream*/)
 {
 }
 
-static bool create_font_stream(const char *path, void **out_stream, void **out_ctx)
+static bool create_font_stream(const char *path, void **out_stream, void **out_ctx, int window_count)
 {
     *out_stream = nullptr;
     *out_ctx = nullptr;
@@ -346,7 +347,7 @@ static bool create_font_stream(const char *path, void **out_stream, void **out_c
         ESP_LOGE(TAG, "font fd open failed: %s", path);
         return false;
     }
-    for (int i = 0; i < FONT_STREAM_WINDOW_COUNT; ++i) {
+    for (int i = 0; i < std::max(FONT_STREAM_MIN_WINDOWS, std::min(FONT_STREAM_WINDOW_COUNT, window_count)); ++i) {
         bool dma_compatible = false;
         bool in_psram = false;
         size_t dma_alignment = 0;
@@ -422,11 +423,6 @@ static bool is_builtin_reader_bin_path(const char *path)
     return path && std::strcmp(path, "builtin:reader.bin") == 0;
 }
 
-static bool is_builtin_source_han_lvfont_path(const char *path)
-{
-    return path && std::strcmp(path, "builtin:source_han_sans_cn_36") == 0;
-}
-
 static bool read_exact_at(int fd, unsigned long offset, void *buffer, size_t size)
 {
     if (lseek(fd, (off_t)offset, SEEK_SET) < 0) return false;
@@ -447,8 +443,9 @@ bool TextRenderer::begin(const ReaderTextStyle &style)
                    _style.font_size != style.font_size ||
                    _style.line_spacing != style.line_spacing ||
                    _style.letter_spacing != style.letter_spacing ||
-                   _style.glyph_pool_bytes != style.glyph_pool_bytes;
-    if (!changed && (_ft_ready || _bin_ready || _lv_ready)) return true;
+                   _style.glyph_pool_bytes != style.glyph_pool_bytes ||
+                   _style.font_stream_windows != style.font_stream_windows;
+    if (!changed && (_ft_ready || _bin_ready)) return true;
 
     resetFont();
     _perf = new PerfCounters();
@@ -459,10 +456,6 @@ bool TextRenderer::begin(const ReaderTextStyle &style)
     _style = style;
     _active_font_path = requested_font_path;
     _style.font_path = _active_font_path.c_str();
-
-    if (is_builtin_source_han_lvfont_path(_active_font_path.c_str())) {
-        return beginLvFont();
-    }
 
     if (has_ext_ci(_active_font_path, ".bin")) {
         return beginBinFont();
@@ -491,7 +484,9 @@ bool TextRenderer::begin(const ReaderTextStyle &style)
         return false;
     }
 
-    if (!create_font_stream(_style.font_path, &_font_stream, &_font_stream_ctx)) {
+    const bool embedded = embedded_font::matches(_style.font_path);
+    if (!embedded && !create_font_stream(_style.font_path, &_font_stream, &_font_stream_ctx,
+                                         _style.font_stream_windows)) {
         resetFont();
         return false;
     }
@@ -503,7 +498,8 @@ bool TextRenderer::begin(const ReaderTextStyle &style)
     args.flags = FT_OPEN_STREAM;
     args.stream = (FT_Stream)_font_stream;
 
-    err = FT_Open_Face(lib, &args, 0, &face);
+    err = embedded ? FT_New_Memory_Face(lib, embedded_font::start, embedded_font::size(), 0, &face)
+                   : FT_Open_Face(lib, &args, 0, &face);
     if (err != 0) {
         ESP_LOGE(TAG, "FT_Open_Face(stream) failed err=%d path=%s",
                  err,
@@ -540,7 +536,7 @@ bool TextRenderer::begin(const ReaderTextStyle &style)
     _ft_ready = true;
     ESP_LOGI(TAG, "begin font=%s font_bytes=%u stream_cache=%u windows=%d dma_align=%u dma_ok=%d memory=%s size=%d line=%d glyph_bpp=%d glyph_pool=%u internal_free=%u largest=%u spiram_free=%u",
              _style.font_path ? _style.font_path : "",
-             font_ctx ? (unsigned)font_ctx->file_size : 0,
+               embedded ? (unsigned)embedded_font::size() : font_ctx ? (unsigned)font_ctx->file_size : 0,
              font_stream_cache_bytes(font_ctx),
              font_ctx ? font_ctx->allocated_windows : 0,
              font_ctx ? (unsigned)font_ctx->window_dma_alignment : 0,
@@ -684,19 +680,9 @@ bool TextRenderer::beginBinFont()
     return true;
 }
 
-bool TextRenderer::beginLvFont()
+bool TextRenderer::hasGlyph(uint32_t codepoint) const
 {
-    _lv_font = &fonts::lv_font_SourceHanSansNormalCN_36;
-    lgfx::FontMetrics metrics;
-    _lv_font->getDefaultMetric(&metrics);
-    _baseline = std::max(1, (int)metrics.baseline);
-    _line_height = std::max(1, (int)metrics.height) + _style.line_spacing;
-    _lv_ready = true;
-    ESP_LOGI(TAG, "begin lv font=%s line=%d baseline=%d",
-             _style.font_path ? _style.font_path : "",
-             _line_height,
-             _baseline);
-    return true;
+    return _ft_ready && _face && FT_Get_Char_Index(static_cast<FT_Face>(_face), codepoint) != 0;
 }
 
 void TextRenderer::resetFont()
@@ -720,8 +706,6 @@ void TextRenderer::resetFont()
     _font_stream_ctx = nullptr;
     _ft_ready = false;
     _ft_initialized = false;
-    _lv_ready = false;
-    _lv_font = nullptr;
     _advance_cache.clear();
     _glyph_cache.clear();
     _missing_codepoints.clear();
@@ -780,13 +764,13 @@ bool TextRenderer::readBinDataAt(unsigned long offset, void *buffer, size_t size
 
 int TextRenderer::lineHeight() const
 {
-    if (_ft_ready || _bin_ready || _lv_ready) return _line_height;
+    if (_ft_ready || _bin_ready) return _line_height;
     return _style.font_size + _style.line_spacing;
 }
 
 int TextRenderer::baseline() const
 {
-    if (_ft_ready || _bin_ready || _lv_ready) return _baseline;
+    if (_ft_ready || _bin_ready) return _baseline;
     return _style.font_size;
 }
 
@@ -1526,11 +1510,6 @@ const TextRenderer::Glyph *TextRenderer::getGlyph(uint32_t codepoint)
 
 int TextRenderer::measureCodepoint(uint32_t codepoint)
 {
-    if (_lv_ready && _lv_font) {
-        std::string text = codepointToUtf8(codepoint);
-        M5.Display.setTextSize(1);
-        return M5.Display.textWidth(text.c_str(), _lv_font);
-    }
     if (_ft_ready || _bin_ready) {
         const Advance *adv = getAdvance(codepoint);
         if (adv) return adv->advance;
@@ -1540,12 +1519,6 @@ int TextRenderer::measureCodepoint(uint32_t codepoint)
 
 int TextRenderer::measureCodepointForLayout(uint32_t codepoint)
 {
-    if (_lv_ready && _lv_font) {
-        std::string text = codepointToUtf8(codepoint);
-        M5.Display.setTextSize(1);
-        int w = M5.Display.textWidth(text.c_str(), _lv_font);
-        if (w > 0) return w;
-    }
     if (_bin_ready) {
         const Advance *adv = getAdvance(codepoint);
         if (adv) return adv->advance;
@@ -1759,9 +1732,6 @@ bool TextRenderer::compactGlyphCache(size_t needed_bytes)
 
 bool TextRenderer::preparePage(const std::string &text)
 {
-    if (_lv_ready) {
-        return true;
-    }
     if (!_ft_ready && !_bin_ready) {
         ESP_LOGE(TAG, "preparePage failed: font not ready");
         return false;
@@ -2045,13 +2015,7 @@ void TextRenderer::drawStyledUtf8VerticalColumn(
         }
         const bool small = inline_style::has(flags, inline_style::Small);
         const int scale = small ? 65 : 100;
-        if (_lv_ready && _lv_font) {
-            const std::string glyph_text = codepointToUtf8(cp);
-            gfx.setTextSize(1);
-            gfx.setTextDatum(textdatum_t::top_left);
-            gfx.setTextColor(color, color);
-            gfx.drawString(glyph_text.c_str(), x, y, _lv_font);
-        } else {
+        {
             // Unicode vertical presentation forms keep punctuation in the
             // correct corner without rotating the entire framebuffer. If a
             // font lacks one, retain its ordinary glyph rather than a box.
@@ -2322,16 +2286,8 @@ void TextRenderer::drawStyledUtf8Line(lgfx::LGFXBase &gfx, const std::string &te
                                       const std::vector<inline_style::Span> &styles,
                                       int x, int y, uint16_t color, int justify_width)
 {
-    if (!_ft_ready && !_bin_ready && !_lv_ready) {
+    if (!_ft_ready && !_bin_ready) {
         ESP_LOGE(TAG, "drawUtf8Line skipped: font not ready");
-        return;
-    }
-
-    if (_lv_ready && _lv_font) {
-        gfx.setTextSize(1);
-        gfx.setTextDatum(textdatum_t::top_left);
-        gfx.setTextColor(color, color);
-        gfx.drawString(text.c_str(), x, y, _lv_font);
         return;
     }
 
@@ -2459,11 +2415,10 @@ std::string TextRenderer::layoutSignature() const
     }
 
     char buf[256];
-    std::snprintf(buf, sizeof(buf), "text_algo=%lu;ft=%d;bin=%d;lv=%d;path=%s;size=%d;bin_height=%u;line=%d;letter=%d;bpp=%d;pool=%d;file_size=%ld;mtime=%ld",
+    std::snprintf(buf, sizeof(buf), "text_algo=%lu;ft=%d;bin=%d;path=%s;size=%d;bin_height=%u;line=%d;letter=%d;bpp=%d;pool=%d;file_size=%ld;mtime=%ld",
                   (unsigned long)text_layout::ALGORITHM_VERSION,
                   _ft_ready ? 1 : 0,
                   _bin_ready ? 1 : 0,
-                  _lv_ready ? 1 : 0,
                   _style.font_path ? _style.font_path : "",
                   _style.font_size,
                   (unsigned)_bin_font_height,

@@ -668,8 +668,7 @@ static void draw_label_center(const char *label, int cx, int y, int max_w, uint1
     M5.Display.setTextSize(1);
     M5.Display.setTextDatum(textdatum_t::top_left);
     M5.Display.setTextColor(fg, bg);
-    M5.Display.drawString(text.c_str(), cx - system_font::measure(text) / 2, y,
-                          &fonts::lv_font_SourceHanSansNormalCN_36);
+    system_font::draw_center(M5.Display, text, cx, y, fg);
 }
 
 static bool bitmap_bit(const uint8_t *data, int x, int y) {

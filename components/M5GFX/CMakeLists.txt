@@ -18,6 +18,8 @@ file(GLOB SRCS
      src/lgfx/v1/touch/*.cpp
      )
 set(COMPONENT_SRCS ${SRCS})
+# System UI now embeds an outline TTF subset in main, not the old 36px bitmap.
+list(FILTER COMPONENT_SRCS EXCLUDE REGEX "/lv_font_SourceHanSansNormalCN_36\\.c$")
 if (IDF_TARGET STREQUAL "esp32s31")
     list(FILTER COMPONENT_SRCS EXCLUDE REGEX "/(Bus_SPI|Light_PWM|Bus_EPD_V7|Panel_M5HDMI)\\.cpp$")
 endif()

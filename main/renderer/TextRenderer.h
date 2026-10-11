@@ -9,13 +9,14 @@
 #include <vector>
 
 struct ReaderTextStyle {
-    const char *font_path = "builtin:source_han_sans_cn_36";
+    const char *font_path = "builtin:system-ui";
     int font_size = 36;
     int line_spacing = 8;
     int letter_spacing = 0;
     int glyph_cache_limit = 2048;
     int advance_cache_limit = 768;
     int glyph_pool_bytes = 768 * 1024;
+    int font_stream_windows = 64;
 };
 
 struct TextRenderStats {
@@ -28,10 +29,14 @@ struct TextRenderStats {
 
 class TextRenderer {
 public:
+    TextRenderer() = default;
+    ~TextRenderer() { resetFont(); }
+    TextRenderer(const TextRenderer &) = delete;
+    TextRenderer &operator=(const TextRenderer &) = delete;
     bool begin(const ReaderTextStyle &style = ReaderTextStyle());
+    bool hasGlyph(uint32_t codepoint) const;
     bool usingFreeType() const { return _ft_ready; }
     bool usingBinFont() const { return _bin_ready; }
-    bool usingLvFont() const { return _lv_ready; }
 
     int lineHeight() const;
     int baseline() const;
@@ -151,7 +156,6 @@ private:
     void resetFont();
     bool compactGlyphCache(size_t needed_bytes);
     bool beginBinFont();
-    bool beginLvFont();
     bool readBinDataAt(unsigned long offset, void *buffer, size_t size) const;
     bool loadBinFontEntry(uint32_t codepoint, BinFontEntry *out) const;
     bool loadBinGlyph(uint32_t codepoint, Glyph &out);
@@ -164,11 +168,9 @@ private:
     std::string _active_font_path;
     bool _ft_ready = false;
     bool _bin_ready = false;
-    bool _lv_ready = false;
     bool _ft_initialized = false;
     int _line_height = 44;
     int _baseline = 34;
-    const lgfx::IFont *_lv_font = nullptr;
     void *_library = nullptr;
     void *_face = nullptr;
     void *_ft_memory = nullptr;

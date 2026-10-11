@@ -1,4 +1,5 @@
 #include "reader_font.h"
+#include "ui/EmbeddedFont.h"
 #include "storage/app_paths.h"
 
 #include <esp_log.h>
@@ -6,11 +7,16 @@
 #include <cstdio>
 #include <cstring>
 #include <sys/stat.h>
+#include <dirent.h>
+#include <strings.h>
+#include <string>
+#include <vector>
+#include <algorithm>
 
 static const char *TAG = "READER_FONT";
-static const char *DEFAULT_BUILTIN_FONT_PATH = "builtin:source_han_sans_cn_36";
+static const char *DEFAULT_BUILTIN_FONT_PATH = embedded_font::path;
 static const char *FALLBACK_BUILTIN_FONT_PATH = "builtin:reader.bin";
-static char s_font_path[192] = "builtin:source_han_sans_cn_36";
+static char s_font_path[192] = "builtin:system-ui";
 
 static void trim_line(char *s)
 {
@@ -28,12 +34,34 @@ static bool file_exists(const char *path)
 
 static bool is_builtin_font_path(const char *path)
 {
-    return path && (strcmp(path, DEFAULT_BUILTIN_FONT_PATH) == 0 ||
+    return path && (embedded_font::matches(path) ||
                     strcmp(path, FALLBACK_BUILTIN_FONT_PATH) == 0);
 }
 
 static const char *select_default_font_path()
 {
+    // The embedded UI subset is not a complete book font. Prefer a complete
+    // SD font for fresh installs and migration from the removed LV bitmap.
+    static std::string selected;
+    for (const char *name : {"/sdcard/fonts/pingxianzhensong.ttf", "/sdcard/fonts/Hei.ttf"}) {
+        if (file_exists(name)) { selected = name; return selected.c_str(); }
+    }
+    std::vector<std::string> candidates;
+    DIR *dir = opendir("/sdcard/fonts");
+    if (dir) {
+        while (auto *entry = readdir(dir)) {
+            const char *ext = strrchr(entry->d_name, '.');
+            if (!ext || (strcasecmp(ext, ".ttf") && strcasecmp(ext, ".otf"))) continue;
+            std::string path = std::string("/sdcard/fonts/") + entry->d_name;
+            if (file_exists(path.c_str())) candidates.push_back(std::move(path));
+        }
+        closedir(dir);
+    }
+    if (!candidates.empty()) {
+        std::sort(candidates.begin(), candidates.end());
+        selected = candidates.front();
+        return selected.c_str();
+    }
     return DEFAULT_BUILTIN_FONT_PATH;
 }
 
@@ -52,7 +80,9 @@ void reader_font_init()
     if (fgets(line, sizeof(line), fp)) {
         trim_line(line);
         if (line[0]) {
-            if (is_builtin_font_path(line) || file_exists(line)) {
+            if (embedded_font::matches(line)) {
+                snprintf(s_font_path, sizeof(s_font_path), "%s", select_default_font_path());
+            } else if (is_builtin_font_path(line) || file_exists(line)) {
                 strncpy(s_font_path, line, sizeof(s_font_path) - 1);
                 s_font_path[sizeof(s_font_path) - 1] = '\0';
             } else {
@@ -95,7 +125,8 @@ const char *reader_font_path(ReaderProfile profile)
             loaded = nvs_get_str(h, "font", s_rss_font_path, &len) == ESP_OK;
             nvs_close(h);
         }
-        if (!is_builtin_font_path(s_rss_font_path) && !file_exists(s_rss_font_path))
+        if (embedded_font::matches(s_rss_font_path) ||
+            (!is_builtin_font_path(s_rss_font_path) && !file_exists(s_rss_font_path)))
             snprintf(s_rss_font_path, sizeof(s_rss_font_path), "%s", select_default_font_path());
         if (!loaded) save_rss_font(s_rss_font_path);
     }

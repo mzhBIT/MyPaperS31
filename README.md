@@ -21,6 +21,8 @@ MyPaperP4 是一套面向自定义 **ESP32-P4 单色墨水屏设备**的阅读�
 
 ### 阅读
 
+- 系统界面使用固件内置 TTF 字符子集；设置中可切换 SD 卡 TTF/OTF 系统字体与 24～48 px 字号（默认 28 px），独立于正文字号，支持 NVS 持久化。见 [系统字体说明](docs/SYSTEM_FONT.md)。
+
 - TXT、Markdown、EPUB、FB2、DOCX 与无 DRM MOBI/PRC/AZW/AZW3 阅读。
 - DOCX 正文、标题目录、粗体/斜体、列表、嵌入图片与脚注/尾注重排；表格线性化阅读，不还原 Word 原始分页布局，不支持加密 DOCX。
 - ZIP/CBZ 图片漫画阅读：支持 JPG/JPEG、PNG、BMP 和子目录，按文件名自然排序，每张图片一页，复用图片预解码、居中显示、阅读进度及计时，不需整包解压；不支持加密 ZIP、ZIP64 或 RAR/CBR。

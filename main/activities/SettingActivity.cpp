@@ -1,4 +1,5 @@
 #include "activities/SettingActivity.h"
+#include "activities/SystemFontSettingsActivity.h"
 #include "ui/ListFocus.h"
 
 #include "activities/Activity.h"
@@ -44,7 +45,7 @@ constexpr int PAD = 20;
 constexpr int SETTINGS_ROW_Y = HEADER_H;
 constexpr int SETTINGS_ROW_H = 110;
 constexpr int SETTINGS_ROW_GAP = 0;
-constexpr int SETTINGS_ITEM_COUNT = 9;
+constexpr int SETTINGS_ITEM_COUNT = 10;
 constexpr int SETTINGS_VISIBLE_ROWS = 9;
 
 constexpr int SCAN_TOP = HEADER_H;
@@ -1637,6 +1638,7 @@ public:
     void on_create() override
     {
         _seen_generation = ui_locale::generation();
+        _seen_font_generation = system_font::generation();
         draw(true);
     }
 
@@ -1646,8 +1648,10 @@ public:
             _seen_show = true;
             return;
         }
-        const bool changed = _seen_generation != ui_locale::generation();
+        const bool changed = _seen_generation != ui_locale::generation() ||
+                             _seen_font_generation != system_font::generation();
         _seen_generation = ui_locale::generation();
+        _seen_font_generation = system_font::generation();
         draw(changed);
     }
 
@@ -1715,6 +1719,7 @@ private:
     int _focus = 0;
     int _first_visible = 0;
     uint32_t _seen_generation = 0;
+    uint32_t _seen_font_generation = 0;
 
     void ensure_focus_visible()
     {
@@ -1734,6 +1739,7 @@ private:
         else if (_focus == 5) ActivityManager::instance().push(new RssCacheSettingsActivity());
         else if (_focus == 6) ActivityManager::instance().push(new DateTimeSettingsActivity());
         else if (_focus == 8) ActivityManager::instance().push(new RestoreDefaultsActivity());
+        else if (_focus == 9) launch_system_font_settings();
         else if (_focus == 7) {
             const bool enabled = !home_icon_frames_enabled();
             const esp_err_t result = home_set_icon_frames_enabled(enabled);
@@ -1798,6 +1804,7 @@ private:
         draw_item(7, text(TextId::HomeIconFrames),
                   home_icon_frames_enabled() ? text(TextId::On) : text(TextId::Off), false);
         draw_item(8, text(TextId::RestoreDefaults), text(TextId::RestoreDefaultsDetail));
+        draw_item(9, text(TextId::SystemFont), std::to_string(system_font::pixel_size()) + " px");
         M5.Display.display();
         M5.Display.endWrite();
     }

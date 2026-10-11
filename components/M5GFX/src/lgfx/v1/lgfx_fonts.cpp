@@ -2376,7 +2376,6 @@ label_nextbyte: /// 次のデータを取得する;
     const LVGLfont lv_font_montserrat_48(&::lv_font_montserrat_48);
     const LVGLfont lv_font_simsun_14_cjk(&::lv_font_simsun_14_cjk);
     const LVGLfont lv_font_simsun_16_cjk(&::lv_font_simsun_16_cjk);
-    const LVGLfont lv_font_SourceHanSansNormalCN_36(&::lv_font_SourceHanSansNormalCN_36);
     const LVGLfont lv_font_unscii_8(&::lv_font_unscii_8);
     const LVGLfont lv_font_unscii_16(&::lv_font_unscii_16);
 

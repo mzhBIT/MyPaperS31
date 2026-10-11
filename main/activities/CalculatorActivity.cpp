@@ -164,17 +164,13 @@ class CalculatorActivity final : public Activity {
                                     g.width-PAD, result_y);
         } else {
             const std::string value = calc_.display_value();
-            d.setTextSize(2);
+            const int large_px = system_font::pixel_size() * 2;
             const bool large = calculator::result_fits(
-                d.textWidth(value.c_str(), &fonts::lv_font_SourceHanSansNormalCN_36),
-                d.fontHeight(&fonts::lv_font_SourceHanSansNormalCN_36),
+                system_font::measure(value, large_px),
+                system_font::line_height(large_px),
                 g.width-2*PAD, g.keypad_y-GAP-result_y);
-            d.setTextSize(large ? 2 : 1);
-            d.setTextColor(TFT_BLACK, TFT_WHITE);
-            d.setTextDatum(textdatum_t::top_right);
-            d.drawString(value.c_str(), g.width-PAD, result_y,
-                         &fonts::lv_font_SourceHanSansNormalCN_36);
-            d.setTextSize(1);
+            system_font::draw_right_sized(d, value, g.width-PAD, result_y,
+                                          large ? large_px : system_font::pixel_size());
         }
         d.setClipRect(clip_x,clip_y,clip_w,clip_h);
     }

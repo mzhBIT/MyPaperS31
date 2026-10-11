@@ -40,7 +40,6 @@ DEF_EXTERN_CONST_LV_FONT_T lv_font_montserrat_46;
 DEF_EXTERN_CONST_LV_FONT_T lv_font_montserrat_48;
 DEF_EXTERN_CONST_LV_FONT_T lv_font_simsun_14_cjk;
 DEF_EXTERN_CONST_LV_FONT_T lv_font_simsun_16_cjk;
-DEF_EXTERN_CONST_LV_FONT_T lv_font_SourceHanSansNormalCN_36;
 DEF_EXTERN_CONST_LV_FONT_T lv_font_unscii_8;
 DEF_EXTERN_CONST_LV_FONT_T lv_font_unscii_16;
 
