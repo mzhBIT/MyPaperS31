@@ -22,7 +22,16 @@ python tools/subset_system_font.py --check
 
 换内置字体时指定 `--src path/to/font.ttf`。脚本扫描 `main` 下 C/C++ 字符串，包括英文、简体中文、繁体中文语言表、键盘和运算符；另外保留可打印 ASCII 与常用符号。字符覆盖取决于源字体本身，缺字写入 manifest，不会凭空生成字形。
 
-提交 `main/assets/system-ui.ttf` 和 `system-ui.json`。普通 ESP-IDF 构建直接嵌入已生成文件，不需要 Python fonttools，也不会在每次构建时重裁剪。更新 UI 文案后需重新生成；`--check` 检查是否新增未包含字符。manifest 记录源文件名、SHA-256、字符数及缺字。
+提交 `main/assets/system-ui.ttf` 和 `system-ui.json`。普通 ESP-IDF 构建直接嵌入已生成文件，不需要 Python fonttools，也不会在每次构建时重裁剪。更新 UI 文案后必须先检查覆盖，需要时再重新生成，具体流程见下文。manifest 记录源文件名、SHA-256、字符数及缺字。
+
+### 界面字符串变更的必检流程
+
+每次新增或修改界面字符串（包括简体中文、繁体中文、英文、提示信息和特殊符号），完成代码修改后必须执行 `python tools/subset_system_font.py --check`，确认内置 TTF 子集是否需要更新，不能只凭肉眼判断或以编译成功代替覆盖检查。
+
+- 检查通过且没有新增未覆盖字符：可以保留原子集，不必重复生成。
+- 检查提示新增缺字：执行 `python tools/subset_system_font.py` 重新生成，再执行 `--check` 复查；有变化的 `main/assets/system-ui.ttf` 和 `system-ui.json` 必须随代码一并提交。
+- 源字体本身不支持的字符：重新生成不能解决。检查 manifest 的 `missing_codepoints`，明确说明并选择可覆盖的字体或替代符号；不能把写入 manifest 当作缺字已修复。
+- 交付时说明覆盖检查结果，以及是否重新生成或更新了子集文件。
 
 源字体保留原授权，发布固件前应确认该字体允许子集化及嵌入分发；本次不改变字体授权。
 

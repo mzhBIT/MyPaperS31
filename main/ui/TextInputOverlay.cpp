@@ -591,7 +591,7 @@ struct TextInputOverlay::Impl {
         if (!shown || !keyboard) return;
         M5.Display.startWrite();
         M5.Display.setDither(false);
-        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        M5.Display.setEpdMode(options.text_refresh ? epd_mode_t::epd_text : epd_mode_t::epd_fast);
         M5.Display.fillRect(0, overlay_top(), M5.Display.width(),
                             M5.Display.height() - overlay_top(), TFT_WHITE);
         M5.Display.drawFastHLine(0, overlay_top(), M5.Display.width(), TFT_BLACK);

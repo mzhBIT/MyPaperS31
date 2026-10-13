@@ -14,6 +14,8 @@ struct TextInputOptions {
     size_t max_bytes = 255;
     bool start_in_chinese = true;
     bool secret = false;
+    // Opt-in for callers whose overlay should retain the page's Text refresh.
+    bool text_refresh = false;
 };
 
 using TextInputCallback = std::function<void(const std::string &)>;

@@ -1,5 +1,20 @@
+// File page geometry adapted from read-pico-reader app_files.c.
+// Copyright 2026 mindreset. SPDX-License-Identifier: Apache-2.0
 #include "activities/Activity.h"
 #include "ui/ListFocus.h"
+#include "ui/FileBrowserLayout.h"
+#include "ui/pico_file_icons.h"
+#include "ui/pico_shelf_icons.h"
+#include "ui/BookshelfLayout.h"
+#include "ui/BookshelfFontFit.h"
+#include "activities/BookshelfActivity.h"
+#include "activities/SettingActivity.h"
+#include "activities/TransferActivity.h"
+#include "activities/WifiTransferActivity.h"
+#include "time/time_basis.h"
+#include "wifi/wifi_setting.h"
+#include <esp_vfs_fat.h>
+#include <ctime>
 #include "activities/ActivityManager.h"
 #include "activities/MusicActivity.h"
 #include "activities/PlaceholderActivity.h"
@@ -25,17 +40,97 @@
 #include <esp_timer.h>
 
 static const char *TAG = "FILES";
-static const int TOP_BAR_H = header_layout::height;
-static const int ROW_H     = 72;
-static const int PAD       = 10;
-
-struct FsEntry { std::string name; bool is_dir; };
-
+namespace fl = file_browser_layout;
 static std::string g_path;
+static bool home_view() { return g_path == "/sdcard"; }
+static uint64_t g_total_bytes = 0, g_free_bytes = 0;
+static bool g_storage_ready = false;
+static bool g_sort_ascending = true;
+static uint16_t gray(int v) { return ((v >> 3) << 11) | ((v >> 2) << 5) | (v >> 3); }
+static int ui_px(int px) { return bookshelf_layout::ui_font_pixels(px,system_font::pixel_size()); }
+static fl::Content content_layout() {
+    static bool valid=false;
+    static uint32_t generation=0;
+    static uint32_t locale_generation=0;
+    static fl::Content cached[2];
+    const auto current=system_font::generation();
+    const auto locale=ui_locale::generation();
+    if(!valid || generation!=current || locale_generation!=locale) {
+        const int title=system_font::line_height(ui_px(34));
+        const int path=system_font::line_height(ui_px(20));
+        const int name=system_font::line_height(ui_px(23));
+        const int detail=system_font::line_height(ui_px(19));
+        const int root=system_font::line_height(ui_px(21));
+        const int storage_title=system_font::line_height(ui_px(27));
+        int sort_width=std::max(system_font::measure(ui_locale::text(ui_locale::TextId::FileSortAscending),ui_px(19)),
+            system_font::measure(ui_locale::text(ui_locale::TextId::FileSortDescending),ui_px(19)));
+        sort_width=std::max(111,std::min(260,sort_width+32));
+        cached[0]=fl::content(false,title,path,name,detail,root,storage_title,sort_width);
+        cached[1]=fl::content(true,title,path,name,detail,root,storage_title,sort_width);
+        generation=current; locale_generation=locale; valid=true;
+    }
+    return cached[home_view()?1:0];
+}
+static int list_rows() { return content_layout().count; }
+static std::string fit_text(std::string value, int width, int px) {
+    if (system_font::measure(value,px) <= width) return value;
+    while (!value.empty() && system_font::measure(value+"...",px) > width) {
+        size_t last=value.size()-1;
+        while(last && (static_cast<unsigned char>(value[last])&0xc0)==0x80) --last;
+        value.resize(last);
+    }
+    return value+"...";
+}
+static void text(const std::string &s,int x,int y,int px,int bg=255) {
+    system_font::draw_on_background(M5.Display,s,x,y,px,TFT_BLACK,gray(bg));
+}
+static void center(const std::string &s,int cx,int cy,int px,int width=600,int bg=255) {
+    static bookshelf_font_fit::Cache cache;
+    px=cache.fit(s,px,width,system_font::generation(),
+        [](const std::string &v,int size){return system_font::measure(v,size);});
+    text(s,cx-system_font::measure(s,px)/2,system_font::centered_y(s,cy,px),px,bg);
+}
+static void icon(const uint8_t *mask, int cx, int cy, int size, int ink = 0, int bg = 255) {
+    // Original 72px 4bpp coverage masks, sampled at pixel centers.
+    const int step=(72<<16)/size, half=step/2-(1<<15);
+    for (int y = 0; y < size; ++y) {
+        lgfx::rgb565_t row[72];
+        for (int x = 0; x < size; ++x) {
+            int sx=x*step+half, sy=y*step+half;
+            int ix=sx>>16, iy=sy>>16;
+            auto alpha = [&](int px, int py) {
+                px = std::max(0, std::min(71, px)); py = std::max(0, std::min(71, py));
+                int pos = py * 72 + px;
+                return (pos & 1) ? mask[pos / 2] & 15 : mask[pos / 2] >> 4;
+            };
+            int fx=sx&65535, fy=sy&65535;
+            int upper=(alpha(ix,iy)*(65536-fx)+alpha(ix+1,iy)*fx)>>16;
+            int lower=(alpha(ix,iy+1)*(65536-fx)+alpha(ix+1,iy+1)*fx)>>16;
+            int a=(upper*(65536-fy)+lower*fy)>>16;
+            int blended=(((bg>>4)<<4)*(15-a)+ink*a+7)/15;
+            row[x]=gray((blended>>4)*17);
+        }
+        M5.Display.pushImage(cx-size/2, cy-size/2+y, size, 1, row);
+    }
+}
+
+struct FsEntry { std::string name; bool is_dir; uint64_t size = 0; };
+static std::string file_detail(const FsEntry &entry) {
+    if (entry.is_dir) return ui_locale::text(ui_locale::TextId::FileFolder);
+    char value[48];
+    if (entry.size >= 1048576) snprintf(value,sizeof(value),"%.1f MB",entry.size/1048576.0);
+    else if (entry.size >= 1024) snprintf(value,sizeof(value),"%.1f KB",entry.size/1024.0);
+    else snprintf(value,sizeof(value),"%llu B",(unsigned long long)entry.size);
+    return value;
+}
+static void file_icon(int x,int y,bool folder) {
+    icon(folder ? pico_file_icons::folder : pico_file_icons::file,x+21,y+21,46);
+}
 static std::string g_root;
 static std::vector<FsEntry> g_entries;
 static int g_scroll = 0;
 static int g_focus  = 0;
+static bool g_keyboard_focus = false;
 static bool g_restore_focus = false;
 static int  g_saved_focus  = 0;
 static int  g_saved_scroll = 0;
@@ -49,23 +144,6 @@ static bool skip_name(const char *n) {
     return false;
 }
 
-static bool is_supported(const char *n, bool is_dir) {
-    if (is_dir) return true;
-    const char *ext = strrchr(n, '.');
-    if (!ext) return false;
-    return (strcasecmp(ext, ".txt") == 0 || strcasecmp(ext, ".md") == 0 ||
-            strcasecmp(ext, ".markdown") == 0 || strcasecmp(ext, ".epub") == 0 ||
-            strcasecmp(ext, ".mobi") == 0 || strcasecmp(ext, ".prc") == 0 ||
-            strcasecmp(ext, ".azw") == 0 || strcasecmp(ext, ".azw3") == 0 ||
-            strcasecmp(ext, ".fb2") == 0 || strcasecmp(ext, ".docx") == 0 ||
-            strcasecmp(ext, ".zip") == 0 || strcasecmp(ext, ".cbz") == 0 ||
-            strcasecmp(ext, ".bmp") == 0 || strcasecmp(ext, ".png") == 0 ||
-            strcasecmp(ext, ".jpg") == 0 || strcasecmp(ext, ".jpeg") == 0 ||
-            strcasecmp(ext, ".ttf") == 0 ||
-            strcasecmp(ext, ".otf") == 0 || strcasecmp(ext, ".bin") == 0 ||
-            strcasecmp(ext, ".mpm") == 0 || strcasecmp(ext, ".mpc") == 0 ||
-            audio_file_formats::is_supported(n));
-}
 
 static bool is_font_file(const char *n) {
     const char *ext = strrchr(n, '.');
@@ -103,63 +181,121 @@ static bool is_image_file(const char *n) {
 
 // ─── Drawing ───────────────────────────────────────────────────────
 
-static void draw_topbar() {
-    M5.Display.fillRect(0, 0, M5.Display.width(), TOP_BAR_H, TFT_WHITE);
-    M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-
-    // Path (truncated)
-    std::string show = g_path;
-    if (system_font::measure(show) > M5.Display.width() - 40) show = "..." + show.substr(show.size() > 35 ? show.size() - 35 : 0);
-    show = system_font::ellipsize(show, M5.Display.width() - 40);
-    system_font::draw_center(M5.Display, show, M5.Display.width() / 2, header_layout::text_y(), TFT_BLACK);
-    header_layout::draw_separator(M5.Display);
+static void draw_status() {
+    char clock[24]="--:--";
+    if(time_basis_system_clock_valid()) time_basis_format_clock(std::time(nullptr),clock,sizeof(clock));
+    text(clock,36,system_font::centered_y(clock,40,28),28);
+    icon(pico_shelf_icons::wifi,570,40,28,wifi_setting_is_enabled()?0:144);
+    if(!wifi_setting_is_enabled()) M5.Display.drawLine(558,28,582,52,gray(96));
+    M5.Display.drawRoundRect(606,29,40,22,6,TFT_BLACK);
+    M5.Display.fillRect(648,36,5,8,TFT_BLACK);
 }
-
-static void draw_list() {
-    int w = M5.Display.width();
-    int h = M5.Display.height();
-    int y0 = TOP_BAR_H;
-    int vis_rows = (h - y0) / ROW_H;
-
-    // Clamp scroll
-    int max_scroll = std::max(0, (int)g_entries.size() - vis_rows);
-    if (g_scroll > max_scroll) g_scroll = max_scroll;
-    if (g_scroll < 0) g_scroll = 0;
-    if (g_focus >= (int)g_entries.size()) g_focus = g_entries.size() - 1;
-    if (g_focus < 0) g_focus = 0;
-
-    for (int i = 0; i < vis_rows; i++) {
-        int idx = g_scroll + i;
-        int ry = y0 + i * ROW_H;
-
-        if (idx >= (int)g_entries.size()) {
-            M5.Display.fillRect(0, ry, w, ROW_H, TFT_WHITE);
-            continue;
-        }
-
-        bool sel = (idx == g_focus);
-        const auto &e = g_entries[idx];
-
-        M5.Display.fillRect(PAD, ry, w - PAD - 12, ROW_H - 2,
-                            TFT_WHITE);
-        list_focus::draw(M5.Display, PAD, ry, ROW_H, sel);
-        M5.Display.drawFastHLine(PAD, ry + ROW_H - 2,
-                                 w - PAD - 12, TFT_BLACK);
-        M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-
-        std::string label = e.is_dir ? (e.name + "/") : e.name;
-        label = system_font::ellipsize(label, w - PAD - 86);
-        system_font::draw_left(M5.Display, label, PAD + list_focus::text_inset(), ry + 14, TFT_BLACK);
+static void draw_nav() {
+    M5.Display.fillRect(0,fl::nav_top,684,120,gray(238));
+    M5.Display.drawFastHLine(0,fl::nav_top,684,gray(160));
+    M5.Display.fillRect(399,1097,56,5,TFT_BLACK);
+    const uint8_t *icons[]={pico_shelf_icons::house,pico_shelf_icons::library_big,
+        pico_shelf_icons::folder_open,pico_shelf_icons::sliders_horizontal};
+    const char *labels[]={ui_locale::text(ui_locale::TextId::FileNavHome),
+        ui_locale::text(ui_locale::TextId::Bookshelf),ui_locale::text(ui_locale::TextId::Files),
+        ui_locale::text(ui_locale::TextId::Settings)};
+    for(int i=0;i<4;++i) {
+        int cx=(2*i+1)*684/8;
+        icon(icons[i],cx,1141,44,0,238);
+        center(labels[i],cx,1180,ui_px(17),159,238);
     }
-
-    // Count indicator
-    char cnt[32];
-    snprintf(cnt, sizeof(cnt), "%d/%d", g_focus + 1, (int)g_entries.size());
-    M5.Display.setTextColor(TFT_BLACK);
-    system_font::draw_right(M5.Display, cnt, w - 16, M5.Display.height() - 52);
+}
+static void draw_back() {
+    M5.Display.drawRoundRect(36,92,44,44,22,gray(88));
+    M5.Display.drawRoundRect(37,93,42,42,21,gray(88));
+    icon(pico_shelf_icons::chevron_left,58,114,38);
+}
+static void draw_topbar() {
+    draw_status();
+    if(home_view()) {
+        text(ui_locale::text(ui_locale::TextId::Files),36,91,52);
+        auto add=fl::transfer_add;
+        M5.Display.fillRect(add.x+12,add.y+26,32,3,TFT_BLACK);
+        M5.Display.fillRect(add.x+26,add.y+12,3,32,TFT_BLACK);
+        const auto layout=content_layout();
+        auto r=layout.storage_card;
+        M5.Display.drawRoundRect(r.x,r.y,r.w,r.h,24,gray(80));
+        M5.Display.drawRoundRect(r.x+1,r.y+1,r.w-2,r.h-2,23,gray(80));
+        char total[32],usage[128];
+        if(g_storage_ready) {
+            snprintf(total,sizeof(total),"%.1f GB",g_total_bytes/1073741824.0);
+            snprintf(usage,sizeof(usage),ui_locale::text(ui_locale::TextId::FileStorageUsage),
+                (g_total_bytes-g_free_bytes)/1073741824.0,g_free_bytes/1073741824.0);
+        } else {
+            snprintf(total,sizeof(total),"%s",ui_locale::text(ui_locale::TextId::FileStorageUnavailable));
+            usage[0]=0;
+        }
+        int px=ui_px(19);
+        int total_width=std::min(240,system_font::measure(total,px));
+        text(fit_text(ui_locale::text(ui_locale::TextId::FileStorage),566-total_width-16,ui_px(27)),58,r.y+16,ui_px(27));
+        std::string total_label=fit_text(total,total_width,px);
+        text(total_label,624-system_font::measure(total_label,px),r.y+16,px);
+        text(fit_text(usage,566,px),58,layout.storage_usage_y,px);
+    } else {
+        draw_back();
+        std::string name=g_path.substr(g_path.find_last_of('/')+1);
+        center(name,342,107,ui_px(34),470);
+        const auto layout=content_layout();
+        text(fit_text(g_path,612,ui_px(20)),36,layout.path_y,ui_px(20));
+        M5.Display.drawFastHLine(36,layout.separator_y,612,gray(96));
+        M5.Display.drawFastHLine(36,layout.separator_y+1,612,gray(96));
+    }
+}
+static void draw_list() {
+    const bool home=home_view();
+    const auto layout=content_layout();
+    const int top=layout.top,rows=layout.count;
+    const int last= g_entries.empty()?0:((int(g_entries.size())-1)/rows)*rows;
+    g_scroll=std::max(0,std::min(g_scroll,last));
+    g_focus=std::max(0,std::min(g_focus,int(g_entries.size())-1));
+    if(home) {
+        char count[64];
+        snprintf(count,sizeof(count),ui_locale::text(ui_locale::TextId::FileRootCount),(unsigned)g_entries.size());
+        auto r=layout.sort_button;
+        text(fit_text(count,r.x-36-16,ui_px(21)),36,
+            layout.root_y+(layout.root_h-system_font::line_height(ui_px(21)))/2,ui_px(21));
+        M5.Display.drawRoundRect(r.x,r.y,r.w,r.h,23,gray(112));
+        center(ui_locale::text(g_sort_ascending?ui_locale::TextId::FileSortAscending:ui_locale::TextId::FileSortDescending),
+            r.x+r.w/2,r.y+r.h/2,ui_px(19),r.w-32);
+        M5.Display.drawRoundRect(36,top,612,rows*layout.row_h,24,gray(80));
+        M5.Display.drawRoundRect(37,top+1,610,rows*layout.row_h-2,23,gray(80));
+    }
+    for(int row=0;row<rows;++row) {
+        int index=g_scroll+row;
+        if(index>=int(g_entries.size())) break;
+        const auto &entry=g_entries[index];
+        int y=top+row*layout.row_h;
+        if(g_keyboard_focus) list_focus::draw(M5.Display,home?39:25,y,layout.row_h,index==g_focus);
+        if(home && row) {
+            M5.Display.drawFastHLine(96,y,532,gray(96));
+            M5.Display.drawFastHLine(96,y+1,532,gray(96));
+        }
+        file_icon(home?52:48,y+layout.row_h/2-21,entry.is_dir);
+        std::string label=fit_text(entry.name,home?430:450,ui_px(23));
+        if(home && entry.is_dir) text(label,101,system_font::centered_y(label,y+layout.row_h/2,ui_px(23)),ui_px(23));
+        else {
+            text(label,101,y+12,ui_px(23));
+            text(file_detail(entry),101,y+18+system_font::line_height(ui_px(23)),ui_px(19));
+        }
+        icon(pico_shelf_icons::chevron_right,home?624:636,y+layout.row_h/2,22);
+        if(!home) {
+            M5.Display.drawFastHLine(101,y+layout.row_h-2,547,gray(96));
+            M5.Display.drawFastHLine(101,y+layout.row_h-1,547,gray(96));
+        }
+    }
+    if(g_entries.empty()) center(ui_locale::text(ui_locale::TextId::WebEmptyDirectory),342,top+46,ui_px(22));
+    char page[32]; snprintf(page,sizeof(page),"%d / %d",g_scroll/rows+1,last/rows+1);
+    center(page,342,1057,ui_px(20));
+    draw_nav();
 }
 
 static void load_dir(const std::string &path) {
+    g_keyboard_focus = false;
     g_path = path;
     g_entries.clear();
     g_focus = 0;
@@ -175,8 +311,10 @@ static void load_dir(const std::string &path) {
         e.name = ent->d_name;
         std::string full = path + "/" + ent->d_name;
         struct stat st;
-        e.is_dir = (stat(full.c_str(), &st) == 0 && S_ISDIR(st.st_mode));
-        if (!is_supported(ent->d_name, e.is_dir)) continue;
+        bool stat_ok = stat(full.c_str(), &st) == 0;
+        e.is_dir = stat_ok && S_ISDIR(st.st_mode);
+        e.size = stat_ok && st.st_size > 0 ? (uint64_t)st.st_size : 0;
+        if (!stat_ok || (!e.is_dir && !S_ISREG(st.st_mode))) continue;
         g_entries.push_back(e);
     }
     closedir(d);
@@ -184,7 +322,7 @@ static void load_dir(const std::string &path) {
     // Sort: dirs first, then alphabetically
     std::sort(g_entries.begin(), g_entries.end(), [](auto &a, auto &b) {
         if (a.is_dir != b.is_dir) return a.is_dir;
-        return a.name < b.name;
+        return g_sort_ascending ? a.name < b.name : a.name > b.name;
     });
 
     if (g_restore_focus) {
@@ -212,19 +350,22 @@ static void go_up() {
 }
 
 static int hit_row(int ty) {
-    int y0 = TOP_BAR_H;
-    if (ty < y0 || ty > M5.Display.height()) return -1;
-    int idx = (ty - y0) / ROW_H + g_scroll;
+    int row = content_layout().row_at(ty);
+    if(row < 0) return -1;
+    int idx = row + g_scroll;
     return (idx < (int)g_entries.size()) ? idx : -1;
 }
 
 static bool hit_back(int tx, int ty) {
-    return (header_layout::left_hit(tx, ty));
+    return tx >= 26 && tx < 110 && ty >= 79 && ty < 157;
 }
 
 // ─── Activity ──────────────────────────────────────────────────────
 
 class FileBrowserActivity : public Activity {
+    bool m_initial_show = true;
+    bool m_transfer_menu = false;
+    int m_transfer_choice = 0;
     bool m_action_menu = false;
     int m_action_choice = 0;
     bool m_confirm_delete = false;
@@ -233,10 +374,36 @@ class FileBrowserActivity : public Activity {
     ui::TextInputOverlay m_text_input;
 
 public:
+    void draw_transfer_menu() {
+        auto r=fl::transfer_menu;
+        M5.Display.fillRoundRect(r.x,r.y,r.w,r.h,20,TFT_WHITE);
+        M5.Display.drawRoundRect(r.x,r.y,r.w,r.h,20,TFT_BLACK);
+        const char *methods[]={ui_locale::text(ui_locale::TextId::WifiTransfer),
+            ui_locale::text(ui_locale::TextId::FileHotspotTransfer),ui_locale::text(ui_locale::TextId::UsbTransfer)};
+        const char *details[]={ui_locale::text(ui_locale::TextId::FileSameNetwork),
+            ui_locale::text(ui_locale::TextId::FileConnectHotspot),ui_locale::text(ui_locale::TextId::FileConnectPc)};
+        for(int i=0;i<3;++i) {
+            auto row=fl::transfer(i);
+            if(i) M5.Display.drawFastHLine(row.x,row.y-4,row.w,gray(128));
+            if(g_keyboard_focus) list_focus::draw(M5.Display,row.x,row.y,row.h,i==m_transfer_choice);
+            center(methods[i],row.x+row.w/2,row.y+25,std::min(ui_px(21),30),row.w-32);
+            center(details[i],row.x+row.w/2,row.y+66,std::min(ui_px(19),24),row.w-32);
+        }
+    }
+    void select_transfer(int choice) {
+        m_transfer_menu=false;
+        if(choice==0) launch_wifi_transfer();
+        else if(choice==1) launch_hotspot_transfer();
+        else launch_usb_transfer();
+        // Wi-Fi setup may return without pushing an activity.
+        if(ActivityManager::instance().current()==this) redraw_all();
+    }
     void on_create() override {
         ESP_LOGI(TAG, "create: %s", g_path.c_str());
+        g_storage_ready = esp_vfs_fat_info("/sdcard",&g_total_bytes,&g_free_bytes)==ESP_OK;
+        g_free_bytes=std::min(g_free_bytes,g_total_bytes);
         M5.Display.startWrite();
-        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
         M5.Display.fillScreen(TFT_WHITE);
         draw_topbar();
         draw_list();
@@ -245,8 +412,10 @@ public:
     }
 
     void on_show() override {
+        // push() invokes on_create() followed by on_show(); do not submit twice.
+        if(m_initial_show) { m_initial_show=false; return; }
         M5.Display.startWrite();
-        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
         M5.Display.fillScreen(TFT_WHITE);
         draw_topbar();
         draw_list();
@@ -260,7 +429,7 @@ public:
     }
 
     int visible_rows() const {
-        return (M5.Display.height() - TOP_BAR_H) / ROW_H;
+        return list_rows();
     }
 
     void go_back_or_up() {
@@ -282,8 +451,9 @@ public:
     void page_down() {
         if (g_entries.empty()) return;
         int rows = visible_rows();
-        g_scroll += rows;
-        g_focus = std::min((int)g_entries.size() - 1, g_focus + rows);
+        int last=((int(g_entries.size())-1)/rows)*rows;
+        g_scroll=std::min(last,g_scroll+rows);
+        g_focus=std::min(int(g_entries.size())-1,g_scroll);
         redraw_all();
     }
 
@@ -341,70 +511,69 @@ public:
 
     int action_count() const { return action_has_background() ? 4 : 3; }
 
-    void draw_action_dialog() {
-        int w = M5.Display.width();
-        int h = M5.Display.height();
-        bool background_action = action_has_background();
-        int box_w = std::min(w - 36, background_action ? 760 : 650);
-        int box_h = background_action ? 350 : 250;
-        int x = (w - box_w) / 2;
-        int y = (h - box_h) / 2;
-        M5.Display.fillRoundRect(x, y, box_w, box_h, 7, TFT_WHITE);
-        M5.Display.drawRoundRect(x, y, box_w, box_h, 7, TFT_BLACK);
-        std::string name = g_focus >= 0 && g_focus < (int)g_entries.size() ? g_entries[g_focus].name : "";
-        system_font::draw_center(M5.Display, system_font::ellipsize(name, box_w - 40), w / 2, y + 28, TFT_BLACK);
-
-        const char *normal_labels[] = {
-            ui_locale::text(ui_locale::TextId::Rename),
-            ui_locale::text(ui_locale::TextId::Delete),
-            ui_locale::text(ui_locale::TextId::Cancel)};
-        const char *image_labels[] = {
-            ui_locale::text(ui_locale::TextId::Rename),
-            ui_locale::text(ui_locale::TextId::Background),
-            ui_locale::text(ui_locale::TextId::Delete),
-            ui_locale::text(ui_locale::TextId::Cancel)};
-        const char **labels = background_action ? image_labels : normal_labels;
-        int count = action_count();
-        int gap = 12;
-        int columns = background_action ? 2 : 3;
-        int btn_w = (box_w - 40 - gap * (columns - 1)) / columns;
-        int btn_h = 66;
-        int first_y = background_action ? y + 150 : y + box_h - btn_h - 24;
-        for (int i = 0; i < count; ++i) {
-            int column = i % columns;
-            int row = i / columns;
-            int bx = x + 20 + column * (btn_w + gap);
-            int by = first_y + row * (btn_h + gap);
-            bool selected = i == m_action_choice;
-            M5.Display.fillRoundRect(bx, by, btn_w, btn_h, 6, selected ? TFT_BLACK : TFT_WHITE);
-            M5.Display.drawRoundRect(bx, by, btn_w, btn_h, 6, TFT_BLACK);
-            system_font::draw_center(M5.Display, labels[i], bx + btn_w / 2, by + 11,
-                                     selected ? TFT_WHITE : TFT_BLACK);
-        }
+    using SheetRect = fl::Rect;
+    SheetRect action_sheet() const { return fl::sheet; }
+    SheetRect action_button(int index) const {
+        return index==action_count()-1 ? fl::cancel : fl::action(index);
     }
-
-    int action_choice_at(int tx, int ty) const {
-        int w = M5.Display.width();
-        int h = M5.Display.height();
-        bool background_action = action_has_background();
-        int box_w = std::min(w - 36, background_action ? 760 : 650);
-        int box_h = background_action ? 350 : 250;
-        int x = (w - box_w) / 2;
-        int y = (h - box_h) / 2;
-        int gap = 12;
-        int columns = background_action ? 2 : 3;
-        int count = action_count();
-        int btn_w = (box_w - 40 - gap * (columns - 1)) / columns;
-        int btn_h = 66;
-        int first_y = background_action ? y + 150 : y + box_h - btn_h - 24;
-        for (int i = 0; i < count; ++i) {
-            int column = i % columns;
-            int row = i / columns;
-            int bx = x + 20 + column * (btn_w + gap);
-            int by = first_y + row * (btn_h + gap);
-            if (ty < by || ty >= by + btn_h) continue;
-            if (tx >= bx && tx < bx + btn_w) return i;
+    bool action_close_at(int tx,int ty) const {
+        return !fl::sheet.contains(tx,ty) || fl::close.contains(tx,ty);
+    }
+    void draw_action_dialog() {
+        auto r=fl::sheet;
+        M5.Display.fillRoundRect(r.x,r.y,r.w,r.h,28,TFT_WHITE);
+        M5.Display.drawRoundRect(r.x,r.y,r.w,r.h,28,gray(80));
+        M5.Display.drawRoundRect(r.x+1,r.y+1,r.w-2,r.h-2,27,gray(80));
+        M5.Display.fillCircle(623,473,19,gray(224));
+        M5.Display.drawLine(616,466,630,480,TFT_BLACK);
+        M5.Display.drawLine(630,466,616,480,TFT_BLACK);
+        const auto &entry=g_entries[g_focus];
+        file_icon(48,467,entry.is_dir);
+        text(fit_text(entry.name,490,ui_px(28)),102,462,ui_px(28));
+        text(file_detail(entry),102,507,ui_px(20));
+        text(fit_text(selected_path(),585,ui_px(19)),50,552,ui_px(19));
+        M5.Display.drawFastHLine(42,590,600,gray(96));
+        M5.Display.drawFastHLine(42,591,600,gray(96));
+        if(m_confirm_delete) {
+            center(ui_locale::text(ui_locale::TextId::DeleteFileQuestion),342,712,ui_px(28),590);
+            const char *confirm_labels[]={ui_locale::text(ui_locale::TextId::Cancel),
+                ui_locale::text(ui_locale::TextId::Delete)};
+            for(int i=0;i<2;++i) {
+                int x=50+i*306;
+                bool selected=i==m_delete_choice;
+                M5.Display.fillRoundRect(x,788,278,76,16,selected?TFT_BLACK:TFT_WHITE);
+                M5.Display.drawRoundRect(x,788,278,76,16,TFT_BLACK);
+                int px=std::min(ui_px(25),32);
+                std::string label=confirm_labels[i];
+                system_font::draw_on_background(M5.Display,label,
+                    x+(278-system_font::measure(label,px))/2,
+                    system_font::centered_y(label,826,px),px,
+                    selected?TFT_WHITE:TFT_BLACK,selected?TFT_BLACK:TFT_WHITE);
+            }
+            return;
         }
+        const char *normal[]={ui_locale::text(ui_locale::TextId::Rename),
+            ui_locale::text(ui_locale::TextId::Delete),ui_locale::text(ui_locale::TextId::Cancel)};
+        const char *image[]={ui_locale::text(ui_locale::TextId::Rename),
+            ui_locale::text(ui_locale::TextId::Background),ui_locale::text(ui_locale::TextId::Delete),
+            ui_locale::text(ui_locale::TextId::Cancel)};
+        auto labels=action_has_background()?image:normal;
+        for(int i=0;i<action_count();++i) {
+            auto button=action_button(i);
+            bool cancel=i==action_count()-1;
+            M5.Display.fillRoundRect(button.x,button.y,button.w,button.h,cancel?26:20,gray(cancel?224:232));
+            if(!cancel) {
+                M5.Display.drawRoundRect(button.x,button.y,button.w,button.h,20,gray(96));
+                M5.Display.drawRoundRect(button.x+1,button.y+1,button.w-2,button.h-2,19,gray(96));
+            }
+            if(g_keyboard_focus && i==m_action_choice)
+                M5.Display.drawRoundRect(button.x+3,button.y+3,button.w-6,button.h-6,cancel?23:17,TFT_BLACK);
+            center(labels[i],button.x+button.w/2,button.y+button.h/2,ui_px(cancel?23:25),button.w-40,cancel?224:232);
+        }
+        center(ui_locale::text(ui_locale::TextId::FileActionsHint),342,900,ui_px(20),590);
+    }
+    int action_choice_at(int tx,int ty) const {
+        for(int i=0;i<action_count();++i) if(action_button(i).contains(tx,ty)) return i;
         return -1;
     }
 
@@ -481,6 +650,7 @@ public:
         options.submit_label = ui_locale::text(ui_locale::TextId::Rename);
         options.max_bytes = 255;
         options.start_in_chinese = true;
+        options.text_refresh = true;
         m_text_input.open(options, [this, old_path](const std::string &name) {
             rename_entry(old_path, name);
             redraw_all();
@@ -522,58 +692,11 @@ public:
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::TapToClose), w / 2, y + 78, TFT_BLACK);
     }
 
-    void draw_delete_dialog() {
-        int w = M5.Display.width();
-        int h = M5.Display.height();
-        int box_w = std::min(w - 48, 620);
-        int box_h = 260;
-        int x = (w - box_w) / 2;
-        int y = (h - box_h) / 2;
+    void draw_delete_dialog() { draw_action_dialog(); }
 
-        M5.Display.fillRoundRect(x, y, box_w, box_h, 6, TFT_WHITE);
-        M5.Display.drawRoundRect(x, y, box_w, box_h, 6, TFT_BLACK);
-        M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::DeleteFileQuestion), w / 2, y + 18);
-
-        std::string name = g_entries[g_focus].name;
-        std::string label = system_font::ellipsize(ellipsize_middle(name, 32), box_w - 48);
-        system_font::draw_center(M5.Display, label, w / 2, y + 82);
-
-        int btn_h = 62;
-        int gap = 18;
-        int btn_w = (box_w - 48 - gap) / 2;
-        int by = y + box_h - btn_h - 22;
-        int bx0 = x + 24;
-        int bx1 = bx0 + btn_w + gap;
-
-        M5.Display.fillRoundRect(bx0, by, btn_w, btn_h, 6, m_delete_choice == 0 ? TFT_BLACK : TFT_WHITE);
-        M5.Display.drawRoundRect(bx0, by, btn_w, btn_h, 6, TFT_BLACK);
-        M5.Display.setTextColor(m_delete_choice == 0 ? TFT_WHITE : TFT_BLACK, m_delete_choice == 0 ? TFT_BLACK : TFT_WHITE);
-        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Cancel), bx0 + btn_w / 2, by + 9, m_delete_choice == 0 ? TFT_WHITE : TFT_BLACK);
-
-        M5.Display.fillRoundRect(bx1, by, btn_w, btn_h, 6, m_delete_choice == 1 ? TFT_BLACK : TFT_WHITE);
-        M5.Display.drawRoundRect(bx1, by, btn_w, btn_h, 6, TFT_BLACK);
-        M5.Display.setTextColor(m_delete_choice == 1 ? TFT_WHITE : TFT_BLACK, m_delete_choice == 1 ? TFT_BLACK : TFT_WHITE);
-        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Delete), bx1 + btn_w / 2, by + 9, m_delete_choice == 1 ? TFT_WHITE : TFT_BLACK);
-    }
-
-    int delete_dialog_choice_at(int tx, int ty) const {
-        int w = M5.Display.width();
-        int h = M5.Display.height();
-        int box_w = std::min(w - 48, 620);
-        int box_h = 260;
-        int x = (w - box_w) / 2;
-        int y = (h - box_h) / 2;
-        int btn_h = 62;
-        int gap = 18;
-        int btn_w = (box_w - 48 - gap) / 2;
-        int by = y + box_h - btn_h - 22;
-        int bx0 = x + 24;
-        int bx1 = bx0 + btn_w + gap;
-
-        if (ty < by || ty > by + btn_h) return -1;
-        if (tx >= bx0 && tx <= bx0 + btn_w) return 0;
-        if (tx >= bx1 && tx <= bx1 + btn_w) return 1;
+    int delete_dialog_choice_at(int tx,int ty) const {
+        if(fl::Rect{50,788,278,76}.contains(tx,ty)) return 0;
+        if(fl::Rect{356,788,278,76}.contains(tx,ty)) return 1;
         return -1;
     }
 
@@ -606,7 +729,7 @@ public:
             load_dir(g_path);
             if (!g_entries.empty()) {
                 g_focus = std::min(old_focus, (int)g_entries.size() - 1);
-                int vis_rows = (M5.Display.height() - TOP_BAR_H) / ROW_H;
+                int vis_rows = list_rows();
                 if (g_focus < g_scroll) g_scroll = g_focus;
                 if (g_focus >= g_scroll + vis_rows) g_scroll = std::max(0, g_focus - vis_rows + 1);
             }
@@ -621,10 +744,22 @@ public:
     bool on_touch(const TouchEvent &event) override {
         if (m_text_input.visible()) return m_text_input.handle_touch(event);
         if (event.type == TouchEventType::Back) {
-            if (!m_notice.empty()) { m_notice.clear(); redraw_all(); }
+            if (m_transfer_menu) { m_transfer_menu=false; redraw_all(); }
+            else if (!m_notice.empty()) { m_notice.clear(); redraw_all(); }
             else if (m_action_menu) { m_action_menu = false; redraw_all(); }
             else if (m_confirm_delete) cancel_delete_confirm();
             else go_back_or_up();
+            return true;
+        }
+
+        if(m_transfer_menu) {
+            if(event.type!=TouchEventType::Tap) return true;
+            if(!fl::transfer_menu.contains(event.x,event.y)) {
+                m_transfer_menu=false; redraw_all(); return true;
+            }
+            for(int i=0;i<3;++i) if(fl::transfer(i).contains(event.x,event.y)) {
+                select_transfer(i); return true;
+            }
             return true;
         }
 
@@ -635,6 +770,7 @@ public:
 
         if (m_action_menu) {
             if (event.type != TouchEventType::Tap) return true;
+            if (action_close_at(event.x, event.y)) { m_action_menu = false; redraw_all(); return true; }
             int choice = action_choice_at(event.x, event.y);
             if (choice >= 0) handle_action(choice);
             return true;
@@ -642,6 +778,7 @@ public:
 
         if (m_confirm_delete) {
             if (event.type != TouchEventType::Tap) return true;
+            if(action_close_at(event.x,event.y)) { cancel_delete_confirm(); return true; }
             int choice = delete_dialog_choice_at(event.x, event.y);
             if (choice >= 0) {
                 m_delete_choice = choice;
@@ -651,15 +788,16 @@ public:
             return true;
         }
 
-        if (event.type == TouchEventType::SwipeUp) {
+        if (event.type == TouchEventType::SwipeUp || event.type == TouchEventType::SwipeLeft) {
             page_down();
             return true;
         }
-        if (event.type == TouchEventType::SwipeDown) {
+        if (event.type == TouchEventType::SwipeDown || event.type == TouchEventType::SwipeRight) {
             page_up();
             return true;
         }
         if (event.type == TouchEventType::LongPress) {
+            g_keyboard_focus = false;
             int idx = hit_row(event.y);
             if (idx < 0) return false;
             g_focus = idx;
@@ -667,6 +805,24 @@ public:
             return true;
         }
         if (event.type == TouchEventType::Tap) {
+            g_keyboard_focus = false;
+            if(event.y>=fl::nav_top) {
+                int tab=std::min(3,std::max(0,event.x*4/684));
+                if(tab==0) {
+                    ActivityManager::instance().pop_to_root();
+                } else if(tab==1) launch_bookshelf();
+                else if(tab==3) launch_settings();
+                return true;
+            }
+            if(home_view()) {
+                if(fl::transfer_add.contains(event.x,event.y)) {
+                    m_transfer_menu=true; m_transfer_choice=0; redraw_all(); return true;
+                }
+                if(content_layout().sort_button.contains(event.x,event.y)) {
+                    g_sort_ascending=!g_sort_ascending;
+                    load_dir(g_path); redraw_all(); return true;
+                }
+            }
             if (hit_back(event.x, event.y)) {
                 go_back_or_up();
                 return true;
@@ -674,17 +830,8 @@ public:
             int idx = hit_row(event.y);
 
             if (idx >= 0) {
-                if (idx != g_focus) {
-                    g_focus = idx;
-                    M5.Display.startWrite();
-                    draw_list();
-                    M5.Display.display();
-                    M5.Display.endWrite();
-                } else {
-                    // Double-tap on same item → open
-                    open_focused();
-                    return true;
-                }
+                g_focus = idx;
+                open_focused();
                 return true;
             }
 
@@ -693,7 +840,16 @@ public:
     }
 
     bool on_key(int key) override {
+        g_keyboard_focus = true;
         if (m_text_input.visible()) return m_text_input.handle_key(key);
+        if(m_transfer_menu) {
+            if(key==APP_KEY_BACK || key==APP_KEY_EXTRA) { m_transfer_menu=false; redraw_all(); }
+            else if(key==APP_KEY_UP || key==APP_KEY_DOWN) {
+                m_transfer_choice=(m_transfer_choice+(key==APP_KEY_UP?2:1))%3;
+                redraw_all();
+            } else if(key==APP_KEY_OK) select_transfer(m_transfer_choice);
+            return true;
+        }
         if (!m_notice.empty()) {
             if (key != APP_KEY_NONE) { m_notice.clear(); redraw_all(); }
             return true;
@@ -775,10 +931,11 @@ public:
 
     void redraw_all() {
         M5.Display.startWrite();
-        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
         M5.Display.fillScreen(TFT_WHITE);
         draw_topbar();
         draw_list();
+        if (m_transfer_menu) draw_transfer_menu();
         if (m_action_menu) draw_action_dialog();
         if (m_confirm_delete) draw_delete_dialog();
         if (!m_notice.empty()) draw_notice();

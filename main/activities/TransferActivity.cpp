@@ -12,17 +12,20 @@
 #include <M5Unified.h>
 #include <esp_log.h>
 #include <esp_system.h>
+#include <algorithm>
 
 namespace {
 
 constexpr int HEADER_H = header_layout::height;
 constexpr int PAD = 24;
-constexpr int ROW_H = 170;
 constexpr int ROW_GAP = 24;
 constexpr int FIRST_ROW_Y = HEADER_H;
+int row_height() { return std::max(170,system_font::line_height()*2+60); }
+int row_y(int index) { return FIRST_ROW_Y+index*(row_height()+ROW_GAP); }
 
 class TransferActivity final : public Activity {
 public:
+    explicit TransferActivity(bool usb = false) : _confirm_usb(usb) {}
     void on_create() override { draw(); }
     void on_show() override
     {
@@ -53,14 +56,19 @@ public:
             return true;
         }
 
-        if (event.y >= FIRST_ROW_Y && event.y < FIRST_ROW_Y + ROW_H) {
+        if (event.y >= row_y(0) && event.y < row_y(0) + row_height()) {
             _confirm_usb = true;
             draw();
             return true;
         }
-        const int wifi_y = FIRST_ROW_Y + ROW_H + ROW_GAP;
-        if (event.y >= wifi_y && event.y < wifi_y + ROW_H) {
+        const int wifi_y = row_y(1);
+        if (event.y >= wifi_y && event.y < wifi_y + row_height()) {
             launch_wifi_transfer();
+            return true;
+        }
+        const int hotspot_y = row_y(2);
+        if (event.y >= hotspot_y && event.y < hotspot_y + row_height()) {
+            launch_hotspot_transfer();
             return true;
         }
         return false;
@@ -78,7 +86,8 @@ public:
             return true;
         }
         if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
-            _focus = 1 - _focus;
+            if (_confirm_usb) return true;
+            _focus = (_focus + (key == APP_KEY_UP ? 2 : 1)) % 3;
             draw();
             return true;
         }
@@ -87,7 +96,8 @@ public:
             else if (_focus == 0) {
                 _confirm_usb = true;
                 draw();
-            } else launch_wifi_transfer();
+            } else if (_focus == 1) launch_wifi_transfer();
+            else launch_hotspot_transfer();
             return true;
         }
         return false;
@@ -113,9 +123,11 @@ private:
     void draw_row(int y, const char *title, const char *detail, bool focused)
     {
         const int w = M5.Display.width();
+        const int ROW_H = row_height();
         list_focus::draw(M5.Display, PAD, y, ROW_H, focused);
         system_font::draw_left(M5.Display, title, PAD + list_focus::text_inset(), y + 24, TFT_BLACK);
-        system_font::draw_left(M5.Display, detail, PAD + list_focus::text_inset(), y + 88, TFT_DARKGRAY);
+        system_font::draw_left(M5.Display, detail, PAD + list_focus::text_inset(),
+                               y + 36 + system_font::line_height(), TFT_DARKGRAY);
         M5.Display.drawFastHLine(PAD, y + ROW_H - 1, w - PAD * 2, TFT_BLACK);
     }
 
@@ -136,8 +148,10 @@ private:
         if (!_confirm_usb) {
             draw_row(FIRST_ROW_Y, ui_locale::text(ui_locale::TextId::UsbTransfer),
                      ui_locale::text(ui_locale::TextId::ConnectAsSdCard), _focus == 0);
-            draw_row(FIRST_ROW_Y + ROW_H + ROW_GAP, ui_locale::text(ui_locale::TextId::WifiTransfer),
+            draw_row(row_y(1), ui_locale::text(ui_locale::TextId::WifiTransfer),
                      ui_locale::text(ui_locale::TextId::UploadManageBrowser), _focus == 1);
+            draw_row(row_y(2), ui_locale::text(ui_locale::TextId::FileHotspotTransfer),
+                     ui_locale::text(ui_locale::TextId::FileConnectHotspot), _focus == 2);
         } else {
             system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::UsbTransferSdUnavailable), w / 2,
                                      220, TFT_BLACK);
@@ -166,4 +180,9 @@ private:
 void launch_transfer()
 {
     ActivityManager::instance().push(new TransferActivity());
+}
+
+void launch_usb_transfer()
+{
+    ActivityManager::instance().push(new TransferActivity(true));
 }

@@ -34,6 +34,20 @@ public:
         push(act);
     }
 
+    // Preserve the root activity; intermediate pages must not be shown while
+    // clearing the stack (their destructors still release/save owned state).
+    void pop_to_root() {
+        if (m_stack.size() <= 1) return;
+        while (m_stack.size() > 1) {
+            auto *old = m_stack.back();
+            m_stack.pop_back();
+            delete old;
+        }
+        m_stack.front()->on_show();
+        m_transition_cd = lgfx::millis() + 80;
+        ESP_LOGI("AM", "pop to root → depth=%zu", m_stack.size());
+    }
+
     Activity *current() { return m_stack.empty() ? nullptr : m_stack.back(); }
     bool is_blocked() { return lgfx::millis() < m_transition_cd; }
     size_t depth() const { return m_stack.size(); }

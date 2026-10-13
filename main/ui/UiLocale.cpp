@@ -738,6 +738,20 @@ constexpr Translation kText[] = {
     {"TTF / OTF fonts in /sdcard/fonts", "字体放在 /sdcard/fonts 中", "字型放在 /sdcard/fonts 中"},
     {"Font unavailable or save failed", "字体不可用或保存失败", "字型無法使用或儲存失敗"},
     {"UI size: 24-48 px; reader size is independent", "界面字号 24-48 px，正文字号独立", "介面字級 24-48 px，正文字級獨立"},
+    {"Folder", "文件夹", "資料夾"},
+    {"Hold a file or folder for actions", "长按文件或文件夹打开操作", "長按檔案或資料夾開啟操作"},
+    {"Home", "首页", "首頁"},
+    {"Storage card", "存储卡", "儲存卡"},
+    {"Used %.1f GB · Free %.1f GB", "已用 %.1f GB · 可用 %.1f GB", "已用 %.1f GB · 可用 %.1f GB"},
+    {"Unavailable", "未挂载", "未掛載"},
+    {"Transfer files", "传输文件", "傳輸檔案"},
+    {"Hotspot transfer", "热点传输", "熱點傳輸"},
+    {"Same network", "同一网络", "同一網路"},
+    {"Device hotspot", "连接设备热点", "連接裝置熱點"},
+    {"Connect to PC", "连接电脑", "連接電腦"},
+    {"Root · %u items", "根目录 · %u 项", "根目錄 · %u 項"},
+    {"Name ↑", "名称 ↑", "名稱 ↑"},
+    {"Name ↓", "名称 ↓", "名稱 ↓"},
 };
 static_assert(sizeof(kText) / sizeof(kText[0]) == static_cast<size_t>(TextId::Count));
 

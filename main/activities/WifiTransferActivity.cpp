@@ -299,6 +299,7 @@ static bool ensure_upload_dir(const char *path)
 
 class WifiTransferActivity : public Activity {
 public:
+    explicit WifiTransferActivity(bool hotspot = false) : _force_hotspot(hotspot) {}
     ~WifiTransferActivity() override { stop(); }
 
     void on_create() override
@@ -340,6 +341,7 @@ public:
     }
 
 private:
+    bool _force_hotspot = false;
     bool _running = false;
     httpd_handle_t _server = nullptr;
     esp_netif_t *_wifi_netif = nullptr;
@@ -441,7 +443,7 @@ private:
 
         char router_ssid[WIFI_SETTING_SSID_MAX_LEN + 1] = {};
         char router_pass[WIFI_SETTING_PASSWORD_MAX_LEN + 1] = {};
-        if (wifi_setting_load_credentials(router_ssid, sizeof(router_ssid),
+        if (!_force_hotspot && wifi_setting_load_credentials(router_ssid, sizeof(router_ssid),
                                           router_pass, sizeof(router_pass))) {
             if (try_sta(router_ssid, router_pass, "NVS")) return start_http_server();
         }
@@ -1118,4 +1120,9 @@ void launch_wifi_transfer()
 {
     if (!ensure_wifi_configured_or_show_guide()) return;
     ActivityManager::instance().push(new WifiTransferActivity());
+}
+
+void launch_hotspot_transfer()
+{
+    ActivityManager::instance().push(new WifiTransferActivity(true));
 }

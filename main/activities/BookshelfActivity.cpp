@@ -152,8 +152,9 @@ class BookshelfActivity final : public Activity {
     Style style = Style::Acrylic;
     int focus = 0;
     bool shown = false, styles_open = false;
-    bool keyboard_focus = false, last_wifi = false;
+    bool keyboard_focus = false;
     std::string last_clock;
+    uint32_t last_status_ms = 0;
     int capacity() const { return layout::capacity(style); }
     int page() const { return focus / capacity(); }
     int pages() const { return std::max(1,(int(books.size())+capacity()-1)/capacity()); }
@@ -240,14 +241,21 @@ class BookshelfActivity final : public Activity {
         M5.Display.drawRoundRect(244,r.y+163,378,11,5,gray(80));
         if(slot<3) M5.Display.drawFastHLine(50,r.y+196,584,gray(96));
     }
+    void draw_clock(const std::string &clock) {
+        const int y=system_font::centered_y(clock,40,28);
+        text(clock,36,y,28);
+        last_clock=clock;
+    }
+    void draw_wifi(bool enabled) {
+        icon(pico_shelf_icons::wifi,570,40,28,enabled?0:144);
+        if(!enabled) M5.Display.drawLine(558,28,582,52,gray(96));
+    }
     void status() {
         char clock[24]="--:--";
         if(time_basis_system_clock_valid()) time_basis_format_clock(std::time(nullptr),clock,sizeof(clock));
-        last_clock=clock; last_wifi=wifi_setting_is_enabled();
-        text(clock,36,system_font::centered_y(clock,40,28),28);
-        const int wifi_x=570;
-        icon(pico_shelf_icons::wifi,wifi_x,40,28,wifi_setting_is_enabled()?0:144);
-        if(!wifi_setting_is_enabled()) M5.Display.drawLine(wifi_x-12,28,wifi_x+12,52,gray(96));
+        draw_clock(clock);
+        draw_wifi(wifi_setting_is_enabled());
+        last_status_ms=lgfx::millis();
         M5.Display.drawRect(606,29,40,22,TFT_BLACK);
         M5.Display.fillRect(648,36,5,8,TFT_BLACK);
         // Battery icon only: no percentage without a reliable measurement.
@@ -395,13 +403,17 @@ public:
         if(styles_open || M5.Display.displayBusy()) return;
         char clock[24]="--:--";
         if(time_basis_system_clock_valid()) time_basis_format_clock(std::time(nullptr),clock,sizeof(clock));
-        if(last_clock==clock && last_wifi==wifi_setting_is_enabled()) return;
+        // One synchronous status-bar update per minute. Wi-Fi changes wait
+        // until this update; use elapsed time too when the clock is not synced.
+        if(last_clock==clock && uint32_t(lgfx::millis()-last_status_ms)<60000) return;
+        const auto previous_mode=M5.Display.getEpdMode();
         M5.Display.startWrite();
-        M5.Display.setEpdMode(epd_mode_t::epd_hd);
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
         M5.Display.fillRect(0,0,684,72,gray(238));
         status();
         M5.Display.display(0,0,684,72);
         M5.Display.endWrite();
+        M5.Display.setEpdMode(previous_mode);
     }
     bool on_touch(const TouchEvent &e) override {
         if(e.type==TouchEventType::Back) {
@@ -422,7 +434,7 @@ public:
         keyboard_focus=false;
         if(e.y>=1096) {
             int tab=std::max(0,std::min(3,e.x/171));
-            if(tab==0) ActivityManager::instance().pop();
+            if(tab==0) ActivityManager::instance().pop_to_root();
             else if(tab==2) launch_file_browser("/sdcard");
             else if(tab==3) launch_settings();
             return true;
