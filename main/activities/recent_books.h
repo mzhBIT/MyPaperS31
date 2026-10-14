@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include "activities/ReadingDays.h"
 
 // Optional trailer appended to reflow-reader progress files. It keeps the
 // bookshelf and the reader overlay on exactly the same display-progress scale.
@@ -33,7 +34,14 @@ private:
     std::string path_;
     uint64_t elapsed_us_ = 0;
     int64_t started_us_ = -1;
+    int64_t started_wall_us_ = -1;
+    int started_offset_minutes_ = 480;
+    reading_days::History pending_days_;
 };
+
+// Old per-book totals cannot be backdated. Only newly timed, date-attributed
+// sessions populate this history. Returns false when the system clock is invalid.
+bool recent_reading_days(std::array<uint64_t,7> *seconds,int64_t *today);
 
 bool recent_book_load(RecentBook *book);
 size_t recent_books_load(std::vector<RecentBook> *books);

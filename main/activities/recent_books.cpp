@@ -2,6 +2,8 @@
 #include "RecentBookCapacity.h"
 #include "parser/epub_parser.h"
 #include "storage/app_paths.h"
+#include "time/time_basis.h"
+#include <ctime>
 
 #include <algorithm>
 #include <cstdint>
@@ -72,23 +74,86 @@ static uint64_t load_reading_time(const char *path)
     return 0;
 }
 
+static std::string daily_path() { return std::string(app_paths::data_dir())+"/reading_time/days.bin"; }
+static uint32_t days_checksum(const reading_days::History &history) {
+    uint32_t hash=2166136261u;
+    auto add=[&](uint64_t value) {
+        for(int i=0;i<8;++i) { hash^=uint8_t(value>>(i*8)); hash*=16777619u; }
+    };
+    add(uint64_t(history.last_day)); for(auto value:history.us) add(value);
+    return hash;
+}
+static reading_days::History load_days() {
+    for(const std::string &file:{daily_path(),daily_path()+".bak"}) {
+        FILE *fp=std::fopen(file.c_str(),"rb");
+        if(!fp) continue;
+        uint32_t magic=0,checksum=0;
+        reading_days::History history;
+        bool ok=std::fread(&magic,4,1,fp)==1 && magic==0x31444452 &&
+            std::fread(&history.last_day,8,1,fp)==1 &&
+            std::fread(history.us.data(),8,reading_days::count,fp)==reading_days::count &&
+            std::fread(&checksum,4,1,fp)==1 && std::fgetc(fp)==EOF &&
+            history.last_day>=0 && history.last_day<=47481 && checksum==days_checksum(history);
+        std::fclose(fp);
+        if(ok) return history;
+    }
+    return {};
+}
+static bool save_days(const reading_days::History &pending) {
+    if(pending.last_day<0) return true;
+    auto history=load_days(); history.merge(pending);
+    app_paths::ensure_dir((std::string(app_paths::data_dir())+"/reading_time").c_str());
+    const std::string file=daily_path(),temp=file+".tmp",backup=file+".bak";
+    FILE *fp=std::fopen(temp.c_str(),"wb");
+    if(!fp) return false;
+    const uint32_t magic=0x31444452,checksum=days_checksum(history);
+    bool ok=std::fwrite(&magic,4,1,fp)==1 && std::fwrite(&history.last_day,8,1,fp)==1 &&
+        std::fwrite(history.us.data(),8,reading_days::count,fp)==reading_days::count &&
+        std::fwrite(&checksum,4,1,fp)==1;
+    if(std::fclose(fp)!=0) ok=false;
+    struct stat st{};
+    if(ok && stat(file.c_str(),&st)==0) {
+        std::remove(backup.c_str()); ok=std::rename(file.c_str(),backup.c_str())==0;
+    }
+    if(ok) ok=std::rename(temp.c_str(),file.c_str())==0;
+    if(ok) std::remove(backup.c_str()); else std::remove(temp.c_str());
+    return ok;
+}
+bool recent_reading_days(std::array<uint64_t,7> *seconds,int64_t *today) {
+    if(!seconds || !today) return false;
+    seconds->fill(0); *today=0;
+    if(!time_basis_system_clock_valid()) return false;
+    *today=(int64_t(std::time(nullptr))+time_basis_get_offset_minutes()*60)/86400;
+    *seconds=load_days().week(*today);
+    return true;
+}
+
 void BookReadingTimer::configure(const char *path)
 {
     path_ = path ? path : "";
     elapsed_us_ = 0;
     started_us_ = -1;
+    started_wall_us_ = -1;
+    pending_days_ = {};
 }
 
 void BookReadingTimer::resume()
 {
-    if (!path_.empty() && started_us_ < 0) started_us_ = esp_timer_get_time();
+    if (!path_.empty() && started_us_ < 0) {
+        started_us_ = esp_timer_get_time();
+        started_wall_us_=time_basis_system_clock_valid()?int64_t(std::time(nullptr))*1000000:-1;
+        started_offset_minutes_=time_basis_get_offset_minutes();
+    }
 }
 
 void BookReadingTimer::pause()
 {
     if (started_us_ < 0) return;
-    elapsed_us_ += static_cast<uint64_t>(esp_timer_get_time() - started_us_);
+    const uint64_t interval=static_cast<uint64_t>(esp_timer_get_time() - started_us_);
+    elapsed_us_ += interval;
+    if(started_wall_us_>=0) pending_days_.add_span(started_wall_us_,interval,started_offset_minutes_);
     started_us_ = -1;
+    started_wall_us_ = -1;
 }
 
 void BookReadingTimer::finish()
@@ -118,6 +183,8 @@ void BookReadingTimer::finish()
         if (ok) std::remove(backup.c_str());
     }
     if (ok) {
+        if(save_days(pending_days_)) pending_days_={};
+        else ESP_LOGW("READING_TIME","Daily history save failed");
         ESP_LOGI("READING_TIME", "saved total=%llu s session=%llu s",
                  (unsigned long long)(total / 1000000),
                  (unsigned long long)(elapsed_us_ / 1000000));

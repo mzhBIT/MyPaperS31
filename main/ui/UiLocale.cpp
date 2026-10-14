@@ -752,6 +752,18 @@ constexpr Translation kText[] = {
     {"Root · %u items", "根目录 · %u 项", "根目錄 · %u 項"},
     {"Name ↑", "名称 ↑", "名稱 ↑"},
     {"Name ↓", "名称 ↓", "名稱 ↓"},
+    {"Continue reading", "继续阅读", "繼續閱讀"},
+    {"View details ›", "查看详情 ›", "查看詳情 ›"},
+    {"Read %u%%", "已读 %u%%", "已讀 %u%%"},
+    {"Open a book to continue reading here", "打开一本书后，会在这里继续阅读", "開啟一本書後，會在這裡繼續閱讀"},
+    {"Last 7 days", "近7天阅读", "近7天閱讀"},
+    {"Total %llu hours", "累计 %llu 小时", "累計 %llu 小時"},
+    {"Total %llu minutes", "累计 %llu 分钟", "累計 %llu 分鐘"},
+    {"Daily reading time", "每天阅读时长", "每天閱讀時長"},
+    {"Avg %llu h %llu min", "日均 %llu 小时%llu分", "日均 %llu 小時%llu分"},
+    {"Avg %llu minutes", "日均 %llu 分钟", "日均 %llu 分鐘"},
+    {"Set date and time to show reading history", "完成日期与时间设置后显示阅读记录", "完成日期與時間設定後顯示閱讀記錄"},
+    {"Files", "文件管理", "檔案管理"},
 };
 static_assert(sizeof(kText) / sizeof(kText[0]) == static_cast<size_t>(TextId::Count));
 

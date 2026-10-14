@@ -747,6 +747,18 @@ enum class TextId : uint16_t {
     FileRootCount,
     FileSortAscending,
     FileSortDescending,
+    ReadingHomeContinue,
+    ReadingHomeDetails,
+    ReadingHomeReadPercent,
+    ReadingHomeStartHint,
+    ReadingHomeWeek,
+    ReadingHomeTotalHours,
+    ReadingHomeTotalMinutes,
+    ReadingHomeDaily,
+    ReadingHomeAverageHours,
+    ReadingHomeAverageMinutes,
+    ReadingHomeDateHint,
+    ReadingHomeFileManager,
     Count,
 };
 

@@ -66,6 +66,7 @@ set(srcs
     "audio/phone_ringtone.cpp"
     "activities/HomeActivity.cpp"
     "activities/BookshelfActivity.cpp"
+    "activities/ReadingHomeActivity.cpp"
     "activities/FileBrowserActivity.cpp"
     "activities/ImageViewerActivity.cpp"
     "activities/ReaderActivity.cpp"

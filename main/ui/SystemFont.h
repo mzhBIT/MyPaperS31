@@ -21,6 +21,8 @@ int line_height(int pixels = 0);
 int measure(const std::string &text, int pixels = 0);
 // Top coordinate that centers actual ink (including fallback glyphs), not em box.
 int centered_y(const std::string &text, int center_y, int pixels);
+// Actual rendered ink height, including fallback glyphs (not font line spacing).
+int ink_height(const std::string &text, int pixels);
 std::string ellipsize(const std::string &text, int max_width);
 
 void draw_left(lgfx::LGFXBase &gfx, const std::string &text, int x, int y, uint16_t color = TFT_BLACK);

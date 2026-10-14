@@ -852,3 +852,35 @@ bool EpubBook::extract_item_to_file(const std::string &href, const std::string &
 {
     return _zip.extract_entry_to_file(href, out_path);
 }
+
+
+bool EpubBook::brief_metadata(const char *path,std::string *book_title,std::string *author)
+{
+    if(!path || !book_title || !author) return false;
+    book_title->clear(); author->clear();
+    EpubBook book;
+    if(!book._zip.open(path)) return false;
+    std::vector<uint8_t> bytes;
+    if(!book._zip.read_entry_to_memory("META-INF/container.xml",&bytes,64*1024) ||
+       !book.parse_container(std::string(bytes.begin(),bytes.end())) ||
+       !book._zip.read_entry_to_memory(book._opf_path,&bytes,1024*1024)) return false;
+    const std::string xml(bytes.begin(),bytes.end());
+    size_t at=0;
+    while((at=xml.find('<',at))!=std::string::npos) {
+        const size_t end=xml.find('>',at+1);
+        if(end==std::string::npos) break;
+        const std::string tag=xml.substr(at+1,end-at-1);
+        std::string name; std::unordered_map<std::string,std::string> attrs;
+        if(parse_tag_attrs(tag,&name,&attrs) && (name=="title" || name=="creator")) {
+            const std::string closing="</"+tag.substr(0,tag.find_first_of(" \t\r\n/>"))+">";
+            const size_t stop=xml.find(closing,end+1);
+            if(stop!=std::string::npos) {
+                const std::string value=decode_entities(trim_copy(xml.substr(end+1,stop-end-1)));
+                if(name=="title" && book_title->empty()) *book_title=value;
+                if(name=="creator" && author->empty()) *author=value;
+            }
+        }
+        at=end+1;
+    }
+    return !book_title->empty() || !author->empty();
+}

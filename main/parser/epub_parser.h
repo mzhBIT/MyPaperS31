@@ -43,6 +43,8 @@ public:
     const EpubTocItem &toc_item(int index) const { return _toc[(size_t)index]; }
     static bool cached_progress_info(const char *path, uint32_t spine, uint64_t position,
                                      int *percent, int *chapter, int *chapter_count);
+    // Homepage metadata only: container + bounded OPF, no chapter/TOC layout.
+    static bool brief_metadata(const char *path,std::string *title,std::string *author);
     bool read_item_to_string(const std::string &href, std::string *out);
     bool read_item_prefix(const std::string &href, std::vector<uint8_t> *out,
                           size_t max_bytes = 64 * 1024);

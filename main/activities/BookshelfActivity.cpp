@@ -2,6 +2,8 @@
 // Copyright 2026 mindreset. SPDX-License-Identifier: Apache-2.0
 // Local activity integration and localization: MyPaper contributors.
 #include "activities/BookshelfActivity.h"
+#include "activities/FileBrowserActivity.h"
+#include "activities/ReadingHomeActivity.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "activities/HomeActivity.h"
@@ -24,7 +26,6 @@
 #include <esp_log.h>
 #include <esp_timer.h>
 
-extern void launch_file_browser(const char *path);
 extern void launch_reader(const char *path);
 extern void launch_epub_reader(const char *path);
 extern void launch_mobi_reader(const char *path);
@@ -434,13 +435,13 @@ public:
         keyboard_focus=false;
         if(e.y>=1096) {
             int tab=std::max(0,std::min(3,e.x/171));
-            if(tab==0) ActivityManager::instance().pop_to_root();
-            else if(tab==2) launch_file_browser("/sdcard");
+            if(tab==0) launch_reading_home();
+            else if(tab==2) launch_file_browser("/sdcard", true);
             else if(tab==3) launch_settings();
             return true;
         }
         if(layout::manage.contains(e.x,e.y)) { show_styles(); return true; }
-        if(layout::import.contains(e.x,e.y)) { launch_file_browser("/sdcard/books"); return true; }
+        if(layout::import.contains(e.x,e.y)) { launch_file_browser("/sdcard/books", true); return true; }
         if(layout::previous.contains(e.x,e.y)) { turn(-1); return true; }
         if(layout::next.contains(e.x,e.y)) { turn(1); return true; }
         for(int slot=0;slot<capacity();++slot)

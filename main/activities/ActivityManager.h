@@ -3,6 +3,7 @@
 #include <M5GFX.h>
 #include <cstdint>
 #include <vector>
+#include <algorithm>
 #include <esp_log.h>
 
 class ActivityManager {
@@ -46,6 +47,27 @@ public:
         m_stack.front()->on_show();
         m_transition_cd = lgfx::millis() + 80;
         ESP_LOGI("AM", "pop to root → depth=%zu", m_stack.size());
+    }
+
+
+    bool pop_to(Activity *target) {
+        auto found=std::find(m_stack.begin(),m_stack.end(),target);
+        if(found==m_stack.end()) return false;
+        const size_t target_depth=size_t(found-m_stack.begin())+1;
+        if(m_stack.size()==target_depth) return true;
+        while(m_stack.size()>target_depth) {
+            auto *old=m_stack.back(); m_stack.pop_back(); delete old;
+        }
+        target->on_show();
+        m_transition_cd=lgfx::millis()+80;
+        return true;
+    }
+    // Replace the app branch without rendering its intermediate pages or root.
+    void show_above_root(Activity *act) {
+        while(m_stack.size()>1) {
+            auto *old=m_stack.back(); m_stack.pop_back(); delete old;
+        }
+        push(act);
     }
 
     Activity *current() { return m_stack.empty() ? nullptr : m_stack.back(); }

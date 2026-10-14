@@ -1,6 +1,8 @@
 // File page geometry adapted from read-pico-reader app_files.c.
 // Copyright 2026 mindreset. SPDX-License-Identifier: Apache-2.0
 #include "activities/Activity.h"
+#include "activities/FileBrowserActivity.h"
+#include "activities/ReadingHomeActivity.h"
 #include "ui/ListFocus.h"
 #include "ui/FileBrowserLayout.h"
 #include "ui/pico_file_icons.h"
@@ -363,6 +365,7 @@ static bool hit_back(int tx, int ty) {
 // ─── Activity ──────────────────────────────────────────────────────
 
 class FileBrowserActivity : public Activity {
+    bool m_initial_hd = false;
     bool m_initial_show = true;
     bool m_transfer_menu = false;
     int m_transfer_choice = 0;
@@ -374,6 +377,7 @@ class FileBrowserActivity : public Activity {
     ui::TextInputOverlay m_text_input;
 
 public:
+    explicit FileBrowserActivity(bool initial_hd = false) : m_initial_hd(initial_hd) {}
     void draw_transfer_menu() {
         auto r=fl::transfer_menu;
         M5.Display.fillRoundRect(r.x,r.y,r.w,r.h,20,TFT_WHITE);
@@ -403,7 +407,7 @@ public:
         g_storage_ready = esp_vfs_fat_info("/sdcard",&g_total_bytes,&g_free_bytes)==ESP_OK;
         g_free_bytes=std::min(g_free_bytes,g_total_bytes);
         M5.Display.startWrite();
-        M5.Display.setEpdMode(epd_mode_t::epd_text);
+        M5.Display.setEpdMode(m_initial_hd ? epd_mode_t::epd_hd : epd_mode_t::epd_text);
         M5.Display.fillScreen(TFT_WHITE);
         draw_topbar();
         draw_list();
@@ -809,7 +813,7 @@ public:
             if(event.y>=fl::nav_top) {
                 int tab=std::min(3,std::max(0,event.x*4/684));
                 if(tab==0) {
-                    ActivityManager::instance().pop_to_root();
+                    launch_reading_home();
                 } else if(tab==1) launch_bookshelf();
                 else if(tab==3) launch_settings();
                 return true;
@@ -947,8 +951,12 @@ public:
 // ─── Placeholder (reuse from HomeActivity — defined there) ────────
 
 void launch_file_browser(const char *start_path) {
+    launch_file_browser(start_path, false);
+}
+
+void launch_file_browser(const char *start_path, bool initial_hd) {
     g_root = (start_path && start_path[0]) ? start_path : "/sdcard";
     g_path = g_root;
     load_dir(g_path);
-    ActivityManager::instance().push(new FileBrowserActivity());
+    ActivityManager::instance().push(new FileBrowserActivity(initial_hd));
 }

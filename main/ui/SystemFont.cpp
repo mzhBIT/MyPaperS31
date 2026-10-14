@@ -265,4 +265,18 @@ int centered_y(const std::string &text, int cy, int px) {
 void draw_right_sized(lgfx::LGFXBase &gfx, const std::string &text, int x, int y, int px, uint16_t color) {
     Lock lock; draw(gfx, text, x - measure(text, px), y, px, color);
 }
+int ink_height(const std::string &text,int px) {
+    Lock lock;
+    auto &b=bank(px);
+    int above=0,below=0;
+    for(size_t pos=0;pos<text.size();) {
+        uint32_t cp; pos=next(text,pos,cp);
+        auto *face=face_for(b,cp);
+        int a=0,d=0;
+        if(face && face->glyphInkExtents(cp,a,d)) {
+            above=std::max(above,a); below=std::max(below,d);
+        }
+    }
+    return above+below;
+}
 }
