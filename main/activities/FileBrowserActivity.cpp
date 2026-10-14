@@ -208,8 +208,6 @@ static void draw_nav() {
     }
 }
 static void draw_back() {
-    M5.Display.drawRoundRect(36,92,44,44,22,gray(88));
-    M5.Display.drawRoundRect(37,93,42,42,21,gray(88));
     icon(pico_shelf_icons::chevron_left,58,114,38);
 }
 static void draw_topbar() {

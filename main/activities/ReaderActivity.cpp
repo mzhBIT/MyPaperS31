@@ -265,7 +265,9 @@ public:
 
     void on_create() override {
         int w = M5.Display.width(), h = M5.Display.height();
-        epd_mode_t mode = select_page_refresh_mode();
+        // Clear shelf/cover residue on the first page, matching the reflow reader.
+        epd_mode_t mode = epd_mode_t::epd_quality;
+        note_page_refresh_mode(mode);
         epd_mode_t default_mode = reader_epd_mode();
         M5.Display.startWrite();
         M5.Display.setEpdMode(mode);

@@ -12,8 +12,10 @@ struct Rect {
 constexpr int nav_top = 1096, row_height = 91;
 constexpr Rect storage{36,171,612,112};
 constexpr Rect transfer_add{592,90,56,56};
-constexpr Rect transfer_menu{248,158,400,332};
-constexpr Rect transfer(int i) { return {268,178+i*100,360,92}; }
+constexpr Rect transfer_menu{368,158,280,332};
+constexpr Rect transfer(int i) {
+    return {transfer_menu.x+20,transfer_menu.y+20+i*100,transfer_menu.w-40,92};
+}
 constexpr Rect sheet{20,430,644,626};
 constexpr Rect close{596,446,56,64};
 constexpr Rect cancel{40,930,604,76};

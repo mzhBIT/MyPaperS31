@@ -151,8 +151,8 @@ class ReadingHomeActivity final : public Activity {
             M5.Display.fillRect(r.x,r.y,r.w,r.h,TFT_WHITE);
             const std::string label=truncate(book_.title,24,r.w-20);
             centered(label,r.x+r.w/2,r.y+r.h/2,24,r.w-20);
+            M5.Display.drawRect(r.x,r.y,r.w,r.h,TFT_BLACK);
         }
-        M5.Display.drawRect(r.x,r.y,r.w,r.h,TFT_BLACK);
     }
     void status() {
         char value[24]="--:--";
