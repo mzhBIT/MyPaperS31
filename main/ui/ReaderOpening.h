@@ -15,7 +15,7 @@ public:
         _previous_mode = M5.Display.getEpdMode();
         M5.Display.getPanel()->setPageTurnAnimation(0);
         M5.Display.startWrite();
-        M5.Display.setEpdMode(epd_mode_t::epd_text);
+        M5.Display.setEpdMode(epd_mode_t::epd_hd);
         M5.Display.fillScreen(TFT_WHITE);
         M5.Display.display();
         M5.Display.endWrite();

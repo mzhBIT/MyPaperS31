@@ -148,17 +148,17 @@ bool reader_font_set(const char *path, ReaderProfile profile)
         return true;
     }
 
-    strncpy(s_font_path, path, sizeof(s_font_path) - 1);
-    s_font_path[sizeof(s_font_path) - 1] = '\0';
-
     app_paths::ensure_data_dir();
     FILE *fp = fopen(app_paths::reader_font_file(), "w");
     if (!fp) {
         ESP_LOGE(TAG, "cannot save font config: %s", app_paths::reader_font_file());
         return false;
     }
-    fprintf(fp, "%s\n", s_font_path);
-    fclose(fp);
+    const bool written = fprintf(fp, "%s\n", path) >= 0;
+    const bool closed = fclose(fp) == 0;
+    if (!written || !closed) return false;
+    strncpy(s_font_path, path, sizeof(s_font_path) - 1);
+    s_font_path[sizeof(s_font_path) - 1] = '\0';
     ESP_LOGI(TAG, "selected font: %s", s_font_path);
     return true;
 }

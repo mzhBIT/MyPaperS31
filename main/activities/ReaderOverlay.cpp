@@ -11,9 +11,11 @@
 
 #include <M5Unified.h>
 #include <algorithm>
-#include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <dirent.h>
+#include <strings.h>
+#include <sys/stat.h>
 
 namespace {
 
@@ -23,6 +25,8 @@ constexpr int STEP_BOX_GAP = 10;
 constexpr int VALUE_W = 100;
 constexpr int CHAPTER_INDEX_H = 52;
 constexpr int PANEL_RADIUS = 10;
+constexpr const char *FONT_PREVIEW_CN = "同一个世界，同一个梦想";
+constexpr const char *FONT_PREVIEW_EN = "One world, One dream";
 
 const char *base_name(const char *path)
 {
@@ -112,7 +116,7 @@ void beauty_text(int index, bool weread_mode, ReaderProfile profile, std::string
         2, // Background
         3, // Book cover
         7, // Auto page
-        8, // Experimental page animation
+        8, // Page animation
     };
     const int ordered_index = weread_mode && index > 5 ? index - 1 : index;
     const int base_index = ordered_index >= 0 && ordered_index < 9
@@ -288,6 +292,7 @@ void ReaderOverlay::select_tab(Tab tab)
 
 void ReaderOverlay::open(Tab tab)
 {
+    m_fonts_visible = false;
     if (!m_visible) m_pending_progress = -1;
     m_visible = true;
     select_tab(tab);
@@ -295,6 +300,9 @@ void ReaderOverlay::open(Tab tab)
 
 void ReaderOverlay::close()
 {
+    reset_font_preview();
+    m_fonts_visible = false;
+    m_fonts.clear();
     m_visible = false;
     m_pending_progress = -1;
 }
@@ -477,7 +485,10 @@ int ReaderOverlay::hit_progress(int x, int y) const
 
 ReaderOverlay::Action ReaderOverlay::activate_setting()
 {
-    if (m_tab == Tab::Settings && m_setting_focus == 0) return Action::OpenFont;
+    if (m_tab == Tab::Settings && m_setting_focus == 0) {
+        open_fonts();
+        return Action::None;
+    }
     if (m_tab == Tab::Beauty && beauty_base_index(m_setting_focus) == 2) {
         return Action::OpenBackground;
     }
@@ -503,6 +514,14 @@ ReaderOverlay::Action ReaderOverlay::activate_chapter()
 ReaderOverlay::Action ReaderOverlay::on_key(int key)
 {
     if (!m_visible) return Action::None;
+    if (m_fonts_visible) {
+        if (key == APP_KEY_BACK || key == APP_KEY_EXTRA) return_from_fonts();
+        else if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
+            move_font_focus(key == APP_KEY_UP ? -1 : 1);
+            redraw();
+        } else if (key == APP_KEY_OK) choose_font();
+        return Action::None;
+    }
     if (key == APP_KEY_BACK) return Action::Close;
     if (key == APP_KEY_EXTRA) {
         if (m_tab == Tab::Settings) select_tab(Tab::Beauty);
@@ -530,6 +549,31 @@ ReaderOverlay::Action ReaderOverlay::on_touch(const TouchEvent &event)
 {
     if (!m_visible) return Action::None;
     Geometry g = geometry();
+    if (m_fonts_visible) {
+        if (event.type == TouchEventType::Back) return_from_fonts();
+        else if (event.type == TouchEventType::SwipeUp || event.type == TouchEventType::SwipeDown) {
+            move_font_focus((event.type == TouchEventType::SwipeUp ? 1 : -1) * font_rows());
+            redraw();
+        } else if (event.type == TouchEventType::Tap) {
+            if (event.y >= g.tab_y && event.y < g.y + g.h &&
+                event.x >= g.x + g.w / 2 && event.x < g.x + g.w) {
+                choose_font();
+            } else if (event.x < g.x || event.x >= g.x + g.w || event.y < g.y || event.y >= g.tab_y) {
+                return_from_fonts();
+            } else {
+                const int top = g.body_y + CHAPTER_INDEX_H;
+                const int row_h = std::max(72, system_font::line_height() + 24);
+                const int row = (event.y - top) / row_h;
+                if (event.y >= top && row < font_rows() && m_font_scroll + row < int(m_fonts.size())) {
+                    m_font_focus = m_font_scroll + row;
+                    prepare_font_preview();
+                    move_font_focus(0);
+                    redraw();
+                }
+            }
+        }
+        return Action::None;
+    }
     if (event.type == TouchEventType::Back) return Action::Close;
 
     if (event.type == TouchEventType::SwipeLeft || event.type == TouchEventType::SwipeRight) {
@@ -572,7 +616,10 @@ ReaderOverlay::Action ReaderOverlay::on_touch(const TouchEvent &event)
         int index = hit_setting(event.x, event.y, &direction);
         if (index < 0) return Action::None;
         m_setting_focus = index;
-        if (m_tab == Tab::Settings && index == 0) return Action::OpenFont;
+        if (m_tab == Tab::Settings && index == 0) {
+            open_fonts();
+            return Action::None;
+        }
         if (m_tab == Tab::Beauty && beauty_base_index(index) == 2) {
             return Action::OpenBackground;
         }
@@ -600,6 +647,178 @@ ReaderOverlay::Action ReaderOverlay::on_touch(const TouchEvent &event)
     if (index < 0) return Action::None;
     m_chapter_focus = index;
     return activate_chapter();
+}
+
+int ReaderOverlay::font_rows() const
+{
+    const auto g = geometry();
+    return std::max(1, (g.body_h - CHAPTER_INDEX_H - font_preview_height()) /
+        std::max(72, system_font::line_height() + 24));
+}
+
+void ReaderOverlay::move_font_focus(int delta)
+{
+    if (m_fonts.empty()) { m_font_focus = m_font_scroll = 0; return; }
+    m_font_focus = std::clamp(m_font_focus + delta, 0, int(m_fonts.size()) - 1);
+    prepare_font_preview();
+    const int rows = font_rows();
+    if (m_font_focus < m_font_scroll) m_font_scroll = m_font_focus;
+    if (m_font_focus >= m_font_scroll + rows) m_font_scroll = m_font_focus - rows + 1;
+    m_font_scroll = std::clamp(m_font_scroll, 0, std::max(0, int(m_fonts.size()) - rows));
+}
+
+void ReaderOverlay::open_fonts()
+{
+    reset_font_preview();
+    m_fonts.clear();
+    m_font_save_failed = false;
+    m_font_focus = m_font_scroll = 0;
+    DIR *dir = opendir("/sdcard/fonts");
+    if (dir) {
+        while (auto *entry = readdir(dir)) {
+            const char *ext = strrchr(entry->d_name, '.');
+            if (!ext || (strcasecmp(ext, ".ttf") && strcasecmp(ext, ".otf") && strcasecmp(ext, ".bin"))) continue;
+            std::string path = std::string("/sdcard/fonts/") + entry->d_name;
+            struct stat st = {};
+            if (stat(path.c_str(), &st) == 0 && S_ISREG(st.st_mode)) m_fonts.push_back(std::move(path));
+        }
+        closedir(dir);
+    }
+    std::sort(m_fonts.begin(), m_fonts.end());
+    const std::string current = reader_font_path(m_profile);
+    auto found = std::find(m_fonts.begin(), m_fonts.end(), current);
+    if (found == m_fonts.end()) found = std::find_if(m_fonts.begin(), m_fonts.end(),
+        [&](const std::string &path) { return strcmp(base_name(path.c_str()), base_name(current.c_str())) == 0; });
+    if (found != m_fonts.end()) m_font_focus = int(found - m_fonts.begin());
+    prepare_font_preview();
+    m_font_scroll = std::max(0, m_font_focus - font_rows() / 2);
+    move_font_focus(0);
+    m_fonts_visible = true;
+    redraw();
+}
+
+void ReaderOverlay::return_from_fonts()
+{
+    reset_font_preview();
+    m_fonts_visible = false;
+    m_fonts.clear();
+    m_tab = Tab::Settings;
+    m_setting_focus = 0;
+    redraw();
+}
+
+void ReaderOverlay::choose_font()
+{
+    if (m_fonts.empty()) return;
+    const auto &path = m_fonts[m_font_focus];
+    if (path != reader_font_path(m_profile)) {
+        if (!reader_font_set(path.c_str(), m_profile)) {
+            m_font_save_failed = true;
+            redraw();
+            return;
+        }
+        // The owner reloads the text renderer and repaginates when this overlay closes.
+        m_settings_dirty = true;
+    }
+    return_from_fonts();
+}
+
+void ReaderOverlay::draw_fonts(const Geometry &g)
+{
+    prepare_font_preview();
+    const int rows = font_rows();
+    const int row_h = std::max(72, system_font::line_height() + 24);
+    const int top = g.body_y + CHAPTER_INDEX_H;
+    const int left = g.x + PANEL_PAD, width = g.w - PANEL_PAD * 2;
+    const char *title = ui_locale::text(m_font_save_failed ? ui_locale::TextId::ReaderFontSaveFailed : ui_locale::TextId::Fonts);
+    system_font::draw_center(M5.Display, title, g.x + g.w / 2,
+        g.body_y + std::max(1, (CHAPTER_INDEX_H - system_font::line_height()) / 2));
+    M5.Display.drawFastHLine(left, top, width, TFT_BLACK);
+    if (m_fonts.empty()) {
+        const auto hint = system_font::ellipsize(ui_locale::text(ui_locale::TextId::NoFontsHint), width - 24);
+        system_font::draw_center(M5.Display, hint, g.x + g.w / 2, top + 32);
+    }
+    for (int row = 0; row < rows && m_font_scroll + row < int(m_fonts.size()); ++row) {
+        const int index = m_font_scroll + row, y = top + row * row_h;
+        list_focus::draw(M5.Display, left, y, row_h, index == m_font_focus);
+        M5.Display.drawFastHLine(left, y + row_h - 1, width, TFT_BLACK);
+        const auto name = system_font::ellipsize(base_name(m_fonts[index].c_str()), width - list_focus::text_inset() - 64);
+        const int text_y = y + std::max(1, (row_h - system_font::line_height()) / 2);
+        system_font::draw_left(M5.Display, name, left + list_focus::text_inset(), text_y);
+        if (m_fonts[index] == reader_font_path(m_profile))
+            system_font::draw_right(M5.Display, "*", left + width - 12, text_y);
+    }
+    draw_font_preview(g);
+    M5.Display.drawFastHLine(g.x, g.tab_y, g.w, TFT_BLACK);
+    M5.Display.drawFastVLine(g.x + g.w / 2, g.tab_y, g.tab_h, TFT_BLACK);
+    system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ReaderFontReturn), g.x + g.w / 4,
+        g.tab_y + std::max(1, (g.tab_h - system_font::line_height()) / 2));
+    system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ReaderFontUse), g.x + g.w * 3 / 4,
+        g.tab_y + std::max(1, (g.tab_h - system_font::line_height()) / 2));
+}
+
+void ReaderOverlay::reset_font_preview()
+{
+    m_font_preview.end();
+    m_preview_path.clear();
+    m_preview_size = 0;
+    m_preview_ready = false;
+}
+
+void ReaderOverlay::prepare_font_preview()
+{
+    const std::string path = m_fonts.empty() ? reader_font_path(m_profile) : m_fonts[m_font_focus];
+    const int size = reader_style_get(m_profile).font_size;
+    if (path == m_preview_path && size == m_preview_size) return;
+    m_preview_path = path;
+    m_preview_size = size;
+    ReaderTextStyle style;
+    style.font_path = m_preview_path.c_str();
+    style.font_size = size;
+    style.line_spacing = 0;
+    style.letter_spacing = 0;
+    style.glyph_cache_limit = 96;
+    style.advance_cache_limit = 96;
+    style.glyph_pool_bytes = 64 * 1024;
+    style.font_stream_windows = 4;
+    m_preview_ready = m_font_preview.begin(style);
+    if (m_preview_ready) m_preview_ready = m_font_preview.preparePage(
+        std::string(FONT_PREVIEW_CN) + "\n" + FONT_PREVIEW_EN);
+}
+
+int ReaderOverlay::font_preview_height() const
+{
+    const int line = std::max(reader_style_get(m_profile).font_size * 3 / 2,
+        m_preview_ready ? m_font_preview.lineHeight() : 0);
+    const auto g = geometry();
+    const int maximum = std::max(0, g.body_h - CHAPTER_INDEX_H -
+        std::max(72, system_font::line_height() + 24));
+    return std::min(maximum, std::max(180, line * 2 + 48));
+}
+
+void ReaderOverlay::draw_font_preview(const Geometry &g)
+{
+    const int top = g.tab_y - font_preview_height();
+    const int left = g.x + PANEL_PAD, width = g.w - PANEL_PAD * 2;
+    if (g.tab_y - top <= 16) return;
+    M5.Display.drawFastHLine(left, top, width, TFT_BLACK);
+    if (!m_preview_ready) {
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ReaderFontPreviewFailed),
+            g.x + g.w / 2, top + 32);
+        return;
+    }
+    int32_t clip_x, clip_y, clip_w, clip_h;
+    M5.Display.getClipRect(&clip_x, &clip_y, &clip_w, &clip_h);
+    M5.Display.setClipRect(left + 8, top + 8, width - 16, g.tab_y - top - 16);
+    const int line_h = m_font_preview.lineHeight();
+    int y = top + std::max(12, (g.tab_y - top - line_h * 2 - 16) / 2);
+    for (const char *sample : {FONT_PREVIEW_CN, FONT_PREVIEW_EN}) {
+        const int measured = m_font_preview.measureUtf8(sample);
+        const int x = left + std::max(8, (width - measured) / 2);
+        m_font_preview.drawUtf8Line(M5.Display, sample, x, y, TFT_BLACK);
+        y += line_h + 16;
+    }
+    M5.Display.setClipRect(clip_x, clip_y, clip_w, clip_h);
 }
 
 void ReaderOverlay::draw_settings(const Geometry &g)
@@ -735,57 +954,27 @@ void ReaderOverlay::draw_chapters(const Geometry &g)
 
 void ReaderOverlay::draw_tabs(const Geometry &g)
 {
-    const int bottom = g.y + g.h - 1;
-    const auto fill_tab = [&](int x, int width, uint16_t color, bool left_edge, bool right_edge) {
-        const int top = g.tab_y + 1;
-        const int straight_bottom = bottom - PANEL_RADIUS;
-        M5.Display.fillRect(x, top, width, straight_bottom - top + 1, color);
-        for (int y = straight_bottom + 1; y < bottom; ++y) {
-            const int dy = y - straight_bottom;
-            const int inset = PANEL_RADIUS - static_cast<int>(
-                std::sqrt(PANEL_RADIUS * PANEL_RADIUS - dy * dy));
-            const int left = x + (left_edge ? inset : 0);
-            const int right = x + width - (right_edge ? inset : 0);
-            if (right > left) M5.Display.drawFastHLine(left, y, right - left, color);
-        }
-    };
-    if (!m_chapters_enabled) {
-        int half = g.w / 2;
-        M5.Display.drawFastHLine(g.x, g.tab_y, g.w, TFT_BLACK);
-        M5.Display.drawFastVLine(g.x + half, g.tab_y, g.tab_h, TFT_BLACK);
-        bool settings = m_tab == Tab::Settings;
-        fill_tab(g.x + 1, half - 1, settings ? TFT_BLACK : TFT_WHITE, true, false);
-        fill_tab(g.x + half + 1, g.w - half - 2,
-                 settings ? TFT_WHITE : TFT_BLACK, false, true);
-        int text_y = g.tab_y + std::max(2, (g.tab_h - system_font::line_height()) / 2);
-        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Settings), g.x + half / 2, text_y,
-                                 settings ? TFT_WHITE : TFT_BLACK);
-        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Beauty), g.x + half + (g.w - half) / 2, text_y,
-                                 settings ? TFT_BLACK : TFT_WHITE);
-        return;
-    }
-
-    int third = g.w / 3;
-    int x0 = g.x;
-    int x1 = g.x + third;
-    int x2 = g.x + third * 2;
-    int x3 = g.x + g.w;
+    const int count = m_chapters_enabled ? 3 : 2;
+    const Tab tabs[] = {Tab::Settings, Tab::Beauty, Tab::Chapters};
+    const ui_locale::TextId labels[] = {ui_locale::TextId::Settings,
+        ui_locale::TextId::Beauty, ui_locale::TextId::Chapters};
     M5.Display.drawFastHLine(g.x, g.tab_y, g.w, TFT_BLACK);
-    M5.Display.drawFastVLine(x1, g.tab_y, g.tab_h, TFT_BLACK);
-    M5.Display.drawFastVLine(x2, g.tab_y, g.tab_h, TFT_BLACK);
-    bool settings = m_tab == Tab::Settings;
-    bool beauty = m_tab == Tab::Beauty;
-    bool chapters = m_tab == Tab::Chapters;
-    fill_tab(x0 + 1, x1 - x0 - 1, settings ? TFT_BLACK : TFT_WHITE, true, false);
-    fill_tab(x1 + 1, x2 - x1 - 1, beauty ? TFT_BLACK : TFT_WHITE, false, false);
-    fill_tab(x2 + 1, x3 - x2 - 2, chapters ? TFT_BLACK : TFT_WHITE, false, true);
-    int text_y = g.tab_y + std::max(2, (g.tab_h - system_font::line_height()) / 2);
-    system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Settings), x0 + (x1 - x0) / 2, text_y,
-                             settings ? TFT_WHITE : TFT_BLACK);
-    system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Beauty), x1 + (x2 - x1) / 2, text_y,
-                             beauty ? TFT_WHITE : TFT_BLACK);
-    system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Chapters), x2 + (x3 - x2) / 2, text_y,
-                             chapters ? TFT_WHITE : TFT_BLACK);
+    const int text_y = g.tab_y + std::max(2, (g.tab_h - system_font::line_height()) / 2);
+    const int marker_h = std::min(g.tab_h - 8, std::max(48, system_font::line_height() + 16));
+    for (int i = 0; i < count; ++i) {
+        // Match the existing touch partitions, including their remainder pixels.
+        const int left = g.x + i * g.w / count;
+        const int right = g.x + (i + 1) * g.w / count;
+        if (i) M5.Display.drawFastVLine(left, g.tab_y, g.tab_h, TFT_BLACK);
+        list_focus::draw(M5.Display, left + 10,
+            g.tab_y + (g.tab_h - marker_h) / 2, marker_h, m_tab == tabs[i]);
+        const int text_left = left + 10 + list_focus::text_inset();
+        const int text_right = right - 10;
+        const auto label = system_font::ellipsize(ui_locale::text(labels[i]),
+            std::max(1, text_right - text_left));
+        system_font::draw_center(M5.Display, label, (text_left + text_right) / 2,
+            text_y, TFT_BLACK);
+    }
 }
 
 void ReaderOverlay::draw()
@@ -793,10 +982,11 @@ void ReaderOverlay::draw()
     if (!m_visible) return;
     Geometry g = geometry();
     M5.Display.fillRoundRect(g.x, g.y, g.w, g.h, PANEL_RADIUS, TFT_WHITE);
-    if (m_tab == Tab::Settings) draw_settings(g);
+    if (m_fonts_visible) draw_fonts(g);
+    else if (m_tab == Tab::Settings) draw_settings(g);
     else if (m_tab == Tab::Beauty) draw_beauty(g);
     else draw_chapters(g);
-    draw_tabs(g);
+    if (!m_fonts_visible) draw_tabs(g);
     M5.Display.drawRoundRect(g.x, g.y, g.w, g.h, PANEL_RADIUS, TFT_BLACK);
 }
 

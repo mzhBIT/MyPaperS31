@@ -759,6 +759,10 @@ enum class TextId : uint16_t {
     ReadingHomeAverageMinutes,
     ReadingHomeDateHint,
     ReadingHomeFileManager,
+    ReaderFontReturn,
+    ReaderFontSaveFailed,
+    ReaderFontUse,
+    ReaderFontPreviewFailed,
     Count,
 };
 

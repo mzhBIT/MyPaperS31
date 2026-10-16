@@ -719,7 +719,7 @@ constexpr Translation kText[] = {
     {"Start and destination are the same", "起点与终点相同", "起點與終點相同"},
     {"Auto page", "自动翻页", "自動翻頁"},
     {"s", "秒", "秒"},
-    {"Page animation (test)", "翻页动画（实验）", "翻頁動畫（實驗）"},
+    {"Page animation", "翻页动画", "翻頁動畫"},
     {"Fast", "快", "快"},
     {"Slow", "慢", "慢"},
     {"Restore defaults", "恢复默认设置", "恢復預設設定"},
@@ -764,6 +764,10 @@ constexpr Translation kText[] = {
     {"Avg %llu minutes", "日均 %llu 分钟", "日均 %llu 分鐘"},
     {"Set date and time to show reading history", "完成日期与时间设置后显示阅读记录", "完成日期與時間設定後顯示閱讀記錄"},
     {"Files", "文件管理", "檔案管理"},
+    {"Back", "返回", "返回"},
+    {"Could not save font", "字体保存失败", "字型儲存失敗"},
+    {"Use font", "使用此字体", "使用此字型"},
+    {"Font preview unavailable", "字体预览不可用", "字型預覽不可用"},
 };
 static_assert(sizeof(kText) / sizeof(kText[0]) == static_cast<size_t>(TextId::Count));
 

@@ -4,6 +4,8 @@
 #include "ui/ReaderProfile.h"
 
 #include <string>
+#include <vector>
+#include "renderer/TextRenderer.h"
 #include "ui/script_conversion.h"
 #include "ui/reader_writing_mode.h"
 
@@ -96,6 +98,16 @@ private:
     void draw_beauty(const Geometry &g);
     void draw_chapters(const Geometry &g);
     void draw_tabs(const Geometry &g);
+    void open_fonts();
+    void return_from_fonts();
+    void choose_font();
+    void move_font_focus(int delta);
+    int font_rows() const;
+    void draw_fonts(const Geometry &g);
+    int font_preview_height() const;
+    void prepare_font_preview();
+    void draw_font_preview(const Geometry &g);
+    void reset_font_preview();
 
     ReaderProfile m_profile = ReaderProfile::Shared;
     ReaderOverlayChapters m_chapters;
@@ -112,4 +124,13 @@ private:
     int m_chapter_focus = 0;
     int m_chapter_scroll = 0;
     int m_pending_progress = -1;
+    bool m_fonts_visible = false;
+    bool m_font_save_failed = false;
+    std::vector<std::string> m_fonts;
+    int m_font_focus = 0;
+    int m_font_scroll = 0;
+    TextRenderer m_font_preview;
+    std::string m_preview_path;
+    int m_preview_size = 0;
+    bool m_preview_ready = false;
 };

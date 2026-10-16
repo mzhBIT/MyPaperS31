@@ -1,5 +1,6 @@
 #include "renderer/TextRenderer.h"
 #include "renderer/TextLayout.h"
+#include "renderer/FontStreamLimits.h"
 #include "storage/storage_sdcard.h"
 #include "ui/EmbeddedFont.h"
 #include <algorithm>
@@ -8,6 +9,8 @@
 #include <cstdio>
 #include <cstring>
 #include <utility>
+#include <limits>
+#include <cerrno>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
@@ -325,8 +328,14 @@ static bool create_font_stream(const char *path, void **out_stream, void **out_c
     if (!path || !path[0]) return false;
 
     struct stat st = {};
-    if (stat(path, &st) != 0 || st.st_size <= 0 || st.st_size > 32 * 1024 * 1024) {
-        ESP_LOGE(TAG, "bad font size: %ld path=%s", (long)st.st_size, path);
+    if (stat(path, &st) != 0) {
+        ESP_LOGE(TAG, "font file stat failed: errno=%d path=%s", errno, path);
+        return false;
+    }
+    if (!font_stream_limits::supported(st.st_size,
+            std::numeric_limits<off_t>::max(), std::numeric_limits<FT_Long>::max(),
+            std::numeric_limits<unsigned long>::max())) {
+        ESP_LOGE(TAG, "unsupported font file size: file_bytes=%lld path=%s", (long long)st.st_size, path);
         return false;
     }
 
