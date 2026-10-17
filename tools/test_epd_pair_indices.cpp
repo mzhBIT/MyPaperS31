@@ -5,6 +5,10 @@
 #include <vector>
 #include <algorithm>
 
+static uint32_t swap_bytes(uint32_t value) {
+    return ((value & 0x00ff00ffu) << 8) | ((value & 0xff00ff00u) >> 8);
+}
+
 int main() {
     std::vector<uint8_t> from(65536), to(65536), lut(65536);
     std::vector<uint16_t> indices(65536);
@@ -26,6 +30,14 @@ int main() {
                 expected |= uint32_t(lut[(unsigned(from[i]) << 8) | to[i]]) << shifts[p];
             }
             assert(lgfx_epd_pair_indices::group(indices.data() + group * 8, lut.data()) == expected);
+            assert(lgfx_epd_pair_indices::group<true>(indices.data() + group * 8, lut.data()) == swap_bytes(expected));
+            uint32_t direct = 0;
+            for (unsigned p = 0; p < 8; ++p) {
+                const size_t i = group * 8 + p;
+                direct |= uint32_t(lut[(unsigned(from[i]) << 8) | to[i]])
+                    << lgfx_epd_pair_indices::output_shifts<true>[p];
+            }
+            assert(direct == swap_bytes(expected));
         }
     }
     // Rebuild after the target changes: no stale indices from the prior batch.
@@ -47,7 +59,7 @@ int main() {
         for (size_t y = 0; y < rows; ++y) {
             for (size_t g = 0; g < stride / 8; ++g) {
                 const size_t base = g * 8;
-                uint32_t expected = 0, actual = 0;
+                uint32_t expected = 0, actual = 0, swapped = 0, direct = 0;
                 for (unsigned p = 0; p < 8; ++p) {
                     const size_t x = base + p, i = y * stride + x;
                     const bool inside = y >= y0 && y < y1 && x >= x0 && x < x1;
@@ -59,10 +71,34 @@ int main() {
                     actual = lgfx_epd_pair_indices::group_range(region.data() + y * stride + base,
                         lut.data(), unsigned(std::max(base, x0) - base),
                         unsigned(std::min(base + 8, x1) - base));
+                    swapped = lgfx_epd_pair_indices::group_range<true>(region.data() + y * stride + base,
+                        lut.data(), unsigned(std::max(base, x0) - base),
+                        unsigned(std::min(base + 8, x1) - base));
+                    for (unsigned p = unsigned(std::max(base, x0) - base);
+                         p < unsigned(std::min(base + 8, x1) - base); ++p) {
+                        const size_t i = y * stride + base + p;
+                        direct |= uint32_t(lut[(unsigned(from[i]) << 8) | to[i]])
+                            << lgfx_epd_pair_indices::output_shifts<true>[p];
+                    }
                 }
                 assert(actual == expected);
+                assert(swapped == swap_bytes(expected));
+                assert(direct == swapped);
             }
         }
     }
-    std::puts("pair indices: exhaustive keys, 48 frame outputs and partial rectangles passed");
+    // Exhaust every drive nibble in every lane, including every clipped range.
+    uint16_t lanes[8] = {0,1,2,3,4,5,6,7};
+    for (unsigned lane=0;lane<8;++lane)
+    for (unsigned drive=0;drive<16;++drive) {
+        std::fill(lut.begin(),lut.end(),0);
+        lut[lane]=uint8_t(drive);
+        for (unsigned first=0;first<=8;++first)
+        for (unsigned end=first;end<=8;++end) {
+            auto original=lgfx_epd_pair_indices::group_range(lanes,lut.data(),first,end);
+            auto fused=lgfx_epd_pair_indices::group_range<true>(lanes,lut.data(),first,end);
+            assert(fused==swap_bytes(original));
+        }
+    }
+    std::puts("pair indices: exhaustive keys, 48 frames, partial rectangles and fused byte-swap passed");
 }

@@ -74,6 +74,17 @@
 #define MYPAPER_EPD_2D_GC16_PAIR_INDICES 1
 #endif
 
+// Pair preheat frames in one 64 KiB LUT; set 0 for sequential A/B comparison.
+#ifndef MYPAPER_EPD_2D_GC16_DUAL_PRIME
+#define MYPAPER_EPD_2D_GC16_DUAL_PRIME 1
+#endif
+
+// Pair background frames when two reusable ring slots are already available.
+// Keep prime/slot counts unchanged; set 0 to compare the original producer.
+#ifndef MYPAPER_EPD_2D_GC16_DUAL_WORKER
+#define MYPAPER_EPD_2D_GC16_DUAL_WORKER 1
+#endif
+
 // Prime a bounded GC16 frame ring before power-on, then render the remaining
 // unique phases on the same CPU core while GDMA scans the prepared frames.
 // The scan task has the higher priority and therefore keeps phase boundaries
@@ -82,18 +93,17 @@
 #define MYPAPER_EPD_2D_GC16_PIPELINE 1
 #endif
 #ifndef MYPAPER_EPD_2D_GC16_PIPELINE_SLOTS
-#define MYPAPER_EPD_2D_GC16_PIPELINE_SLOTS 20
+#define MYPAPER_EPD_2D_GC16_PIPELINE_SLOTS 16
 #endif
+// Fixed preheat, including dense GC16 batches. For a larger A/B startup margin,
+// raise prime and ring capacity together; prime must not exceed ring capacity.
 #ifndef MYPAPER_EPD_2D_GC16_PIPELINE_PRIME
-#define MYPAPER_EPD_2D_GC16_PIPELINE_PRIME 14
+#define MYPAPER_EPD_2D_GC16_PIPELINE_PRIME 10
 #endif
 
-// HD is the vendor 30-phase, effective eight-gray GC table. At the 16 us
-// scan period one phase lasts only ~11 ms while a full pair-LUT frame takes
-// longer to render. The 20-frame prefill gives the producer enough lead time
-// to finish the remaining frames while scanout advances.
+// HD independently tests 8-frame preheat; it shares the 16-slot ring.
 #ifndef MYPAPER_EPD_2D_HD_PIPELINE_PRIME
-#define MYPAPER_EPD_2D_HD_PIPELINE_PRIME 10
+#define MYPAPER_EPD_2D_HD_PIPELINE_PRIME 8
 #endif
 
 // Fuse the first three full-screen DU4 drive frames. Allocation/geometry
@@ -110,6 +120,15 @@
 #endif
 #ifndef MYPAPER_EPD_2D_DU4_PIPELINE_PRIME
 #define MYPAPER_EPD_2D_DU4_PIPELINE_PRIME 3
+#endif
+
+// Reuse the GC16 index workspace with DU4 12-bit keys for full-screen batches.
+// Independent switches permit A/B testing without changing waveforms/priming.
+#ifndef MYPAPER_EPD_2D_DU4_PAIR_INDICES
+#define MYPAPER_EPD_2D_DU4_PAIR_INDICES 1
+#endif
+#ifndef MYPAPER_EPD_2D_DU4_DUAL_WORKER
+#define MYPAPER_EPD_2D_DU4_DUAL_WORKER 1
 #endif
 
 // DU4 frames live in PSRAM.  Clear/render them in short bursts so the shared

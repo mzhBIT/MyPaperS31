@@ -3,6 +3,15 @@
 #include <cstdint>
 
 namespace lgfx_epd_pair_indices {
+// Each LUT result contains exactly two 2-bit drives (one nibble). Swapping
+// adjacent output bytes is therefore equivalent to toggling bit 3 of its shift.
+template<bool SwapBytes = false>
+inline constexpr unsigned output_shifts[8] = {
+  4 ^ (SwapBytes ? 8 : 0), 0 ^ (SwapBytes ? 8 : 0),
+  12 ^ (SwapBytes ? 8 : 0), 8 ^ (SwapBytes ? 8 : 0),
+  20 ^ (SwapBytes ? 8 : 0), 16 ^ (SwapBytes ? 8 : 0),
+  28 ^ (SwapBytes ? 8 : 0), 24 ^ (SwapBytes ? 8 : 0)
+};
 // Two old and two new 4bpp pixels form the existing 64K pair-LUT key.
 #if defined(__GNUC__)
 __attribute__((optimize("O3")))
@@ -13,27 +22,27 @@ inline void build(uint16_t* indices, const uint8_t* from,
     indices[i] = uint16_t((unsigned(from[i]) << 8) | unsigned(to[i]));
 }
 
+template<bool SwapBytes = false>
 #if defined(__GNUC__)
 __attribute__((always_inline))
 #endif
 inline uint32_t group(const uint16_t* indices, const uint8_t* lut) {
-  static constexpr unsigned shifts[8] = {4, 0, 12, 8, 20, 16, 28, 24};
   uint32_t packed = 0;
   for (unsigned pair = 0; pair < 8; ++pair)
-    packed |= uint32_t(lut[indices[pair]]) << shifts[pair];
+    packed |= uint32_t(lut[indices[pair]]) << output_shifts<SwapBytes>[pair];
   return packed;
 }
 
 // Boundary groups retain neutral drive outside the byte-aligned update area.
+template<bool SwapBytes = false>
 #if defined(__GNUC__)
 __attribute__((always_inline))
 #endif
 inline uint32_t group_range(const uint16_t* indices, const uint8_t* lut,
                             unsigned first, unsigned end) {
-  static constexpr unsigned shifts[8] = {4, 0, 12, 8, 20, 16, 28, 24};
   uint32_t packed = 0;
   for (unsigned pair = first; pair < end; ++pair)
-    packed |= uint32_t(lut[indices[pair]]) << shifts[pair];
+    packed |= uint32_t(lut[indices[pair]]) << output_shifts<SwapBytes>[pair];
   return packed;
 }
 

@@ -88,6 +88,7 @@ namespace lgfx
     uint8_t* _du4_pair_lut_2d = nullptr;
     uint8_t* _du4_prime_pair_luts_2d = nullptr; // Two extra 4096-byte internal tables.
     uint8_t* _gc16_pair_lut_2d = nullptr;
+    // Shared PSRAM workspace: GC16 16-bit keys or DU4 12-bit keys per batch.
     uint16_t* _gc16_pair_indices_2d = nullptr;
     size_t _gc16_pair_indices_capacity_2d = 0;
     uint16_t* _du4_active_groups_2d = nullptr;
