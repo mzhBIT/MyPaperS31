@@ -29,6 +29,7 @@ namespace lgfx
     void waitDisplay(void) override;
     bool displayBusy(void) override;
     bool setPageTurnAnimation(int direction, int speed = 1) override;
+    bool setNextRefreshChangedPixelsOnly(bool enabled) override;
     void display(uint_fast16_t x, uint_fast16_t y,
                  uint_fast16_t w, uint_fast16_t h) override;
     bool writeNativeGrayscale4(const uint8_t* logical_frame,
@@ -63,6 +64,7 @@ namespace lgfx
       int8_t animation_direction;
       uint8_t animation_rotation;
       uint8_t animation_speed;
+      bool changed_pixels_only;
       int64_t queued_at_us;
     };
 
@@ -112,6 +114,7 @@ namespace lgfx
     int _temperature_c = 25;
     int8_t _next_animation_direction = 0;
     uint8_t _next_animation_speed = 1;
+    bool _next_changed_pixels_only = false;
     // Lazy geometry-only caches. Owned solely by task_update, like DU4 workspace.
     // Panel lifetime is process lifetime; shutdown teardown remains passive.
     lgfx_epd_page_turn::Layout _animation_layouts_2d[8]{};

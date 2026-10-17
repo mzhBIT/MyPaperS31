@@ -3,6 +3,7 @@
 #include "EpdDu4Triple.h"
 #include "EpdPairIndices.h"
 #include "EpdGc16Dual.h"
+#include "EpdChangedPixels.h"
 
 #if SOC_LCD_I80_SUPPORTED && (defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32P4) || defined(CONFIG_IDF_TARGET_ESP32S31))
 
@@ -165,8 +166,12 @@ namespace lgfx
 
   static void apply_gc16_transition_adjustments(
       uint8_t* transition, uint8_t waveform_type,
-      int phase, int phase_count)
+      int phase, int phase_count, bool changed_pixels_only = false)
   {
+    if (changed_pixels_only) {
+      lgfx_epd_changed_pixels::mask_unchanged(transition);
+      return;
+    }
     // Keep the 36-phase diagnostic trim byte-for-byte intact.
     if (waveform_type != WAVEFORM_MODE_GC16 || phase_count != 48) {
       return;
@@ -1919,9 +1924,20 @@ namespace lgfx
     return true;
   }
 
+  bool Panel_EPD_2D::setNextRefreshChangedPixelsOnly(bool enabled)
+  {
+    _next_changed_pixels_only = false;
+    if (enabled && displayBusy()) return false;
+    _next_changed_pixels_only = enabled;
+    return true;
+  }
+
   void Panel_EPD_2D::display(uint_fast16_t x, uint_fast16_t y,
                              uint_fast16_t w, uint_fast16_t h)
   {
+    // Consume even on empty/invalid submissions; never leak into another UI.
+    const bool changed_pixels_only = _next_changed_pixels_only;
+    _next_changed_pixels_only = false;
     if (w != 0 && h != 0) {
       uint_fast16_t xs = x;
       uint_fast16_t ys = y;
@@ -1959,6 +1975,7 @@ namespace lgfx
       .animation_direction = _next_animation_direction,
       .animation_rotation = uint8_t(_internal_rotation),
       .animation_speed = _next_animation_speed,
+      .changed_pixels_only = changed_pixels_only,
       .queued_at_us = esp_timer_get_time(),
     };
     _next_animation_direction = 0;
@@ -2041,9 +2058,14 @@ namespace lgfx
         ++merged;
       }
       // Coalesced UI updates no longer describe one immutable page turn.
-      if (merged) update.animation_direction = 0;
+      if (merged) {
+        update.animation_direction = 0;
+        // Mixed UI batches must retain normal waveform semantics.
+        update.changed_pixels_only = false;
+      }
 
       if (!me->_physical_state_known) {
+        update.changed_pixels_only = false;
         if (update.mode != epd_mode_t::epd_quality) {
           ESP_LOGW(TAG_2D, "physical state unknown; promoting first update to Quality");
         }
@@ -2055,6 +2077,11 @@ namespace lgfx
         update.w = panel_w;
         update.h = panel_h;
       }
+
+      // Only explicit HD feedback may suppress same-gray drives. In particular,
+      // never alter normal HD, Quality recovery, or the tuned GC16 0->0 path.
+      update.changed_pixels_only = update.changed_pixels_only
+                               && update.mode == epd_mode_t::epd_hd;
 
       // Write back the sprite rows this batch is about to consume. This has to
       // precede the copy below so the PSRAM contents are coherent for anything
@@ -2083,6 +2110,10 @@ namespace lgfx
         continue;
       }
       bool animation_requested = false;
+      // A missing HD table may fall back to another waveform. Keep that
+      // waveform's normal same-gray compensation as well.
+      update.changed_pixels_only = update.changed_pixels_only
+                               && selected.type == WAVEFORM_MODE_HD;
 #if (defined(CONFIG_IDF_TARGET_ESP32P4) || defined(CONFIG_IDF_TARGET_ESP32S31)) \
  && MYPAPER_EPD_USE_2D_ENGINE && MYPAPER_EPD_2D_CONTINUOUS_SCAN \
  && MYPAPER_EPD_2D_PRECOMPUTE_WAVEFORM
@@ -2208,6 +2239,7 @@ namespace lgfx
                 {previous_generation, update.animation_rotation, selected.type, selected.phases},
                 update.x == 0 && update.y == 0 && update.w == panel_w && update.h == panel_h,
                 me->_prepared_stats.target, me->_target_buf, frame_bytes);
+            if (update.changed_pixels_only) prepared_stats_miss = 11;
             if (prepared_stats_miss == 0) {
               memcpy(used_transitions, me->_prepared_stats.used, sizeof(used_transitions));
               used_transition_count = me->_prepared_stats.transition_count;
@@ -2248,7 +2280,7 @@ namespace lgfx
                                        + size_t(phase) * 64;
               build_transition_lut(transition, phase_lut);
               apply_gc16_transition_adjustments(
-                  transition, selected.type, phase, phase_count);
+                  transition, selected.type, phase, phase_count, update.changed_pixels_only);
 
               int match = -1;
               for (int unique = 0; unique < cached_phase_count; ++unique) {
@@ -2667,7 +2699,7 @@ namespace lgfx
                                      + size_t(phase) * 64;
             build_transition_lut(transition, phase_lut);
             apply_gc16_transition_adjustments(
-                transition, selected.type, phase, phase_count);
+                transition, selected.type, phase, phase_count, update.changed_pixels_only);
             render_transition = transition;
           }
           if (gc16_pair_renderer) {
@@ -3016,7 +3048,7 @@ namespace lgfx
         const uint8_t* phase_lut = selected.phases->luts + size_t(phase) * 64;
         build_transition_lut(transition, phase_lut);
         apply_gc16_transition_adjustments(
-            transition, selected.type, phase, selected.phases->phases);
+            transition, selected.type, phase, selected.phases->phases, update.changed_pixels_only);
         phase_line_context_t line_context = {
           .physical = me->_physical_buf,
           .target = me->_target_buf,
@@ -3117,7 +3149,7 @@ namespace lgfx
         const uint8_t* phase_lut = selected.phases->luts + size_t(phase) * 64;
         build_transition_lut(transition, phase_lut);
         apply_gc16_transition_adjustments(
-            transition, selected.type, phase, selected.phases->phases);
+            transition, selected.type, phase, selected.phases->phases, update.changed_pixels_only);
         render_phase_frame(
             me->_scan_frame_2d, me->_scan_frame_bytes_2d,
             me->_physical_buf, me->_target_buf,
@@ -3192,7 +3224,7 @@ namespace lgfx
         const uint8_t* phase_lut = selected.phases->luts + size_t(phase) * 64;
         build_transition_lut(transition, phase_lut);
         apply_gc16_transition_adjustments(
-            transition, selected.type, phase, selected.phases->phases);
+            transition, selected.type, phase, selected.phases->phases, update.changed_pixels_only);
         const int64_t phase_begin = esp_timer_get_time();
         auto render_row = [&](size_t y, uint8_t* dma, size_t dma_len) {
           memset(dma, 0, dma_len);

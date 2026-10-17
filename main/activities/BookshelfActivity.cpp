@@ -10,6 +10,8 @@
 #include "activities/SettingActivity.h"
 #include "activities/recent_books.h"
 #include "ui/BookshelfLayout.h"
+#include "ui/BookshelfPress.h"
+#include "renderer/ReaderPageBuffer.h"
 #include "ui/BookshelfFontFit.h"
 #include "ui/pico_shelf_icons.h"
 #include "ui/SystemFont.h"
@@ -20,6 +22,7 @@
 #include <array>
 #include <cstdio>
 #include <ctime>
+#include <cstring>
 #include <memory>
 #include <nvs.h>
 #include <esp_heap_caps.h>
@@ -110,11 +113,11 @@ void icon(const uint8_t *mask, int cx, int cy, int size, int ink = 0, int bg = 2
         M5.Display.pushImage(cx-size/2, cy-size/2+y, size, 1, row);
     }
 }
-void glass(layout::Rect r) {
+void glass(lgfx::LGFXBase& gfx, layout::Rect r) {
     // Snapshot first: in-place blur would make results scan-order dependent.
     auto *source = static_cast<lgfx::rgb565_t *>(heap_caps_malloc(r.w * r.h * sizeof(lgfx::rgb565_t), MALLOC_CAP_SPIRAM));
-    if (!source) { M5.Display.drawRoundRect(r.x,r.y,r.w,r.h,9,gray(112)); return; }
-    M5.Display.readRect(r.x,r.y,r.w,r.h,source);
+    if (!source) { gfx.drawRoundRect(r.x,r.y,r.w,r.h,9,gray(112)); return; }
+    gfx.readRect(r.x,r.y,r.w,r.h,source);
     auto sample = [&](int x, int y) {
         x=std::max(0,std::min(r.w-1,x)); y=std::max(0,std::min(r.h-1,y));
         return (int(source[y*r.w+x].r5) * 15 + 15) / 31;
@@ -127,16 +130,16 @@ void glass(layout::Rect r) {
             for(int dy=-6;dy<=6;dy+=6) for(int dx=-6;dx<=6;dx+=6) sum+=sample(x+dx,y+dy);
             row[x-inset]=gray(((sum/13*62+10*38+50)/100)*17);
         }
-        M5.Display.pushImage(r.x+inset,r.y+y,r.w-2*inset,1,row);
+        gfx.pushImage(r.x+inset,r.y+y,r.w-2*inset,1,row);
     }
     heap_caps_free(source);
-    M5.Display.drawFastHLine(r.x+8,r.y+1,r.w-16,gray(224));
-    M5.Display.drawFastHLine(r.x+8,r.y+r.h-2,r.w-16,gray(96));
-    M5.Display.drawFastVLine(r.x,r.y+6,r.h-12,gray(160));
-    M5.Display.drawFastVLine(r.x+r.w-1,r.y+6,r.h-12,gray(160));
+    gfx.drawFastHLine(r.x+8,r.y+1,r.w-16,gray(224));
+    gfx.drawFastHLine(r.x+8,r.y+r.h-2,r.w-16,gray(96));
+    gfx.drawFastVLine(r.x,r.y+6,r.h-12,gray(160));
+    gfx.drawFastVLine(r.x+r.w-1,r.y+6,r.h-12,gray(160));
     for (int cx : {r.x+16,r.x+r.w-17}) {
-        M5.Display.drawCircle(cx,r.y+r.h-18,5,gray(112));
-        M5.Display.drawFastHLine(cx-2,r.y+r.h-18,5,gray(96));
+        gfx.drawCircle(cx,r.y+r.h-18,5,gray(112));
+        gfx.drawFastHLine(cx-2,r.y+r.h-18,5,gray(96));
     }
 }
 
@@ -156,6 +159,86 @@ class BookshelfActivity final : public Activity {
     bool keyboard_focus = false;
     std::string last_clock;
     uint32_t last_status_ms = 0;
+    using Pixels = std::unique_ptr<uint8_t,decltype(&heap_caps_free)>;
+    std::array<Pixels,9> cover_pixels{{
+        {nullptr,heap_caps_free},{nullptr,heap_caps_free},{nullptr,heap_caps_free},
+        {nullptr,heap_caps_free},{nullptr,heap_caps_free},{nullptr,heap_caps_free},
+        {nullptr,heap_caps_free},{nullptr,heap_caps_free},{nullptr,heap_caps_free}}};
+    std::unique_ptr<ReaderPageBuffer> feedback_canvas;
+    Pixels feedback_crop{nullptr,heap_caps_free};
+    bookshelf_press::Tracker press_tracker;
+    int feedback_slot = -1;
+    bool deferred_touch = false;
+    TouchEvent deferred_event;
+
+    void release_feedback() {
+        press_tracker.cancel(); feedback_slot=-1; deferred_touch=false;
+        for(auto& pixels:cover_pixels) pixels.reset();
+        feedback_canvas.reset(); feedback_crop.reset();
+    }
+    void capture_cover(int slot, layout::Rect r) {
+        if(style==Style::List) return;
+        auto& pixels=cover_pixels[slot];
+        if(!pixels) pixels.reset(static_cast<uint8_t*>(heap_caps_malloc(
+            bookshelf_press::cover_bytes,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)));
+        if(!pixels) return; // Normal taps continue without visual feedback.
+        std::array<lgfx::rgb565_t,164> row;
+        for(int y=0;y<r.h;++y) {
+            M5.Display.readRect(r.x,r.y+y,r.w,1,row.data());
+            for(int x=0;x<r.w;x+=2) {
+                const auto a=(unsigned(row[x].r5)*15+15)/31;
+                const auto b=(unsigned(row[x+1].r5)*15+15)/31;
+                pixels.get()[size_t(y)*(r.w/2)+x/2]=uint8_t(a<<4|b);
+            }
+        }
+    }
+    bool paint_press(int slot, bool raised) {
+        if(style==Style::List || M5.Display.displayBusy()) return false;
+        const int row=slot/3,first=page()*capacity();
+        for(int other=row*3;other<row*3+3 && first+other<int(books.size());++other)
+            if(!cover_pixels[other]) return false;
+        const auto area=bookshelf_press::row_area(slot);
+        const auto dirty=bookshelf_press::dirty_area(slot);
+        if(!feedback_canvas) {
+            feedback_canvas.reset(new ReaderPageBuffer());
+            if(!feedback_canvas->createSprite(area.w,area.h)) { feedback_canvas.reset(); return false; }
+        }
+        if(!feedback_crop) feedback_crop.reset(static_cast<uint8_t*>(heap_caps_malloc(
+            size_t(bookshelf_press::max_dirty_width/2)*area.h,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)));
+        if(!feedback_crop) return false;
+        auto& gfx=*feedback_canvas;
+        gfx.setDither(false); gfx.fillScreen(gray(238));
+        for(int other=row*3;other<row*3+3 && first+other<int(books.size());++other) {
+            auto r=layout::cover(style,other);r.y-=area.y;
+            if(raised && other==slot) r.y-=bookshelf_press::lift;
+            if(!gfx.getPanel()->writeNativeGrayscale4Rect(cover_pixels[other].get(),r.w,r.h,r.x,r.y)) return false;
+        }
+        // Compose from clean, unblurred covers each time. Never blur a previously
+        // frosted rail again, and never modify neighbouring display regions.
+        if(style==Style::Acrylic) {
+            auto rail=layout::rail(row);rail.y-=area.y;glass(gfx,rail);
+        } else {
+            const int y=438+282*row-area.y;
+            gfx.fillRect(36,y,612,12,gray(48));
+            gfx.drawFastHLine(36,y,612,gray(88));
+            gfx.drawFastHLine(36,y+11,612,gray(16));
+        }
+        const auto* source=static_cast<const uint8_t*>(gfx.getBuffer());
+        for(int y=0;y<dirty.h;++y)
+            std::memcpy(feedback_crop.get()+size_t(y)*(dirty.w/2),
+                source+size_t(y)*(area.w/2)+dirty.x/2,dirty.w/2);
+        const auto previous_mode=M5.Display.getEpdMode();
+        M5.Display.startWrite(); M5.Display.setEpdMode(epd_mode_t::epd_hd);
+        const bool ok=M5.Display.getPanel()->writeNativeGrayscale4Rect(
+            feedback_crop.get(),dirty.w,dirty.h,dirty.x,dirty.y);
+        if(ok) {
+            M5.Display.getPanel()->setNextRefreshChangedPixelsOnly(true);
+            M5.Display.display(dirty.x,dirty.y,dirty.w,dirty.h);
+        }
+        M5.Display.endWrite(); M5.Display.setEpdMode(previous_mode);
+        if(ok) feedback_slot=raised?slot:-1;
+        return ok;
+    }
     int capacity() const { return layout::capacity(style); }
     int page() const { return focus / capacity(); }
     int pages() const { return std::max(1,(int(books.size())+capacity()-1)/capacity()); }
@@ -191,6 +274,7 @@ class BookshelfActivity final : public Activity {
             nvs_close(h);
         }
         if(err!=ESP_OK) ESP_LOGW("BOOKSHELF","style persistence failed: %s",esp_err_to_name(err));
+        release_feedback();
         style=s; styles_open=false; draw(false);
     }
     void cover(int slot,int i) {
@@ -211,6 +295,7 @@ class BookshelfActivity final : public Activity {
         }
         draw_timing.fallback_us += esp_timer_get_time() - cover_end;
         M5.Display.drawRect(r.x,r.y,r.w,r.h,TFT_BLACK);
+        capture_cover(slot,r); // Before any acrylic rail is composited.
     }
     void list_row(int slot,int i) {
         if (!progress_loaded[i]) {
@@ -316,6 +401,8 @@ class BookshelfActivity final : public Activity {
         M5.Display.endWrite();
     }
     void draw(bool full = true) {
+        press_tracker.cancel(); feedback_slot=-1;
+        for(auto& pixels:cover_pixels) pixels.reset();
         const int64_t begin = esp_timer_get_time();
         draw_timing = {};
         M5.Display.startWrite(); M5.Display.setDither(false);
@@ -344,7 +431,7 @@ class BookshelfActivity final : public Activity {
         }
         const int64_t items_end = esp_timer_get_time();
         if(style!=Style::List) for(int row=0;row<3;++row) {
-            if(style==Style::Acrylic) glass(layout::rail(row));
+            if(style==Style::Acrylic) glass(M5.Display,layout::rail(row));
             else {
                 int y=438+282*row;
                 M5.Display.fillRect(36,y,612,12,gray(48));
@@ -386,6 +473,7 @@ public:
         // Request only on final exit, not while pushing a reader or settings.
         request_home_quality_refresh();
     }
+    void on_hide() override { release_feedback(); }
     void on_create() override {
         const int64_t begin = esp_timer_get_time();
         nvs_handle_t h; uint8_t value=2;
@@ -402,6 +490,22 @@ public:
     void on_show() override { if(shown) { reload(); draw(); } else shown=true; }
     void loop() override {
         if(styles_open || M5.Display.displayBusy()) return;
+        if(deferred_touch) {
+            const auto event=deferred_event;deferred_touch=false;
+            on_touch(event);return; // May open another activity or delete this one.
+        }
+        const int wanted=press_tracker.update(touch_input_contact(),style,page()*capacity(),int(books.size()));
+        if(feedback_slot>=0 && wanted!=feedback_slot) {
+            if(paint_press(feedback_slot,false)) return;
+            // A rare composition/allocation failure must not strand a lifted
+            // cover. Repaint the existing content area as a recovery fallback.
+            draw(false); return;
+        }
+        if(wanted>=0 && feedback_slot!=wanted) {
+            if(paint_press(wanted,true)) return;
+            press_tracker.cancel(); // No allocation retry loop while held.
+        }
+        if(wanted>=0 || feedback_slot>=0) return;
         char clock[24]="--:--";
         if(time_basis_system_clock_valid()) time_basis_format_clock(std::time(nullptr),clock,sizeof(clock));
         // One synchronous status-bar update per minute. Wi-Fi changes wait
@@ -417,6 +521,23 @@ public:
         M5.Display.setEpdMode(previous_mode);
     }
     bool on_touch(const TouchEvent &e) override {
+        // Let the press refresh finish before a turn/open mutates framebuffer
+        // contents. Existing release gestures are retained, not regenerated.
+        if(!styles_open && style!=Style::List && M5.Display.displayBusy()) {
+            if(!deferred_touch) {deferred_event=e;deferred_touch=true;}
+            return true;
+        }
+        if(feedback_slot>=0 && e.type==TouchEventType::Tap &&
+           (!layout::card(style,feedback_slot).contains(e.start_x,e.start_y) ||
+            !layout::card(style,feedback_slot).contains(e.x,e.y))) {
+            // Restore before opening a small style dialog that would otherwise
+            // leave the raised book visible behind it.
+            deferred_event=e;deferred_touch=true;
+            press_tracker.cancel();
+            paint_press(feedback_slot,false);
+            return true;
+        }
+        press_tracker.cancel();
         if(e.type==TouchEventType::Back) {
             if(styles_open) { styles_open=false; draw(false); } else ActivityManager::instance().pop();
             return true;
@@ -445,7 +566,10 @@ public:
         if(layout::previous.contains(e.x,e.y)) { turn(-1); return true; }
         if(layout::next.contains(e.x,e.y)) { turn(1); return true; }
         for(int slot=0;slot<capacity();++slot)
-            if(layout::card(style,slot).contains(e.x,e.y)) { open(page()*capacity()+slot); return true; }
+            if(layout::card(style,slot).contains(e.x,e.y)) {
+                if(style!=Style::List && !layout::card(style,slot).contains(e.start_x,e.start_y)) return true;
+                open(page()*capacity()+slot); return true;
+            }
         return false;
     }
     bool on_key(int key) override {

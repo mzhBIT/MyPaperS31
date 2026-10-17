@@ -43,6 +43,7 @@ int s_peak_y = 0;
 uint32_t s_start_ms = 0;
 uint8_t s_last_hw_gesture = 0;
 uint32_t s_last_hw_debug_ms = 0;
+uint32_t s_contact_sequence = 0;
 
 void push_event(const TouchEvent &event)
 {
@@ -222,6 +223,7 @@ void touch_input_init()
     s_swipe_sent = false;
     s_last_hw_gesture = 0;
     s_last_hw_debug_ms = 0;
+    s_contact_sequence = 0;
     s_peak_x = 0;
     s_peak_y = 0;
 }
@@ -243,6 +245,7 @@ void touch_input_update()
     }
 
     if (pressed && !s_pressed) {
+        ++s_contact_sequence;
         s_pressed = true;
         s_long_press_sent = false;
         s_swipe_sent = false;
@@ -351,6 +354,13 @@ bool touch_input_pop(TouchEvent *event)
 bool touch_input_needs_fast_poll()
 {
     return s_pressed || s_head != s_tail;
+}
+
+TouchContact touch_input_contact()
+{
+    return {s_pressed, s_long_press_sent || s_swipe_sent, s_contact_sequence,
+            s_start_x, s_start_y, s_last_x, s_last_y,
+            std::max(abs_i(s_peak_x - s_start_x), abs_i(s_peak_y - s_start_y))};
 }
 
 void touch_input_set_back_swipe_edge(BackSwipeEdge edge)

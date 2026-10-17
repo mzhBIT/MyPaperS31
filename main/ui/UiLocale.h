@@ -748,6 +748,7 @@ enum class TextId : uint16_t {
     FileSortAscending,
     FileSortDescending,
     ReadingHomeContinue,
+    ReadingHomeRecent,
     ReadingHomeDetails,
     ReadingHomeReadPercent,
     ReadingHomeStartHint,

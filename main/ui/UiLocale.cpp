@@ -753,6 +753,7 @@ constexpr Translation kText[] = {
     {"Name ↑", "名称 ↑", "名稱 ↑"},
     {"Name ↓", "名称 ↓", "名稱 ↓"},
     {"Continue reading", "继续阅读", "繼續閱讀"},
+    {"Recently read", "最近阅读", "最近閱讀"},
     {"View details ›", "查看详情 ›", "查看詳情 ›"},
     {"Read %u%%", "已读 %u%%", "已讀 %u%%"},
     {"Open a book to continue reading here", "打开一本书后，会在这里继续阅读", "開啟一本書後，會在這裡繼續閱讀"},

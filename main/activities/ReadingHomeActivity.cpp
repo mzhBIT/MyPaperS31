@@ -183,8 +183,7 @@ class ReadingHomeActivity final : public Activity {
         }
     }
     void resume_area() {
-        left(tr(TextId::ReadingHomeContinue),36,237,ui_px(29),380);
-        right(tr(TextId::ReadingHomeDetails),648,237,ui_px(19),220);
+        left(tr(TextId::ReadingHomeRecent),36,237,ui_px(29),380);
         if(book_.path.empty()) {
             centered(tr(TextId::ReadingHomeStartHint),342,418,ui_px(23),600);
             return;
