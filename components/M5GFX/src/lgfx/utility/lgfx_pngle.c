@@ -51,12 +51,17 @@
 #define debug_printf(...) ((void)0)
 #endif
 
+// Keep the reason for a failed PNG decode visible: the caller only sees a
+// boolean, and "Incorrect IHDR info" vs "Failed to decompress the IDAT stream"
+// need very different fixes.
+#define PNGLE_REPORT_ERROR(s) fprintf(stderr, "[pngle] error: %s\n", (s))
+
 typedef enum {
   PNGLE_STATE_ERROR = -2,
   PNGLE_STATE_OK = 0,
 } pngle_state_t;
 
-#define PNGLE_ERROR(s) ( debug_printf(s), PNGLE_STATE_ERROR)
+#define PNGLE_ERROR(s) ( PNGLE_REPORT_ERROR(s), PNGLE_STATE_ERROR)
 #define PNGLE_MALLOC(a, b, name) (debug_printf("[pngle] Allocating %zu bytes for %s\n", (size_t)(a) * (size_t)(b), (name)), malloc((size_t)(a) * (size_t)(b)))
 
 #define LGFX_PNGLE_OUTBUF_LEN 64 /// At least 32 required

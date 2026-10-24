@@ -8,6 +8,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "sdkconfig.h"
 
 #include <algorithm>
 #include <cmath>
@@ -23,7 +24,14 @@ namespace {
 static const char *TAG = "P4Jpeg";
 static constexpr size_t MAX_COMPRESSED_BYTES = 12 * 1024 * 1024;
 static constexpr size_t MAX_DECODED_BYTES = 12 * 1024 * 1024;
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+// The S31 EPD pipeline reserves about 4.7 MiB of PSRAM at boot, so the P4
+// 8 MiB headroom would reject every decode. The buffers this path allocates
+// are already accounted for separately, so keep a smaller safety margin.
+static constexpr size_t MIN_FREE_PSRAM_RESERVE = 1024 * 1024;
+#else
 static constexpr size_t MIN_FREE_PSRAM_RESERVE = 8 * 1024 * 1024;
+#endif
 static constexpr float PPA_SCALE_STEP = 1.0f / 16.0f;
 static jpeg_decoder_handle_t s_decoder = nullptr;
 

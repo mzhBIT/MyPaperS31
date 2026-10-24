@@ -3,7 +3,9 @@
 #include <esp_err.h>
 #include <esp_log.h>
 #include <esp_system.h>
+#if CONFIG_IDF_TARGET_ESP32P4
 #include <esp_hosted.h>
+#endif
 #include <driver/gpio.h>
 #include <nvs_flash.h>
 #include <M5Unified.h>
@@ -27,7 +29,7 @@
 
 extern void launch_home();
 
-static const char *TAG = "MyPaperP4";
+static const char *TAG = "MyPaper";
 
 // Temporary EPD electrical/timing diagnostic.  Keep exactly one display()
 // request so repeated application refreshes cannot accumulate on the panel.
@@ -46,6 +48,11 @@ static void init_nvs()
 
 extern "C" void app_main(void)
 {
+#if CONFIG_IDF_TARGET_ESP32S31
+    static_assert(CONFIG_ESP_MAIN_TASK_STACK_SIZE >= 32768,
+                  "S31 shared reader requires >= 32 KiB main stack for FreeType");
+    ESP_LOGI(TAG, "S31 full application: shared P4 home/activities/refresh policies");
+#endif
     init_nvs();
     mypaper::board::log_profile();
 
@@ -213,6 +220,12 @@ extern "C" void app_main(void)
             }
         }
 
+#if CONFIG_IDF_TARGET_ESP32S31
+        // Passive gauge reads only when touch and panel are idle. Internal
+        // one-second throttle; no extra task, refresh or charger writes.
+        if (!dispatched_touch && !touch_input_needs_fast_poll() && !M5.Display.displayBusy())
+            M5.Power.update();
+#endif
         // While a finger is down, inspect release/motion every tick instead
         // of adding 20 ms to each sample. Idle UI keeps the existing cadence.
         // Always block for at least one tick so IDLE and lower-priority tasks

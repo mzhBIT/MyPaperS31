@@ -43,8 +43,9 @@
       "command": "powershell.exe",
       "args": [
         "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
         "-Command",
-        "& 'C:\\Espressif\\tools\\Microsoft.v5.3.5.PowerShell_profile.ps1'; idf.py build; exit $LASTEXITCODE"
+        "& 'C:\\Espressif\\tools\\Microsoft.v5.3.5.PowerShell_profile.ps1'; & './scripts/build-board.ps1' -Board MyPaperP4"
       ],
       "options": {
         "cwd": "${workspaceFolder}"
@@ -58,13 +59,14 @@
       "command": "powershell.exe",
       "args": [
         "-NoProfile",
+        "-ExecutionPolicy", "Bypass",
         "-Command",
         "& 'C:\\Espressif\\tools\\Microsoft.v6.1.PowerShell_profile.ps1'; & './scripts/build-board.ps1' -Board MyPaperS31"
       ],
       "options": {
         "cwd": "${workspaceFolder}"
       },
-      "group": "build",
+      "group": {"kind": "build", "isDefault": true},
       "problemMatcher": ["$gcc"]
     }
   ]

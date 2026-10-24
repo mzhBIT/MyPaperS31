@@ -1,3 +1,13 @@
+if(IDF_TARGET STREQUAL "esp32s31")
+    # The shared apps use Display, software timestamps and Button_Class.
+    # Do not compile other boards' PMIC/I2S register implementations on S31.
+    idf_component_register(SRCS "src/M5UnifiedS31.cpp" "src/utility/Button_Class.cpp"
+                           "src/utility/I2C_Class.cpp" "src/utility/power/BQ27220_Class.cpp"
+                           "src/utility/rtc/RTC_Base.cpp" "src/utility/rtc/PCF8563_Class.cpp"
+                           INCLUDE_DIRS src REQUIRES M5GFX esp_timer)
+    return()
+endif()
+
 set(COMPONENT_ADD_INCLUDEDIRS
     src
     )

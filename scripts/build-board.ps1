@@ -1,13 +1,12 @@
 param(
-    [Parameter(Mandatory = $true)]
     [ValidateSet('MyPaperP4', 'MyPaperS31')]
-    [string]$Board,
+    [string]$Board = 'MyPaperS31',
     [ValidateSet('build', 'reconfigure', 'flash', 'monitor')]
     [string]$Action = 'build',
     [ValidateSet('Current', 'Debug', 'Release')]
     [string]$Profile = 'Current',
     [string]$Port,
-    [int]$Baud = 921600
+    [int]$Baud = 460800
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot

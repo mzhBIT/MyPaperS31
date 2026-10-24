@@ -86,6 +86,11 @@ namespace lgfx
     uint8_t* _scan_frame_2d = nullptr;
     size_t _scan_frame_bytes_2d = 0;
     uint8_t* _du4_phase_frames_2d = nullptr;
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    // Process-lifetime, scan-task-owned arena shared by all waveform modes.
+    uint8_t* _phase_arena_2d = nullptr;
+    size_t _phase_arena_capacity_2d = 0;
+#endif
     size_t _du4_phase_frame_capacity_2d = 0;
     uint8_t* _du4_pair_lut_2d = nullptr;
     uint8_t* _du4_prime_pair_luts_2d = nullptr; // Two extra 4096-byte internal tables.

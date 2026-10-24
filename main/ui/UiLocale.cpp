@@ -769,6 +769,21 @@ constexpr Translation kText[] = {
     {"Could not save font", "字体保存失败", "字型儲存失敗"},
     {"Use font", "使用此字体", "使用此字型"},
     {"Font preview unavailable", "字体预览不可用", "字型預覽不可用"},
+    {"Color temperature", "色温", "色溫"},
+    {"Warm", "暖光", "暖光"},
+    {"Cool", "冷光", "冷光"},
+    {"Neutral", "中性", "中性"},
+    {"Tap - / + to adjust by 5%", "点击 - / +，每次调整 5%", "點選 - / +，每次調整 5%"},
+    {"Set date and time", "手动设置日期与时间", "手動設定日期與時間"},
+    {"Date and time saved to RTC", "日期与时间已保存到 RTC", "日期與時間已儲存至 RTC"},
+    {"Invalid date/time; check format", "日期或时间无效，请检查格式", "日期或時間無效，請檢查格式"},
+    {"Save failed; check RTC or retry", "设置失败，检查 RTC 后重试", "設定失敗，檢查 RTC 後重試"},
+    {"S31 OE A/B", "S31 OE 门控对比", "S31 OE 閘控對比"},
+    {"A: OE always on", "A：OE 常开", "A：OE 常開"},
+    {"B: OE row gating", "B：OE 行带门控", "B：OE 行帶閘控"},
+    {"Tap centre repeatedly; inspect sides", "反复点中央，观察左右色块", "反覆點中央，觀察左右色塊"},
+    {"Tap here to switch A/B and reset", "点此切换 A/B 并重置底图", "點此切換 A/B 並重設底圖"},
+    {"OE test unavailable", "OE 测试不可用", "OE 測試無法使用"},
 };
 static_assert(sizeof(kText) / sizeof(kText[0]) == static_cast<size_t>(TextId::Count));
 

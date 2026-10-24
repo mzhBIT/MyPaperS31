@@ -15,6 +15,7 @@
 #include "activities/WifiTransferActivity.h"
 #include "time/time_basis.h"
 #include "wifi/wifi_setting.h"
+#include "ui/ShelfStatusBar.h"
 #include <esp_vfs_fat.h>
 #include <ctime>
 #include "activities/ActivityManager.h"
@@ -184,16 +185,10 @@ static bool is_image_file(const char *n) {
 // ─── Drawing ───────────────────────────────────────────────────────
 
 static void draw_status() {
-    char clock[24]="--:--";
-    if(time_basis_system_clock_valid()) time_basis_format_clock(std::time(nullptr),clock,sizeof(clock));
-    text(clock,36,system_font::centered_y(clock,40,28),28);
-    icon(pico_shelf_icons::wifi,570,40,28,wifi_setting_is_enabled()?0:144);
-    if(!wifi_setting_is_enabled()) M5.Display.drawLine(558,28,582,52,gray(96));
-    M5.Display.drawRoundRect(606,29,40,22,6,TFT_BLACK);
-    M5.Display.fillRect(648,36,5,8,TFT_BLACK);
+    shelf_status_bar::draw();
 }
 static void draw_nav() {
-    M5.Display.fillRect(0,fl::nav_top,684,120,gray(238));
+    M5.Display.fillRect(0,fl::nav_top,684,120,TFT_WHITE);
     M5.Display.drawFastHLine(0,fl::nav_top,684,gray(160));
     M5.Display.fillRect(399,1097,56,5,TFT_BLACK);
     const uint8_t *icons[]={pico_shelf_icons::house,pico_shelf_icons::library_big,
@@ -203,8 +198,8 @@ static void draw_nav() {
         ui_locale::text(ui_locale::TextId::Settings)};
     for(int i=0;i<4;++i) {
         int cx=(2*i+1)*684/8;
-        icon(icons[i],cx,1141,44,0,238);
-        center(labels[i],cx,1180,ui_px(17),159,238);
+        icon(icons[i],cx,1141,44,0,255);
+        center(labels[i],cx,1180,ui_px(17),159,255);
     }
 }
 static void draw_back() {

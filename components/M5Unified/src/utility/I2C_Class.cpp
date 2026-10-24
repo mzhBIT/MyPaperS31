@@ -4,6 +4,7 @@
 #include "I2C_Class.hpp"
 
 #include <M5GFX.h>
+#include <cstring>
 
 namespace m5
 {
@@ -66,10 +67,21 @@ namespace m5
 
   bool I2C_Class::writeRegister(std::uint8_t address, std::uint8_t reg, const std::uint8_t* __restrict__ data, std::size_t length, std::uint32_t freq) const
   {
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    // The IDF6 S31 adapter supports whole transactions, not the legacy
+    // begin/write/end streaming API. Keep register+payload under one bus lock.
+    uint8_t packet[255];
+    if (length > sizeof(packet) - 1 || (length && !data)) return false;
+    packet[0] = reg;
+    if (length) std::memcpy(packet + 1, data, length);
+    return m5gfx::i2c::transactionWrite(_port_num, address, packet,
+                                      static_cast<uint8_t>(length + 1), freq).has_value();
+#else
     return m5gfx::i2c::beginTransaction(_port_num, address, freq, false).has_value()
         && m5gfx::i2c::writeBytes(_port_num, &reg, 1).has_value()
         && m5gfx::i2c::writeBytes(_port_num, data, length).has_value()
         && m5gfx::i2c::endTransaction(_port_num).has_value();
+#endif
   }
 
   bool I2C_Class::readRegister(std::uint8_t address, std::uint8_t reg, std::uint8_t* __restrict__ result, std::size_t length, std::uint32_t freq) const

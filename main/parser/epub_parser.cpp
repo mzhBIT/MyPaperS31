@@ -6,12 +6,25 @@
 #include <cstring>
 #include <esp_log.h>
 #include <esp_timer.h>
+#include <esp_heap_caps.h>
 #include <sys/stat.h>
 #include <vector>
 
 #include "storage/app_paths.h"
 
 static const char *TAG = "EPUB";
+static void log_book_heap(const char *stage)
+{
+#if CONFIG_IDF_TARGET_ESP32S31
+    ESP_LOGI(TAG, "S31 heap stage=%s internal=%u largest=%u dma=%u psram=%u",
+             stage, (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_DMA),
+             (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
+#else
+    (void)stage;
+#endif
+}
 static const uint32_t EPUB_META_MAGIC = 0x4154454D; // META
 static const uint32_t EPUB_META_VERSION = 1;
 static const uint32_t EPUB_META_MAX_BYTES = 8 * 1024 * 1024;
@@ -273,10 +286,13 @@ bool EpubBook::open(const char *path)
 {
     int64_t t0 = esp_timer_get_time();
     close();
+    log_book_heap("before-zip");
     if (!_zip.open(path)) return false;
+    log_book_heap("after-zip");
     _path = path ? path : "";
 
     if (load_metadata_cache(path)) {
+        log_book_heap("metadata-cache");
         ESP_LOGI(TAG, "opened cached title=%s spine=%d toc=%d time=%lld ms",
                  title.c_str(), spine_count(), toc_count(),
                  (esp_timer_get_time() - t0) / 1000);
@@ -307,7 +323,9 @@ bool EpubBook::open(const char *path)
         close();
         return false;
     }
+    log_book_heap("before-toc");
     load_toc();
+    log_book_heap("after-toc");
 
     if (title.empty()) title = _path;
     save_metadata_cache(path);

@@ -1,11 +1,13 @@
 #include "weread/WereadSession.h"
 
 #include <nvs.h>
+#include <mutex>
 
 namespace weread {
 namespace {
 
 constexpr const char *NVS_NAMESPACE = "weread";
+std::mutex session_mutex;
 constexpr const char *KEY_VID = "vid";
 constexpr const char *KEY_SKEY = "skey";
 constexpr const char *KEY_REFRESH = "refresh";
@@ -88,6 +90,7 @@ void Session::clear()
 
 bool load_session(Session *session)
 {
+    std::lock_guard<std::mutex> lock(session_mutex);
     if (!session) return false;
     session->clear();
     nvs_handle_t handle = 0;
@@ -110,6 +113,7 @@ bool load_session(Session *session)
 
 bool save_session(const Session &session)
 {
+    std::lock_guard<std::mutex> lock(session_mutex);
     const std::string cookie_data = serialize_cookies(session.cookies);
     if (session.vid.size() > MAX_COOKIE_BYTES || session.skey.size() > MAX_COOKIE_BYTES ||
         session.refresh_token.size() > MAX_COOKIE_BYTES || session.wr_ticket.size() > MAX_COOKIE_BYTES ||
@@ -131,6 +135,7 @@ bool save_session(const Session &session)
 
 bool clear_session()
 {
+    std::lock_guard<std::mutex> lock(session_mutex);
     nvs_handle_t handle = 0;
     if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) return false;
     esp_err_t result = nvs_erase_all(handle);

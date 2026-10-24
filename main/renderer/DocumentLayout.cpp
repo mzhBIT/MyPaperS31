@@ -72,7 +72,7 @@ struct Builder {
             item.content_position = block.content_position + point->source +
                                     line.byte_start - point->display;
             if (!block.source_text.empty()) {
-                const size_t start = point->source;
+                const size_t start = point->source + line.byte_start - point->display;
                 auto finish = std::lower_bound(block.source_points.begin(), block.source_points.end(),
                     line.byte_end, [](const script_conversion::Point &p, size_t value) {
                         return p.display < value;

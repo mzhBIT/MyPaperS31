@@ -14,6 +14,8 @@
 #include "weread/WereadQr.h"
 #include "weread/WereadStore.h"
 #include "weread/WereadOffline.h"
+#include "weread/WereadContentSource.h"
+#include "weread/WereadReadingSession.h"
 #include "wifi/wifi_setting.h"
 
 #include <M5Unified.h>
@@ -85,8 +87,15 @@ bool load_local_reader_spine(const std::string &manifest_path, int chapter_count
     return true;
 }
 
-enum class WorkKind { LoadShelf, LoadCatalog, LoadChapter, LoadCovers, LoadReviews };
-enum class ResultKind { LoginQr, Shelf, Catalog, OpenReader, CoversReady, Reviews, Error, Cancelled };
+bool load_book_pending(const std::string &book, weread::store::PendingProgress *pending)
+{
+    weread::Session session;
+    if (weread::load_session(&session) && weread::store::load_pending_progress(session.vid,book,pending)) return true;
+    return false;
+}
+
+enum class WorkKind { LoadShelf, LoadCatalog, LoadChapter, LoadCovers, LoadReviews, SyncProgress };
+enum class ResultKind { LoginQr, Shelf, Catalog, OpenReader, CoversReady, Reviews, Error, Cancelled, ProgressReady };
 
 struct WorkResult {
     ResultKind kind = ResultKind::Error;
@@ -157,6 +166,13 @@ void weread_task(void *argument)
     if (!weread::crypto_self_test()) {
         send_final(job.get(), error_result("Protocol self-test failed"), external_stack);
     }
+    if (job->kind == WorkKind::SyncProgress) {
+        while (M5.Display.displayBusy() && !*job->cancelled) vTaskDelay(pdMS_TO_TICKS(20));
+        if (*job->cancelled) {
+            auto result = std::make_unique<WorkResult>(); result->kind = ResultKind::ProgressReady;
+            send_final(job.get(), std::move(result), external_stack);
+        }
+    }
     if (job->kind == WorkKind::LoadCatalog) {
         auto cached = std::make_unique<WorkResult>();
         cached->kind = ResultKind::Catalog;
@@ -186,10 +202,18 @@ void weread_task(void *argument)
     }
 
     if (weread::offline_mode()) {
+        if (job->kind == WorkKind::SyncProgress) {
+            auto result = std::make_unique<WorkResult>(); result->kind = ResultKind::ProgressReady;
+            send_final(job.get(), std::move(result), external_stack);
+        }
         send_final(job.get(), error_result(job->kind == WorkKind::LoadChapter
             ? "Chapter is not cached; connect online to download" : "Unavailable offline"), external_stack);
     }
     if (wifi_setting_connect_saved(CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS) != ESP_OK) {
+        if (job->kind == WorkKind::SyncProgress) {
+            auto result = std::make_unique<WorkResult>(); result->kind = ResultKind::ProgressReady;
+            send_final(job.get(), std::move(result), external_stack);
+        }
         if (job->kind == WorkKind::LoadCovers) {
             auto result = std::make_unique<WorkResult>();
             result->kind = ResultKind::CoversReady;
@@ -247,20 +271,41 @@ void weread_task(void *argument)
         }
     }
     auto sync_pending_progress = [&]() {
-        weread::store::PendingProgress pending;
-        if (!weread::store::load_pending_progress(&pending)) return;
-        std::string sync_error;
-        if (api.upload_progress(pending.book_id, pending.chapter, pending.percent,
-                                pending.active_seconds, pending.chapter_offset, pending.summary,
-                                &sync_error)) {
-            weread::store::clear_pending_progress();
-            ESP_LOGI(TAG, "pending progress uploaded: %d%% active=%u s", pending.percent,
-                     static_cast<unsigned>(pending.active_seconds));
-        } else {
-            ESP_LOGW(TAG, "pending progress retained: %s", sync_error.c_str());
+        std::unique_lock<std::mutex> operation(weread::reading_transaction_mutex(),std::try_to_lock);
+        if (!operation.owns_lock()) return; // live worker owns the final checkpoint
+        const std::string account = client.session().vid;
+        std::vector<weread::store::PendingProgress> records;
+        if (!weread::store::list_pending_progress(account, &records)) return;
+        for (auto pending : records) {
+            if (*job->cancelled) break;
+            std::string sync_error;
+            if (pending.receipt.state == weread::ReportReceipt::State::Ready) {
+                // No established live context owns this historical/offline
+                // interval. Preserve it; never enter a fresh session to replay.
+                const bool held=weread::store::hold_pending_progress(pending);
+                ESP_LOGI(TAG,"historical progress %s: book=%s active=%u s (not submitted)",
+                         held?"held":"retained",pending.book_id.c_str(),unsigned(pending.active_seconds));
+                continue;
+            }
+            const bool verified = api.upload_progress(pending.book_id,pending.chapter,pending.percent,
+                pending.active_seconds,pending.chapter_offset,pending.summary,&sync_error,&pending.receipt,
+                [&](const weread::ReportReceipt& receipt) { return weread::store::checkpoint_progress(pending,receipt); });
+            if (verified && weread::store::acknowledge_progress(pending)) {
+                ESP_LOGI(TAG, "progress server-confirmed: book=%s active=%u s",
+                         pending.book_id.c_str(),unsigned(pending.receipt.seconds));
+            } else {
+                ESP_LOGW(TAG, "progress retained: book=%s state=%u reason=%s",
+                         pending.book_id.c_str(),unsigned(pending.receipt.state),sync_error.c_str());
+                if (weread::store::hold_pending_progress(pending))
+                    ESP_LOGI(TAG,"unconfirmed receipt held separately: book=%s",pending.book_id.c_str());
+            }
         }
     };
     if (client.session().valid()) sync_pending_progress();
+    if (job->kind == WorkKind::SyncProgress) {
+        auto result = std::make_unique<WorkResult>(); result->kind = ResultKind::ProgressReady;
+        send_final(job.get(), std::move(result), external_stack, &client);
+    }
     if (job->kind == WorkKind::LoadReviews) {
         auto result = std::make_unique<WorkResult>();
         result->kind = ResultKind::Reviews;
@@ -563,6 +608,16 @@ public:
             }
             return;
         }
+        if (result->kind == ResultKind::ProgressReady) {
+            _task = nullptr; _busy = false; _cancelled = false; _progress_sync_active = false;
+            if (_exit_when_done) { ActivityManager::instance().pop(); return; }
+            if (_sync_touch_pending) {
+                const auto event = _sync_touch; _sync_touch_pending = false;
+                on_touch(event); return;
+            }
+            schedule_cover_prefetch();
+            return;
+        }
         _busy = false;
         _task = nullptr;
         if (_exit_when_done || result->kind == ResultKind::Cancelled) {
@@ -647,8 +702,7 @@ public:
                 }
                 weread::store::PendingProgress pending;
                 const bool local_is_pending = has_local &&
-                    weread::store::load_pending_progress(&pending) &&
-                    pending.book_id == _selected_book.id;
+                    load_book_pending(_selected_book.id,&pending);
                 const bool resume_saved = has_local &&
                     (weread::offline_mode() || local_is_pending || cloud_spine < 0 || cloud_spine == local_spine);
                 const int resume_spine = resume_saved ? local_spine :
@@ -700,6 +754,7 @@ public:
                 ESP_LOGI(TAG, "reader returned: catalog restored chapters=%u",
                          static_cast<unsigned>(_chapters.size()));
                 draw_catalog();
+                if (!_offline) start_work(WorkKind::SyncProgress,{},0,false,false);
                 return;
             }
 
@@ -720,7 +775,7 @@ public:
                         return book.id == pending.book_id;
                     });
                     if (found != _books.end()) {
-                        found->progress = pending.percent;
+                        if (pending.percent >= 0) found->progress = pending.percent;
                         found->progress_chapter_uid = pending.chapter.uid;
                         weread::store::save_shelf(_books);
                     }
@@ -731,6 +786,7 @@ public:
                 _cover_prefetch_disabled = false;
                 restore_selected_book_shelf_page();
                 draw_shelf();
+                if (!_offline) start_work(WorkKind::SyncProgress,{},0,false,false);
                 return;
             }
         }
@@ -744,6 +800,11 @@ public:
 
     bool on_touch(const TouchEvent &event) override
     {
+        if (_progress_sync_active) {
+            if (!_sync_touch_pending) { _sync_touch=event; _sync_touch_pending=true; }
+            _cancelled=true;
+            return true;
+        }
         if (event.type == TouchEventType::Tap && event.y >= 920 && event.y < 1010 &&
             (_view == View::Login || _view == View::Error) &&
             !_books.empty()) {
@@ -771,6 +832,10 @@ public:
 
     bool on_key(int key) override
     {
+        if (key == APP_KEY_BACK && _progress_sync_active) {
+            TouchEvent event{}; event.type=TouchEventType::Back;
+            return on_touch(event);
+        }
         if (key == APP_KEY_BACK) { go_back(); return true; }
         return false;
     }
@@ -792,6 +857,9 @@ private:
     TaskHandle_t _task = nullptr;
     volatile bool _cancelled = false;
     bool _busy = false;
+    bool _progress_sync_active = false;
+    bool _sync_touch_pending = false;
+    TouchEvent _sync_touch{};
     bool _exit_when_done = false;
     bool _offline = false;
     int64_t _offline_notice_until_us = 0;
@@ -849,6 +917,7 @@ private:
         _cancelled = false;
         _busy = false;
         _exit_when_done = false;
+        _progress_sync_active = false;
         _offline = _cached = true;
         _resume_after_catalog = false;
         _return_to_shelf_after_reader = false;
@@ -1215,6 +1284,7 @@ private:
         case WorkKind::LoadChapter: return text(TextId::DownloadingChapter);
         case WorkKind::LoadReviews: return text(TextId::LoadingBookReviews);
         case WorkKind::LoadCovers: return text(TextId::LoadingCovers);
+        case WorkKind::SyncProgress: return text(TextId::Loading);
         }
         return text(TextId::Loading);
     }
@@ -1259,7 +1329,7 @@ private:
                 _pending_work.resume_saved_position = resume_saved_position;
                 _pending_work.review_list_type = review_list_type;
                 _busy = true;
-                _view = View::Loading;
+                if (kind != WorkKind::SyncProgress) _view = View::Loading;
                 show_work_feedback();
             }
             return;
@@ -1268,7 +1338,8 @@ private:
         _busy = true;
         _cancelled = false;
         _exit_when_done = false;
-        _view = View::Loading;
+        _progress_sync_active = kind == WorkKind::SyncProgress;
+        if (kind != WorkKind::SyncProgress) _view = View::Loading;
         show_work_feedback();
 
         auto *job = new WorkJob;
@@ -1295,6 +1366,11 @@ private:
         if (created != pdPASS) {
             delete job;
             _busy = false;
+            if (kind == WorkKind::SyncProgress) {
+                _progress_sync_active = false;
+                ESP_LOGW(TAG, "progress sync task allocation failed; queue retained");
+                return;
+            }
             _view = View::Error;
             _status = ui_locale::text(ui_locale::TextId::NetworkTaskStartFailed);
             draw_error();

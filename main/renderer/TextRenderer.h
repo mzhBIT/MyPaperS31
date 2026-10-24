@@ -1,5 +1,6 @@
 #pragma once
 
+#include <sdkconfig.h>
 #include <M5Unified.h>
 #include "renderer/TextLayout.h"
 #include "renderer/InlineStyle.h"
@@ -7,6 +8,7 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include "memory/AppAllocator.h"
 
 struct ReaderTextStyle {
     const char *font_path = "builtin:system-ui";
@@ -140,9 +142,9 @@ private:
     };
 
     void initLookupTables();
-    int findLookup(const std::vector<LookupSlot> &table, uint32_t codepoint) const;
-    void insertLookup(std::vector<LookupSlot> &table, uint32_t codepoint, uint16_t index);
-    void eraseLookup(std::vector<LookupSlot> &table, uint32_t codepoint);
+    int findLookup(const app_memory::Vector<LookupSlot> &table, uint32_t codepoint) const;
+    void insertLookup(app_memory::Vector<LookupSlot> &table, uint32_t codepoint, uint16_t index);
+    void eraseLookup(app_memory::Vector<LookupSlot> &table, uint32_t codepoint);
     bool loadAdvance(uint32_t codepoint, Advance &out);
     const Advance *getAdvance(uint32_t codepoint);
     bool loadGlyph(uint32_t codepoint, Glyph &out);
@@ -190,15 +192,15 @@ private:
     unsigned long _bin_file_size = 0;
     uint8_t *_bin_entry_table = nullptr;
     size_t _bin_entry_table_bytes = 0;
-    std::vector<BinFontEntry> _bin_entry_cache;
-    std::vector<Advance> _advance_cache;
-    std::vector<Glyph> _glyph_cache;
-    std::vector<uint32_t> _missing_codepoints;
-    std::vector<uint32_t> _page_missing_codepoints;
+    app_memory::Vector<BinFontEntry> _bin_entry_cache;
+    app_memory::Vector<Advance> _advance_cache;
+    app_memory::Vector<Glyph> _glyph_cache;
+    app_memory::Vector<uint32_t> _missing_codepoints;
+    app_memory::Vector<uint32_t> _page_missing_codepoints;
     // Glyphs required by the last page passed to preparePage().
-    std::vector<uint32_t> _prepared_page_codepoints;
-    std::vector<LookupSlot> _advance_lookup;
-    std::vector<LookupSlot> _glyph_lookup;
+    app_memory::Vector<uint32_t> _prepared_page_codepoints;
+    app_memory::Vector<LookupSlot> _advance_lookup;
+    app_memory::Vector<LookupSlot> _glyph_lookup;
     uint8_t *_glyph_pool = nullptr;
     size_t _glyph_pool_capacity = 0;
     size_t _glyph_pool_used = 0;

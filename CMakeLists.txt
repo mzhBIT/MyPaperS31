@@ -2,7 +2,7 @@
 # in this exact order for cmake to work correctly
 cmake_minimum_required(VERSION 3.16)
 
-set(MYPAPER_BOARD "MyPaperP4" CACHE STRING "MyPaper hardware profile")
+set(MYPAPER_BOARD "MyPaperS31" CACHE STRING "MyPaper hardware profile")
 set_property(CACHE MYPAPER_BOARD PROPERTY STRINGS MyPaperP4 MyPaperS31)
 include($ENV{IDF_PATH}/tools/cmake/version.cmake)
 if(MYPAPER_BOARD STREQUAL "MyPaperS31")
@@ -27,11 +27,14 @@ if(MYPAPER_BOARD STREQUAL "MyPaperS31")
     if(NOT DEFINED SDKCONFIG_DEFAULTS)
         set(SDKCONFIG_DEFAULTS "${CMAKE_CURRENT_LIST_DIR}/configs/mypapers31/sdkconfig.defaults")
     endif()
-    # Stage 2 uses local M5GFX and an interactive display validation app.
-    # Keep P4 managed dependencies isolated until full-app migration.
+    # Share application sources, but retain a board-local component entry so
+    # IDF 6.1 never resolves the P4 main component's managed dependency manifest.
     set(ENV{IDF_COMPONENT_MANAGER} "0")
     set(COMPONENT_DIRS "${CMAKE_CURRENT_LIST_DIR}/main/boards/MyPaperS31/application"
                        "${CMAKE_CURRENT_LIST_DIR}/components/M5GFX"
+                       "${CMAKE_CURRENT_LIST_DIR}/components/M5Unified"
+                       "${CMAKE_CURRENT_LIST_DIR}/components/freetype"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__libjpeg-turbo"
                        "$ENV{IDF_PATH}/components")
     set(COMPONENTS application)
 elseif(MYPAPER_BOARD STREQUAL "MyPaperP4")

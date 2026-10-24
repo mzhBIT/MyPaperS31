@@ -188,20 +188,18 @@ static bool encode_hardware_jpeg(lgfx::LGFX_Sprite *sprite, const std::string &o
     sprite->readRectRGB(0, 0, width, height, input);
 
     jpeg_encoder_handle_t encoder = nullptr;
-    jpeg_encode_engine_cfg_t engine_cfg = {
-        .intr_priority = 0,
-        .timeout_ms = 1000,
-    };
+    jpeg_encode_engine_cfg_t engine_cfg = {};
+    engine_cfg.intr_priority = 0;
+    engine_cfg.timeout_ms = 1000;
     esp_err_t err = jpeg_new_encoder_engine(&engine_cfg, &encoder);
     uint32_t encoded_size = 0;
     if (err == ESP_OK) {
-        jpeg_encode_cfg_t encode_cfg = {
-            .height = static_cast<uint32_t>(height),
-            .width = static_cast<uint32_t>(width),
-            .src_type = JPEG_ENCODE_IN_FORMAT_RGB888,
-            .sub_sample = JPEG_DOWN_SAMPLING_YUV420,
-            .image_quality = THUMB_QUALITY,
-        };
+        jpeg_encode_cfg_t encode_cfg = {};
+        encode_cfg.height = static_cast<uint32_t>(height);
+        encode_cfg.width = static_cast<uint32_t>(width);
+        encode_cfg.src_type = JPEG_ENCODE_IN_FORMAT_RGB888;
+        encode_cfg.sub_sample = JPEG_DOWN_SAMPLING_YUV420;
+        encode_cfg.image_quality = THUMB_QUALITY;
         err = jpeg_encoder_process(encoder, &encode_cfg, input, (uint32_t)raw_size,
                                    output, (uint32_t)output_capacity, &encoded_size);
         jpeg_del_encoder_engine(encoder);

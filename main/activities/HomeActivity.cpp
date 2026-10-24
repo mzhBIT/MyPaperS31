@@ -1,5 +1,6 @@
 #include "activities/Activity.h"
 #include "activities/HomeActivity.h"
+#include "ui/BatteryStatus.h"
 #include "activities/BookshelfActivity.h"
 #include "activities/ActivityManager.h"
 #include "activities/DeepSeekActivity.h"
@@ -20,7 +21,7 @@
 #include "renderer/P4JpegDecoder.h"
 #include "renderer/TurboJpegDecoder.h"
 #include "ui/home_icons_1bpp.h"
-#include "ui/home_status_icons.h"
+#include "ui/ShelfStatusBar.h"
 #include "wifi/wifi_setting.h"
 #include "ui/home_preferences.h"
 #include "ui/UiLocale.h"
@@ -51,7 +52,7 @@ static bool g_quality_on_return = false;
 
 void request_home_quality_refresh() { g_quality_on_return = true; }
 
-static const int HEADER_H = header_layout::height;
+static const int HEADER_H = shelf_status_bar::height;
 static const int COVER_H  = 260;
 static const int ROW_H    = 80;
 static const int ROW_GAP  = 8;
@@ -313,32 +314,9 @@ static void go_bookshelf() { launch_bookshelf(); }
 
 // ─── Drawing ───────────────────────────────────────────────────────
 
-static void draw_home_clock() {
-    char clock[24] = "--:--";
-    if (time_basis_system_clock_valid()) {
-        time_basis_format_clock(std::time(nullptr), clock, sizeof(clock));
-    }
-    const int text_y = header_layout::text_y();
-    system_font::draw_left(M5.Display, clock, SIDE_PAD, text_y, TFT_BLACK);
-}
-
 static void draw_header() {
-    int w = M5.Display.width();
-
-    M5.Display.fillRect(0, 0, w, HEADER_H, TFT_WHITE);
-    header_layout::draw_separator(M5.Display);
-    M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-    draw_home_clock();
-    constexpr int icon_size = 48;
-    constexpr int icon_gap = 12;
-    const int icon_y = header_layout::item_y(icon_size);
-    const int battery_x = w - SIDE_PAD - icon_size;
-    const int wifi_x = battery_x - icon_gap - icon_size;
-    const uint8_t *wifi_icon = wifi_setting_is_enabled()
-        ? home_status_icons::wifi : home_status_icons::wifi_off;
-    M5.Display.drawBitmap(wifi_x, icon_y, wifi_icon, icon_size, icon_size, TFT_BLACK, TFT_WHITE);
-    M5.Display.drawBitmap(battery_x, icon_y, home_status_icons::battery,
-                          icon_size, icon_size, TFT_BLACK, TFT_WHITE);
+    M5.Display.fillRect(0, 0, M5.Display.width(), HEADER_H, TFT_WHITE);
+    shelf_status_bar::draw();
 }
 
 [[maybe_unused]] static void draw_cover() {

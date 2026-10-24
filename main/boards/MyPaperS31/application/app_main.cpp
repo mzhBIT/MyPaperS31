@@ -1,5 +1,6 @@
 #include "boards/Board.h"
 #include "boards/MyPaperS31/Display.h"
+#include "BasicReader.h"
 #include <nvs_flash.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
@@ -54,12 +55,16 @@ extern "C" void app_main() {
     const esp_err_t nvs = nvs_flash_init();
     if (nvs != ESP_OK) ESP_LOGW("S31_UI", "NVS unavailable: %s", esp_err_to_name(nvs));
     mypaper::board::log_profile();
-    if (!mypaper::board::initialize_hardware(false).display_ready) {
+    const auto hardware = mypaper::board::initialize_hardware(false);
+    if (!hardware.display_ready) {
         ESP_LOGE("S31_UI", "display init failed; stopped (no reboot loop)");
         for (;;) vTaskDelay(pdMS_TO_TICKS(1000));
     }
     auto& gfx = mypaper::board::s31::display();
     gfx.setRotation(0);
+#if CONFIG_MYPAPER_S31_BASIC_READER
+    mypaper::board::s31::run_basic_reader(hardware.sd_status == ESP_OK);
+#endif
     draw();
     bool was_pressed = false;
     for (;;) {

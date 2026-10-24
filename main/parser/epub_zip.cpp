@@ -37,6 +37,22 @@ static void cooperative_yield_if_due(int64_t *last_yield_us)
     *last_yield_us = esp_timer_get_time();
 }
 
+// ESP-IDF stubs C++ exception support, so a failed std::vector allocation
+// aborts the firmware instead of raising a catchable std::bad_alloc. Book
+// entries (notably scanned JPEG pages) can be larger than the biggest free
+// block, so verify that the requested buffer fits before resizing.
+static bool zip_allocation_fits(size_t bytes, const char *what)
+{
+    if (bytes == 0) return true;
+    constexpr size_t RESERVE_BYTES = 256 * 1024;
+    const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    if (bytes <= largest && largest - bytes >= RESERVE_BYTES) return true;
+    ESP_LOGW(TAG, "skip %s: request=%u largest_free=%u reserve=%u",
+             what ? what : "entry", (unsigned)bytes, (unsigned)largest,
+             (unsigned)RESERVE_BYTES);
+    return false;
+}
+
 using InflaterPtr = std::unique_ptr<lgfx_tinfl_decompressor, decltype(&heap_caps_free)>;
 
 static InflaterPtr allocate_inflater()
@@ -334,7 +350,7 @@ bool EpubZip::load_index_cache(const char *source_path)
         version != ZIP_INDEX_VERSION || saved_path != source_path ||
         file_size != (uint64_t)source_stat.st_size || mtime != (uint64_t)source_stat.st_mtime) return false;
 
-    std::unordered_map<std::string, Entry> entries;
+    EntryMap entries;
     entries.reserve(entry_count);
     for (uint32_t i = 0; i < entry_count; ++i) {
         if (pos + 2 > data.size()) return false;
@@ -586,6 +602,10 @@ bool EpubZip::read_entry_to_memory(const std::string &name,
               std::fseek(fp, (long)data_offset, SEEK_SET) == 0;
 
     if (ok && entry.method == 0) {
+        if (!zip_allocation_fits(entry.uncompressed_size, "stored entry")) {
+            std::fclose(fp);
+            return false;
+        }
         out->resize(entry.uncompressed_size);
         size_t offset = 0;
         int64_t last_yield_us = esp_timer_get_time();
@@ -603,6 +623,10 @@ bool EpubZip::read_entry_to_memory(const std::string &name,
 
     std::vector<uint8_t> compressed;
     if (ok && entry.method == 8) {
+        if (!zip_allocation_fits(entry.compressed_size, "compressed entry")) {
+            std::fclose(fp);
+            return false;
+        }
         compressed.resize(entry.compressed_size);
         size_t offset = 0;
         int64_t last_yield_us = esp_timer_get_time();
@@ -613,12 +637,13 @@ bool EpubZip::read_entry_to_memory(const std::string &name,
             offset += ok ? chunk : 0;
             if (ok) cooperative_yield_if_due(&last_yield_us);
         }
-    } else if (ok) {
-        ok = false;
     }
     std::fclose(fp);
     if (!ok) return false;
 
+    if (!zip_allocation_fits(entry.uncompressed_size, "inflated entry")) {
+        return false;
+    }
     out->resize(entry.uncompressed_size);
     InflaterPtr inflater = allocate_inflater();
     if (!inflater) {
@@ -718,35 +743,114 @@ bool EpubZip::extract_entry_to_file(const std::string &name, const std::string &
         return false;
     }
 
-    // Keep the stable file-backed image path, but do not use the monolithic
-    // miniz helper here.  On large comic JPEG entries that helper can occupy
-    // the main task for longer than the 5 s watchdog period.  The normal
-    // memory reader inflates in bounded output chunks and yields only after
-    // roughly one second of continuous work.
-    std::vector<uint8_t> inflated;
-    if (!read_entry_to_memory(name, &inflated, max_size) ||
-        inflated.size() != entry.uncompressed_size) {
-        ESP_LOGW(TAG, "chunked inflate failed: %s out=%u/%u",
-                 name.c_str(),
-                 (unsigned)inflated.size(),
-                 (unsigned)entry.uncompressed_size);
+    // Stream-inflate straight to the cache file. Loading a complete entry into
+    // RAM first aborts on ESP-IDF when the allocation fails (C++ exceptions
+    // are stubbed), and scanned JPEG pages can exceed the largest free PSRAM
+    // block. A 32 KiB wrapping dictionary keeps memory use bounded regardless
+    // of entry size while still yielding periodically for the watchdog.
+    constexpr size_t INPUT_CHUNK = 32 * 1024;
+    constexpr size_t DICT_SIZE = 32768; // miniz TINFL_LZ_DICT_SIZE
+
+    FILE *in = std::fopen(_path.c_str(), "rb");
+    if (!in) return false;
+    if (std::fseek(in, (long)data_offset, SEEK_SET) != 0) {
+        std::fclose(in);
         return false;
     }
-
     FILE *out = std::fopen(out_path.c_str(), "wb");
     if (!out) {
         ESP_LOGW(TAG, "output open failed: %s", out_path.c_str());
+        std::fclose(in);
         return false;
     }
-    bool wrote = true;
-    size_t offset = 0;
-    int64_t last_yield_us = esp_timer_get_time();
-    while (wrote && offset < inflated.size()) {
-        const size_t chunk = std::min<size_t>(64 * 1024, inflated.size() - offset);
-        wrote = std::fwrite(inflated.data() + offset, 1, chunk, out) == chunk;
-        offset += wrote ? chunk : 0;
-        if (wrote) cooperative_yield_if_due(&last_yield_us);
+    if (entry.uncompressed_size == 0) {
+        std::fclose(out);
+        std::fclose(in);
+        return true;
     }
+
+    std::vector<uint8_t> input(std::min<size_t>(INPUT_CHUNK, entry.compressed_size));
+    InflaterPtr inflater = allocate_inflater();
+    uint8_t *dict = static_cast<uint8_t *>(
+        heap_caps_malloc(DICT_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    if (!dict) {
+        dict = static_cast<uint8_t *>(
+            heap_caps_malloc(DICT_SIZE, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    }
+
+    ok = !input.empty() && inflater && dict;
+    if (!ok) {
+        ESP_LOGW(TAG, "stream inflate allocation failed: %s", name.c_str());
+    }
+
+    size_t compressed_remaining = entry.compressed_size;
+    size_t input_available = 0;
+    size_t input_offset = 0;
+    size_t dict_offset = 0;
+    uint32_t written = 0;
+    lgfx_tinfl_status status = TINFL_STATUS_NEEDS_MORE_INPUT;
+    int64_t last_yield_us = esp_timer_get_time();
+    if (ok) lgfx_tinfl_init(inflater.get());
+
+    while (ok) {
+        if (input_available == 0 && compressed_remaining > 0) {
+            const size_t count = std::min(input.size(), compressed_remaining);
+            if (count == 0 || std::fread(input.data(), 1, count, in) != count) {
+                ok = false;
+                break;
+            }
+            compressed_remaining -= count;
+            input_available = count;
+            input_offset = 0;
+        }
+
+        size_t input_size = input_available;
+        size_t output_size = DICT_SIZE - dict_offset;
+        const uint32_t flags = compressed_remaining ? TINFL_FLAG_HAS_MORE_INPUT : 0;
+        status = lgfx_tinfl_decompress(inflater.get(),
+                                       input.data() + input_offset, &input_size,
+                                       dict, dict + dict_offset, &output_size,
+                                       flags);
+        input_available -= input_size;
+        input_offset += input_size;
+
+        if (output_size > 0) {
+            if (std::fwrite(dict + dict_offset, 1, output_size, out) != output_size) {
+                ok = false;
+                break;
+            }
+            written += (uint32_t)output_size;
+            dict_offset = (dict_offset + output_size) & (DICT_SIZE - 1);
+            cooperative_yield_if_due(&last_yield_us);
+        }
+
+        if (status == TINFL_STATUS_DONE) break;
+        if (status != TINFL_STATUS_HAS_MORE_OUTPUT &&
+            status != TINFL_STATUS_NEEDS_MORE_INPUT) {
+            ok = false;
+            break;
+        }
+        if (input_size == 0 && output_size == 0) {
+            ok = false;
+            break;
+        }
+        if (written > entry.uncompressed_size) {
+            ok = false;
+            break;
+        }
+    }
+
+    if (ok && (status != TINFL_STATUS_DONE ||
+               written != entry.uncompressed_size)) {
+        ESP_LOGW(TAG, "stream inflate failed: %s out=%u/%u status=%d",
+                 name.c_str(), (unsigned)written,
+                 (unsigned)entry.uncompressed_size, (int)status);
+        ok = false;
+    }
+
+    if (dict) heap_caps_free(dict);
     std::fclose(out);
-    return wrote;
+    std::fclose(in);
+    if (!ok) std::remove(out_path.c_str());
+    return ok;
 }

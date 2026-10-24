@@ -26,6 +26,9 @@
 #include "weread/WereadHttpClient.h"
 #include "weread/WereadOffline.h"
 #include "weread/WereadStore.h"
+#include "weread/WereadReport.h"
+#include "weread/WereadReadingSession.h"
+#include "weread/WereadReadingTime.h"
 
 #include <M5Unified.h>
 #include "lgfx/v1/platforms/esp32/MyPaper_EPD_Config.hpp"
@@ -33,7 +36,9 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdint>
+#include <ctime>
 #include <cstring>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
@@ -59,7 +64,8 @@ static const uint32_t EPUB_LAYOUT_VERSION = 5;
 // WeRead's `rt` is active reader time, not elapsed wall-clock time. Stop
 // accumulating after an idle reader has sat untouched for ten minutes.
 static const int64_t WEREAD_ACTIVE_IDLE_US = 10LL * 60 * 1000 * 1000;
-static const int64_t WEREAD_REPORT_INTERVAL_US = 60LL * 1000 * 1000;
+// Cheap in-memory snapshots; the network worker checkpoints/reports every 60s.
+static const int64_t WEREAD_SAMPLE_INTERVAL_US = 1000LL * 1000;
 #if MYPAPER_EPD_USE_2D_ENGINE
 static constexpr bool READER_PREFETCH_FRAMEBUFFER_ENABLED = true;
 #else
@@ -432,6 +438,8 @@ public:
 
     void on_show() override
     {
+        _weread_visible = true;
+        if (_weread_last_tick_us) _weread_last_tick_us = esp_timer_get_time();
         _auto_page.reset();
         if (_ok && !g_epub.is_weread()) {
             if (!_seen_show) _reading_timer.configure(g_epub.path().c_str());
@@ -449,7 +457,12 @@ public:
         redraw_all(epd_mode_t::epd_quality);
     }
 
-    void on_hide() override { _reading_timer.pause(); _auto_page.reset(); }
+    void on_hide() override {
+        tick_weread_active_time();
+        _weread_visible = false;
+        _weread_session.allow_io(false);
+        _reading_timer.pause(); _auto_page.reset();
+    }
 
     void loop() override
     {
@@ -465,6 +478,7 @@ public:
             }
         }
         tick_weread_active_time();
+        _weread_session.allow_io(!M5.Display.displayBusy() && !_prefetch.pending);
         poll_annotation_worker();
         start_pending_annotation_fetch();
         run_page_prefetch();
@@ -828,7 +842,12 @@ private:
     int64_t _weread_last_tick_us = 0;
     int64_t _weread_last_activity_us = 0;
     int64_t _weread_unreported_us = 0;
+    int64_t _weread_live_us = 0;
     int64_t _weread_last_report_us = 0;
+    std::string _weread_account_vid;
+    weread::ReadingSession _weread_session;
+    bool _weread_session_started = false;
+    bool _weread_visible = true;
     int _non_quality_refresh_count = 0;
     bool _post_image_quality_pending = false;
     document_layout::Pages _pages;
@@ -1026,16 +1045,19 @@ private:
 
     bool is_weread_active_reader() const
     {
-        return _ok && g_epub.is_weread() && !_overlay.visible() && !_footnote_popup_visible;
+        return _ok && g_epub.is_weread() && _weread_visible && !_overlay.visible() && !_footnote_popup_visible;
     }
 
     void begin_weread_active_tracking()
     {
         if (!_ok || !g_epub.is_weread()) return;
+        weread::Session session;
+        if (weread::load_session(&session)) _weread_account_vid = session.vid;
         const int64_t now = esp_timer_get_time();
         _weread_last_tick_us = now;
         _weread_last_activity_us = now;
         _weread_last_report_us = now;
+        queue_weread_progress(false);
     }
 
     void note_weread_reader_activity()
@@ -1049,28 +1071,34 @@ private:
     {
         if (!_ok || !g_epub.is_weread()) return false;
         const uint32_t seconds = static_cast<uint32_t>(
-            std::min<int64_t>(_weread_unreported_us / 1000000LL, 24LL * 60 * 60));
-        if (!force && seconds == 0) return false;
+            std::min<int64_t>(_weread_unreported_us / 1000000LL, UINT32_MAX));
 
         const int spine = std::max(0, _spine_index);
         const weread::Chapter *chapter = g_epub.weread_chapter(spine);
         if (!chapter) return false;
-        const float within = _page_count > 0
-            ? static_cast<float>(_page_index) / static_cast<float>(_page_count) : 0.0f;
-        const float overall = (static_cast<float>(spine) + within) /
-                              static_cast<float>(std::max(1, g_epub.spine_count()));
         weread::store::PendingProgress pending;
+        pending.account_vid = _weread_account_vid;
+        if (pending.account_vid.empty()) return false;
         pending.book_id = g_epub.weread_book_id();
         pending.chapter = *chapter;
-        pending.percent = std::clamp(static_cast<int>(overall * 100.0f + 0.5f), 0, 100);
+        pending.percent = weread::report::weighted_percent(g_epub.weread_chapters(),
+            size_t(spine), size_t(std::max(0,_page_index)), size_t(std::max(0,_page_count)));
+        const auto unix_time = std::time(nullptr);
+        if (unix_time >= 1704067200) pending.recorded_at = uint64_t(unix_time);
         pending.active_seconds = seconds;
-        pending.chapter_offset = page_position(_page_index);
+        // Resolved against pristine content by the network worker, not the
+        // reflow byte counter. No extra chapter parsing in the reader loop.
+        pending.chapter_offset = 0;
         pending.summary = current_page_summary();
-        if (!weread::store::save_pending_progress(pending)) return false;
-        _weread_unreported_us -= static_cast<int64_t>(seconds) * 1000000LL;
+        if (!_weread_session_started) {
+            if (force) return weread::store::save_pending_progress(pending); // task allocation failed: preserve locally
+            _weread_session_started = _weread_session.start(pending);
+            if (!_weread_session_started) return false;
+        }
+        if (!_weread_session.publish(pending,uint64_t(_weread_unreported_us),uint64_t(_weread_live_us),force)) return false;
         _weread_last_report_us = esp_timer_get_time();
-        if (seconds) {
-            ESP_LOGI(TAG, "WeRead active time queued: %u s progress=%d%%",
+        if (force) {
+            ESP_LOGI(TAG, "WeRead session finishing: total=%u s progress=%d%%",
                      static_cast<unsigned>(seconds), pending.percent);
         }
         return true;
@@ -1086,15 +1114,16 @@ private:
             _weread_last_report_us = now;
             return;
         }
-        const int64_t elapsed = std::max<int64_t>(0, now - _weread_last_tick_us);
+        const int64_t previous = _weread_last_tick_us;
+        const int64_t elapsed = std::max<int64_t>(0, now - previous);
         _weread_last_tick_us = now;
         if (is_weread_active_reader() &&
             now - _weread_last_activity_us <= WEREAD_ACTIVE_IDLE_US) {
-            _weread_unreported_us = std::min<int64_t>(
-                _weread_unreported_us + elapsed, 24LL * 60 * 60 * 1000000LL);
+            _weread_unreported_us += elapsed;
+            const int64_t ready = _weread_session.ready_since_us();
+            _weread_live_us += weread::reading_time::live_interval(previous,now,ready);
         }
-        if (_weread_unreported_us >= 1000000LL &&
-            now - _weread_last_report_us >= WEREAD_REPORT_INTERVAL_US) {
+        if (now - _weread_last_report_us >= WEREAD_SAMPLE_INTERVAL_US) {
             queue_weread_progress(false);
         }
     }
@@ -1106,6 +1135,7 @@ private:
         if (!force) return;
         if (!_ok || _progress_path.empty()) return;
         tick_weread_active_time();
+        if (g_epub.is_weread()) queue_weread_progress(true);
         if (!_progress_dirty && !force) return;
 
         const int64_t t0 = esp_timer_get_time();
@@ -1145,9 +1175,6 @@ private:
         fwrite(&summary_chapter, 1, sizeof(summary_chapter), fp);
         fwrite(&summary_chapter_count, 1, sizeof(summary_chapter_count), fp);
         fclose(fp);
-        if (g_epub.is_weread()) {
-            queue_weread_progress(true);
-        }
         _progress_dirty = false;
         ESP_LOGI(TAG, "progress saved spine=%lu position=%llu page=%d/%d force=%d time=%lld ms",
                  (unsigned long)spine + 1,
@@ -1618,11 +1645,71 @@ private:
 
         FILE *fp = fopen(path.c_str(), "rb");
         if (!fp) return false;
+        const size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+        if ((size_t)st.st_size > largest) {
+            ESP_LOGW(TAG, "skip file read: %s size=%u largest_free=%u",
+                     path.c_str(), (unsigned)st.st_size, (unsigned)largest);
+            fclose(fp);
+            return false;
+        }
         out->resize((size_t)st.st_size);
         bool ok = fread(out->data(), 1, out->size(), fp) == out->size();
         fclose(fp);
         if (!ok) out->clear();
         return ok;
+    }
+
+    // A PNG that fails in under a millisecond never reached the pixel data, so
+    // the useful evidence is the IHDR and whether the extracted file actually
+    // contains the image bytes. The decoder itself reports its own reason.
+    static void log_png_failure(const std::string &path)
+    {
+        struct stat st = {};
+        if (stat(path.c_str(), &st) != 0) {
+            ESP_LOGW(TAG, "png failure: stat failed path=%s", path.c_str());
+            return;
+        }
+        FILE *fp = fopen(path.c_str(), "rb");
+        uint8_t head[33] = {};
+        size_t head_len = 0;
+        unsigned zero_samples = 0;
+        unsigned sample_count = 0;
+        if (fp) {
+            head_len = fread(head, 1, sizeof(head), fp);
+            static const long offsets[] = {0, 4096, 65536, 1048576, 2097152};
+            uint8_t sample[64];
+            for (long offset : offsets) {
+                if (offset >= st.st_size || fseek(fp, offset, SEEK_SET) != 0) continue;
+                const size_t n = fread(sample, 1, sizeof(sample), fp);
+                bool all_zero = n > 0;
+                for (size_t i = 0; i < n; ++i) {
+                    if (sample[i]) { all_zero = false; break; }
+                }
+                ++sample_count;
+                if (all_zero) ++zero_samples;
+            }
+            fclose(fp);
+        }
+        const bool signature_ok = head_len >= 8 &&
+            std::memcmp(head, "\x89PNG\r\n\x1a\n", 8) == 0;
+        const int width = head_len >= 24
+            ? (int)((uint32_t)head[16] << 24 | (uint32_t)head[17] << 16 |
+                    (uint32_t)head[18] << 8 | head[19]) : 0;
+        const int height = head_len >= 24
+            ? (int)((uint32_t)head[20] << 24 | (uint32_t)head[21] << 16 |
+                    (uint32_t)head[22] << 8 | head[23]) : 0;
+        ESP_LOGW(TAG,
+                 "png failure path=%s size=%u head=%u sig=%d src=%dx%d depth=%u color=%u comp=%u filter=%u interlace=%u zero_samples=%u/%u free_psram=%u largest=%u",
+                 path.c_str(), (unsigned)st.st_size, (unsigned)head_len,
+                 signature_ok ? 1 : 0, width, height,
+                 head_len > 24 ? head[24] : 0,
+                 head_len > 25 ? head[25] : 0,
+                 head_len > 26 ? head[26] : 0,
+                 head_len > 27 ? head[27] : 0,
+                 head_len > 28 ? head[28] : 0,
+                 zero_samples, sample_count,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
     }
 
     bool draw_cached_image(lgfx::LGFXBase &gfx,
@@ -1712,6 +1799,7 @@ private:
             if (stats) stats->file_decode_ms = (esp_timer_get_time() - t_file) / 1000;
             if (ok && stats) stats->file_decode_ok = true;
             if (!ok) {
+                log_png_failure(image.path);
                 std::vector<uint8_t> bytes;
                 int64_t t_read = esp_timer_get_time();
                 if (read_file_bytes(image.path, &bytes)) {
@@ -1798,7 +1886,16 @@ private:
             _prefetched_image_href.clear();
             std::vector<uint8_t>().swap(_prefetched_image_bytes);
             if (!g_epub.read_resource_to_memory(resolved, &_prefetched_image_bytes) ||
-                _prefetched_image_bytes.empty()) return false;
+                _prefetched_image_bytes.empty()) {
+                std::vector<uint8_t>().swap(_prefetched_image_bytes);
+                // A large embedded asset may not fit in the largest free PSRAM
+                // block. Extract it to the SD-backed cache instead, where
+                // libjpeg can stream it row by row.
+                CachedImage fallback = image;
+                if (!ensure_cached_image(href, &fallback, nullptr)) return false;
+                return draw_cached_image(gfx, fallback, x, y, w, h, scale,
+                                         allow_hw_jpeg, stats);
+            }
             _prefetched_image_href = resolved;
             source = &_prefetched_image_bytes;
         }
@@ -2326,7 +2423,9 @@ private:
                     std::vector<uint8_t>().swap(_prefetched_image_bytes);
                     ESP_LOGW(TAG, "prefetch image memory failed href=%s time=%lld ms",
                              item.resource.c_str(), (esp_timer_get_time() - started) / 1000);
-                    return false;
+                    // Let the foreground file-cache fallback handle this asset
+                    // instead of failing the whole page prefetch.
+                    continue;
                 }
                 _prefetched_image_href = resolved;
             }

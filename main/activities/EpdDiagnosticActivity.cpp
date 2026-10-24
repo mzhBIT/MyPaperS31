@@ -25,7 +25,11 @@ constexpr int PAD = 20;
 constexpr int MENU_TOP = HEADER_H;
 constexpr int MENU_ROW_H = 70;
 constexpr int MENU_ROW_GAP = 4;
+#if CONFIG_IDF_TARGET_ESP32S31
+constexpr int MENU_COUNT = 14;
+#else
 constexpr int MENU_COUNT = 13;
+#endif
 
 const char *TAG = "EPD_DIAG";
 
@@ -43,6 +47,9 @@ const ui_locale::TextId MENU_LABELS[MENU_COUNT] = {
     ui_locale::TextId::QualityBlackHold,
     ui_locale::TextId::Du4NeutralMaskPartial,
     ui_locale::TextId::VcomMeasurement,
+#if CONFIG_IDF_TARGET_ESP32S31
+    ui_locale::TextId::OeGateTest,
+#endif
 };
 
 void draw_header(const char *title)
@@ -119,6 +126,7 @@ class EpdDiagnosticActivity final : public Activity {
 public:
     ~EpdDiagnosticActivity() override
     {
+        stop_oe_test();
         restore_default_timing();
     }
 
@@ -174,6 +182,15 @@ public:
         }
         if (_view == View::NeutralMaskSource || _view == View::NeutralMaskTarget) {
             draw_neutral_mask_partial();
+            return true;
+        }
+        if (_view == View::OeGate) {
+            if (event.y >= M5.Display.height() - 160) {
+                _oe_gated = !_oe_gated;
+                draw_oe_reference();
+            } else {
+                draw_oe_partial();
+            }
             return true;
         }
 
@@ -234,6 +251,11 @@ public:
             draw_neutral_mask_partial();
             return true;
         }
+        if (_view == View::OeGate && (key == APP_KEY_OK || key == APP_KEY_EXTRA)) {
+            if (key == APP_KEY_EXTRA) { _oe_gated = !_oe_gated; draw_oe_reference(); }
+            else draw_oe_partial();
+            return true;
+        }
         if (key == APP_KEY_OK || key == APP_KEY_EXTRA) {
             draw_menu(false);
             return true;
@@ -260,6 +282,7 @@ private:
         NeutralMaskSource,
         NeutralMaskTarget,
         Vcom,
+        OeGate,
     };
 
     View _view = View::Menu;
@@ -268,6 +291,19 @@ private:
     uint32_t _timing_line_us = MYPAPER_EPD_2D_LINE_PERIOD_US;
     bool _quality_36 = false;
     unsigned _black_hold_refreshes = 0;
+    bool _oe_gated = false, _oe_dark = true;
+    unsigned _oe_refreshes = 0;
+
+    void stop_oe_test()
+    {
+#if CONFIG_IDF_TARGET_ESP32S31
+        if (_view == View::OeGate) {
+            M5.Display.waitDisplay();
+            lgfx::epd2d_continuous_scan_set_oe_test_window(0, 0);
+            lgfx::epd2d_continuous_scan_set_oe_automatic(MYPAPER_EPD_S31_PARTIAL_OE_DEFAULT);
+        }
+#endif
+    }
 
     void restore_default_timing()
     {
@@ -295,6 +331,10 @@ private:
 
     void draw_menu(bool quality)
     {
+        if (_view == View::OeGate) {
+            stop_oe_test();
+            quality = true; // Remove any test ghosts before returning to UI.
+        }
         if (_view == View::QualityTimingAB) {
             restore_default_timing();
         }
@@ -339,6 +379,9 @@ private:
             case 10: draw_black_hold_white(); break;
             case 11: draw_neutral_mask_source(); break;
             case 12: run_vcom_measurement(); break;
+#if CONFIG_IDF_TARGET_ESP32S31
+            case 13: _oe_gated = false; draw_oe_reference(); break;
+#endif
             default: break;
         }
     }
@@ -349,6 +392,75 @@ private:
         int w;
         int h;
     };
+
+    TestRect oe_rect() const
+    {
+        const int width = M5.Display.width();
+        return {width/3, 220, width/3, M5.Display.height()-440};
+    }
+
+    void draw_oe_reference()
+    {
+#if CONFIG_IDF_TARGET_ESP32S31
+        M5.Display.waitDisplay();
+        lgfx::epd2d_continuous_scan_set_oe_automatic(false);
+        lgfx::epd2d_continuous_scan_set_oe_test_window(0, 0);
+        _view = View::OeGate;
+        _oe_dark = true; _oe_refreshes = 0;
+        const auto r = oe_rect();
+        const int width = M5.Display.width(), height = M5.Display.height();
+        begin_draw(epd_mode_t::epd_quality);
+        M5.Display.fillScreen(TFT_WHITE);
+        draw_header(ui_locale::text(ui_locale::TextId::OeGateTest));
+        draw_center_fit(ui_locale::text(_oe_gated ? ui_locale::TextId::OeGateB : ui_locale::TextId::OeGateA), 100);
+        // Left/right portrait references lie OUTSIDE the gated physical rows.
+        // Top/bottom references lie on the SAME rows: OE cannot isolate them.
+        for (int y = 190, n = 0; y < height-190; y += 52, ++n) {
+            const auto color = gray_color((n % 4) * 5);
+            M5.Display.fillRect(24, y, r.x-48, 34, color);
+            M5.Display.fillRect(r.x+r.w+24, y, width-(r.x+r.w)-48, 34, color);
+        }
+        M5.Display.fillRect(r.x, 166, r.w, 24, TFT_BLACK);
+        M5.Display.fillRect(r.x, height-190, r.w, 24, TFT_BLACK);
+        M5.Display.fillRect(r.x, r.y, r.w, r.h, TFT_BLACK);
+        M5.Display.drawRect(r.x-2, r.y-2, r.w+4, r.h+4, TFT_BLACK);
+        draw_center_fit(ui_locale::text(ui_locale::TextId::OeGateRefreshHint), height-130);
+        draw_center_fit(ui_locale::text(ui_locale::TextId::OeGateSwitchHint), height-78);
+        finish_draw();
+        if (_oe_gated) {
+            // Only this symmetric portrait test geometry is supported. Its
+            // central x interval maps to physical y regardless of mirror.
+            if (width != 684 || height != 1216 || M5.Display.getRotation() != 0
+                || !lgfx::epd2d_continuous_scan_set_oe_test_window(r.x, r.x+r.w)) {
+                _oe_gated = false;
+                lgfx::epd2d_continuous_scan_set_oe_automatic(MYPAPER_EPD_S31_PARTIAL_OE_DEFAULT);
+                begin_draw(epd_mode_t::epd_quality);
+                M5.Display.fillScreen(TFT_WHITE);
+                draw_header(ui_locale::text(ui_locale::TextId::OeGateTest));
+                draw_center_fit(ui_locale::text(ui_locale::TextId::OeGateUnavailable), height/2);
+                finish_draw();
+                _view = View::Grayscale;
+                return;
+            }
+        }
+        ESP_LOGI(TAG, "OE A/B reference: mode=%c physical_rows=228..456; tap refresh, bottom switch",
+                 _oe_gated ? 'B' : 'A');
+#endif
+    }
+
+    void draw_oe_partial()
+    {
+#if CONFIG_IDF_TARGET_ESP32S31
+        const auto r = oe_rect();
+        _oe_dark = !_oe_dark;
+        begin_draw(epd_mode_t::epd_text);
+        M5.Display.fillRect(r.x, r.y, r.w, r.h, _oe_dark ? TFT_BLACK : TFT_WHITE);
+        M5.Display.drawRect(r.x+24, r.y+24, r.w-48, r.h-48, _oe_dark ? TFT_WHITE : TFT_BLACK);
+        finish_draw_area(r.x, r.y, r.w, r.h);
+        ESP_LOGI(TAG, "OE A/B partial complete: mode=%c refreshes=%u target=%s; inspect left/right references",
+                 _oe_gated ? 'B' : 'A', ++_oe_refreshes, _oe_dark ? "black" : "white");
+#endif
+    }
 
     TestRect neutral_mask_rect() const
     {

@@ -24,6 +24,10 @@ bool time_basis_parse_modem(const char *raw, int64_t *utc_seconds);
 bool time_basis_parse_modem_clock(const char *raw, int64_t *utc_seconds);
 bool time_basis_parse_beijing_key(int64_t key, int64_t *utc_seconds);
 bool time_basis_parse_legacy_beijing(const char *display, int64_t *utc_seconds);
+// Strict YYYY/MM/DD HH:MM, interpreted using the selected fixed UTC offset.
+// Supported manual calendar range: 2024..2099 (system clock trust policy).
+// Seconds are set to zero.
+bool time_basis_parse_manual(const char *display, int64_t *utc_seconds);
 bool time_basis_format_utc(int64_t utc_seconds, char *display, size_t capacity,
                            int64_t *sort_key);
 

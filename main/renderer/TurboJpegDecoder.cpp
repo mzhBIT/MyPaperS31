@@ -5,6 +5,7 @@
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "sdkconfig.h"
 
 #include <algorithm>
 #include <csetjmp>
@@ -21,7 +22,15 @@ namespace {
 
 static const char *TAG = "TurboJpeg";
 static constexpr size_t MAX_JPEG_MEMORY = 12 * 1024 * 1024;
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+// S31 has far less PSRAM than the P4 and the EPD 2D pipeline reserves about
+// 4.7 MiB before the app starts, so the P4-sized 8 MiB headroom can never be
+// satisfied. This decoder streams one scanline at a time, so a smaller reserve
+// is enough to keep the rest of the UI safe.
+static constexpr size_t MIN_FREE_PSRAM_RESERVE = 1024 * 1024;
+#else
 static constexpr size_t MIN_FREE_PSRAM_RESERVE = 8 * 1024 * 1024;
+#endif
 static constexpr size_t MIN_JPEG_MEMORY = 1024 * 1024;
 
 struct ErrorManager {
@@ -57,19 +66,19 @@ static uint32_t clamp_u32(size_t value)
     return value > UINT32_MAX ? UINT32_MAX : (uint32_t)value;
 }
 
-static void estimate_progressive_coefficients(j_decompress_ptr cinfo,
-                                              const char *path,
-                                              int scale_denom,
-                                              DrawStats *stats)
+static size_t progressive_coefficient_bytes(const jpeg_decompress_struct *cinfo,
+                                            int scale_denom,
+                                            size_t *compact_bytes)
 {
-    if (!cinfo || !stats || !cinfo->progressive_mode) return;
+    if (compact_bytes) *compact_bytes = 0;
+    if (!cinfo || !cinfo->progressive_mode) return 0;
 
     const bool grayscale_y_only = cinfo->out_color_space == JCS_GRAYSCALE &&
                                  (cinfo->jpeg_color_space == JCS_GRAYSCALE ||
                                   cinfo->jpeg_color_space == JCS_YCbCr);
     const int keep_size = std::max(1, DCTSIZE / std::max(1, scale_denom));
     size_t legacy_bytes = 0;
-    size_t compact_bytes = 0;
+    size_t compact = 0;
 
     for (int ci = 0; ci < cinfo->num_components; ++ci) {
         const jpeg_component_info &component = cinfo->comp_info[ci];
@@ -86,16 +95,54 @@ static void estimate_progressive_coefficients(j_decompress_ptr cinfo,
 
         const bool needed = !grayscale_y_only || ci == 0;
         if (!needed) {
-            compact_bytes += block_count * sizeof(uint64_t);
+            compact += block_count * sizeof(uint64_t);
         } else if (keep_size < DCTSIZE) {
-            compact_bytes += block_count *
-                             (sizeof(uint64_t) +
-                              (size_t)keep_size * keep_size * sizeof(JCOEF));
+            compact += block_count *
+                       (sizeof(uint64_t) +
+                        (size_t)keep_size * keep_size * sizeof(JCOEF));
         } else {
-            compact_bytes += block_count * sizeof(JBLOCK);
+            compact += block_count * sizeof(JBLOCK);
         }
     }
 
+    if (compact_bytes) *compact_bytes = compact;
+    return legacy_bytes;
+}
+
+// Progressive JPEGs must retain every DCT coefficient until the final scan, so
+// the IDCT scale also determines peak memory. Start from the sharpest scale
+// that still covers the target box and fall back to a coarser one (each step
+// stores 4x fewer coefficients) instead of letting libjpeg abort with
+// "Memory limit exceeded".
+static int choose_scale_denom_for_budget(j_decompress_ptr cinfo, size_t budget,
+                                         int target_width, int target_height)
+{
+    int denom = choose_scale_denom(cinfo, target_width, target_height);
+    if (!cinfo->progressive_mode) return denom;
+
+    // Row buffers and other libjpeg structures share the same budget.
+    constexpr size_t COEFFICIENT_MARGIN = 512 * 1024;
+    while (denom < 8) {
+        cinfo->scale_num = 1;
+        cinfo->scale_denom = (unsigned)denom;
+        jpeg_calc_output_dimensions(cinfo);
+        const size_t needed = progressive_coefficient_bytes(cinfo, denom, nullptr);
+        if (needed == 0 || needed + COEFFICIENT_MARGIN <= budget) break;
+        denom *= 2;
+    }
+    return denom;
+}
+
+static void log_progressive_estimate(j_decompress_ptr cinfo,
+                                     const char *path,
+                                     int scale_denom,
+                                     DrawStats *stats)
+{
+    if (!cinfo || !stats || !cinfo->progressive_mode) return;
+
+    size_t compact_bytes = 0;
+    const size_t legacy_bytes = progressive_coefficient_bytes(cinfo, scale_denom,
+                                                              &compact_bytes);
     stats->legacy_coefficient_bytes = clamp_u32(legacy_bytes);
     stats->compact_coefficient_bytes = clamp_u32(compact_bytes);
     ESP_LOGI(TAG,
@@ -183,11 +230,12 @@ static bool draw_source(lgfx::LGFXBase &gfx,
     cinfo.out_color_space = JCS_GRAYSCALE;
     cinfo.dct_method = JDCT_IFAST;
     cinfo.do_fancy_upsampling = FALSE;
-    local_stats.scale_denom = choose_scale_denom(&cinfo, box_width, box_height);
+    local_stats.scale_denom = choose_scale_denom_for_budget(&cinfo, jpeg_budget,
+                                                            box_width, box_height);
     cinfo.scale_num = 1;
     cinfo.scale_denom = (unsigned)local_stats.scale_denom;
-    estimate_progressive_coefficients(&cinfo, source_label, local_stats.scale_denom,
-                                      &local_stats);
+    log_progressive_estimate(&cinfo, source_label, local_stats.scale_denom,
+                             &local_stats);
 
     {
         const int64_t decode_start = esp_timer_get_time();
@@ -332,11 +380,12 @@ bool decode_memory_gray4(const uint8_t *data,
     cinfo.out_color_space = JCS_GRAYSCALE;
     cinfo.dct_method = JDCT_IFAST;
     cinfo.do_fancy_upsampling = FALSE;
-    local_stats.scale_denom = choose_scale_denom(&cinfo, output_width, output_height);
+    local_stats.scale_denom = choose_scale_denom_for_budget(&cinfo, jpeg_budget,
+                                                            output_width, output_height);
     cinfo.scale_num = 1;
     cinfo.scale_denom = (unsigned)local_stats.scale_denom;
-    estimate_progressive_coefficients(&cinfo, source_label, local_stats.scale_denom,
-                                      &local_stats);
+    log_progressive_estimate(&cinfo, source_label, local_stats.scale_denom,
+                             &local_stats);
 
     {
         const int64_t decode_start = esp_timer_get_time();

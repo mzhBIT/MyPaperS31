@@ -488,32 +488,7 @@ bool save_response_file(const std::string &path, const uint8_t *data, size_t siz
     return commit(file, temporary, path, ok);
 }
 
-bool save_pending_progress(const PendingProgress &progress)
-{
-    ensure_directories();
-    const std::string path = std::string(app_paths::weread_dir()) + "/pending_progress.bin";
-    PendingProgress merged = progress;
-    PendingProgress previous;
-    // A progress write is normally delayed, while active time is sampled more
-    // often. Preserve unreported time when both records belong to this book.
-    if (load_pending_progress(&previous) && previous.book_id == merged.book_id) {
-        const uint64_t total = static_cast<uint64_t>(previous.active_seconds) +
-                               static_cast<uint64_t>(merged.active_seconds);
-        merged.active_seconds = static_cast<uint32_t>(std::min<uint64_t>(total, 24u * 60u * 60u));
-    }
-    const std::string temporary = path + ".tmp";
-    FILE *file = std::fopen(temporary.c_str(), "wb");
-    if (!file) return false;
-    const bool ok = write_u32(file, PROGRESS_MAGIC) && write_string(file, merged.book_id) &&
-                    write_string(file, merged.chapter.uid) && write_string(file, merged.chapter.title) &&
-                    write_u32(file, static_cast<uint32_t>(merged.chapter.index)) &&
-                    write_u32(file, static_cast<uint32_t>(std::clamp(merged.percent, 0, 100))) &&
-                    write_u32(file, merged.active_seconds) &&
-                    write_u64(file, merged.chapter_offset) && write_string(file, merged.summary);
-    return commit(file, temporary, path, ok);
-}
-
-bool load_pending_progress(PendingProgress *progress)
+bool load_legacy_pending_progress(PendingProgress *progress)
 {
     if (!progress) return false;
     const std::string path = std::string(app_paths::weread_dir()) + "/pending_progress.bin";

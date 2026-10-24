@@ -1,6 +1,7 @@
 #include "weread/WereadContentSource.h"
 #include "weread/WereadOffline.h"
 #include "weread/AnnotationBoundaryIndex.h"
+#include "weread/WereadPosition.h"
 #include "utils/CooperativeYield.h"
 
 #include "parser/epub_parser.h"
@@ -423,6 +424,29 @@ bool load_chapter_content(const std::string &book_id, const Chapter &chapter,
         inject_annotations(annotations, xhtml);
     }
     return true;
+}
+
+bool resolve_progress_position(const std::string &book_id, const Chapter &chapter,
+                               const std::string &summary, uint64_t *offset,
+                               const char **reason)
+{
+    ChapterPayloadKind kind;
+    std::string path, source;
+    // Read pristine payloads only: injected comment markup and repackaged EPUB
+    // offsets are not the Web reader's original coordinate system.
+    auto fail = [&](const char *why) { if (reason) *reason = why; return false; };
+    if (!store::chapter_cached(book_id, chapter, &kind, &path)) return fail("chapter-cache-missing");
+    if (kind == ChapterPayloadKind::EpubZip) return fail("packaged-epub-position-unsupported");
+    if (!read_file(path, &source)) return fail("chapter-cache-read-failed");
+    const char *why = "ok";
+    const bool found = position::locate(source, summary, kind == ChapterPayloadKind::Xhtml, offset, &why);
+    if (reason) *reason = why;
+    ESP_LOGI(TAG, "progress position: found=%d reason=%s kind=%u source_bytes=%u excerpt_bytes=%u basis=%s co=%llu",
+             found, why, unsigned(kind), unsigned(source.size()), unsigned(summary.size()),
+             kind == ChapterPayloadKind::Txt ? "txt-utf16" :
+                 (source.find("data-wr-co") != std::string::npos ? "explicit" : "html-source-utf16"),
+             static_cast<unsigned long long>(found ? *offset : 0));
+    return found;
 }
 
 bool extract_resource(const std::string &book_id, const Chapter *chapter,

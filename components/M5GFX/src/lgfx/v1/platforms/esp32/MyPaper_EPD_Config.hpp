@@ -1,12 +1,18 @@
 ﻿#pragma once
 
-// S31 starts without phase producers until real-board transfer tests pass.
-// 304 bytes/row at 20 MHz plus 22 porch clocks needs more than 16 us.
+// S31 RGB transfers have passed real-board validation. Bound GC16/HD PSRAM
+// use with a 16-slot ring rather than allocating all distinct drive frames.
+// Start with full-ring preheat until concurrent producer throughput is tested.
+// S31 keeps 340 RGB clocks per row: 21.25 MHz gives P4's 16 us period.
 #if defined(CONFIG_IDF_TARGET_ESP32S31)
-#define MYPAPER_EPD_2D_GC16_PIPELINE 0
-#define MYPAPER_EPD_2D_DU4_PIPELINE 0
-#define MYPAPER_EPD_2D_LINE_PERIOD_US 17u
-#define MYPAPER_EPD_2D_CKV_HIGH_DUS 163u
+#define MYPAPER_EPD_2D_GC16_PIPELINE 1
+#define MYPAPER_EPD_2D_GC16_PIPELINE_SLOTS 16
+#define MYPAPER_EPD_2D_GC16_PIPELINE_PRIME 16
+#define MYPAPER_EPD_2D_HD_PIPELINE_PRIME 16
+#define MYPAPER_EPD_2D_DU4_PIPELINE 1
+#define MYPAPER_EPD_2D_PIXEL_CLOCK_HZ 21250000u
+#define MYPAPER_EPD_2D_LINE_PERIOD_US 16u
+#define MYPAPER_EPD_2D_CKV_HIGH_DUS 134u
 #endif
 
 // Skip PSRAM state reads for inactive 16-pixel groups. The original full-row
@@ -88,7 +94,7 @@
 // Prime a bounded GC16 frame ring before power-on, then render the remaining
 // unique phases on the same CPU core while GDMA scans the prepared frames.
 // The scan task has the higher priority and therefore keeps phase boundaries
-// deterministic.  DU4 remains on the validated full-precompute path for now.
+// deterministic. DU4 uses its separate pipeline and priming controls below.
 #ifndef MYPAPER_EPD_2D_GC16_PIPELINE
 #define MYPAPER_EPD_2D_GC16_PIPELINE 1
 #endif
@@ -290,7 +296,10 @@
 #define MYPAPER_EPD_PANEL_HEIGHT 684
 #define MYPAPER_EPD_OFFSET_ROTATION 3
 #if defined(CONFIG_IDF_TARGET_ESP32S31)
-#define MYPAPER_EPD_VCOM_MV 1200
+#define MYPAPER_EPD_VCOM_MV 1230
+#ifndef MYPAPER_EPD_S31_PARTIAL_OE_DEFAULT
+#define MYPAPER_EPD_S31_PARTIAL_OE_DEFAULT 1
+#endif
 #define MYPAPER_EPD_OUTPUT_PERMUTE 0
 #else
 #define MYPAPER_EPD_VCOM_MV 1050

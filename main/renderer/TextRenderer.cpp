@@ -81,6 +81,19 @@ static uint8_t *allocate_font_stream_window(size_t size,
     if (in_psram) *in_psram = false;
     if (dma_alignment) *dma_alignment = 0;
 
+#if CONFIG_IDF_TARGET_ESP32S31
+    // IDF 6.1 removed the legacy host.get_dma_info allocation interface.
+    // These buffers are consumed by POSIX read(), not submitted as raw DMA
+    // transactions. Let the FAT/SDMMC driver bounce buffers when required;
+    // do not claim DMA compatibility without a driver-provided contract.
+    void* buffer = heap_caps_aligned_alloc(64, size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buffer) {
+        if (in_psram) *in_psram = true;
+    } else {
+        buffer = heap_caps_aligned_alloc(64, size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    return static_cast<uint8_t*>(buffer);
+#else
     sdmmc_card_t *card = storage_sdcard_get_card();
     if (!card || !card->host.get_dma_info) return nullptr;
 
@@ -112,6 +125,7 @@ static uint8_t *allocate_font_stream_window(size_t size,
     }
     if (dma_compatible) *dma_compatible = true;
     return static_cast<uint8_t *>(buffer);
+#endif
 }
 
 static void *ft_caps_alloc(FT_Memory /*memory*/, long size)
@@ -855,7 +869,7 @@ void TextRenderer::initLookupTables()
     _glyph_lookup.assign(next_power_of_two((size_t)glyph_limit * 2), LookupSlot());
 }
 
-int TextRenderer::findLookup(const std::vector<LookupSlot> &table, uint32_t codepoint) const
+int TextRenderer::findLookup(const app_memory::Vector<LookupSlot> &table, uint32_t codepoint) const
 {
     if (table.empty()) return -1;
 
@@ -870,7 +884,7 @@ int TextRenderer::findLookup(const std::vector<LookupSlot> &table, uint32_t code
     return -1;
 }
 
-void TextRenderer::insertLookup(std::vector<LookupSlot> &table, uint32_t codepoint, uint16_t index)
+void TextRenderer::insertLookup(app_memory::Vector<LookupSlot> &table, uint32_t codepoint, uint16_t index)
 {
     if (table.empty()) return;
 
@@ -900,7 +914,7 @@ void TextRenderer::insertLookup(std::vector<LookupSlot> &table, uint32_t codepoi
     }
 }
 
-void TextRenderer::eraseLookup(std::vector<LookupSlot> &table, uint32_t codepoint)
+void TextRenderer::eraseLookup(app_memory::Vector<LookupSlot> &table, uint32_t codepoint)
 {
     if (table.empty()) return;
 
@@ -1708,7 +1722,7 @@ bool TextRenderer::compactGlyphCache(size_t needed_bytes)
         ++selected_count;
     }
 
-    std::vector<Glyph> kept;
+    app_memory::Vector<Glyph> kept;
     kept.reserve(selected_count);
     size_t new_used = 0;
     for (size_t idx = 0; idx < old_count; ++idx) {
@@ -1768,7 +1782,7 @@ bool TextRenderer::preparePage(const std::string &text)
         if (std::find(cps.begin(), cps.end(), cp) == cps.end()) cps.push_back(cp);
     }
 
-    _prepared_page_codepoints = cps;
+    _prepared_page_codepoints.assign(cps.begin(), cps.end());
 
     // Make room before glyph loading starts so pool relocation happens at a
     // page boundary, never halfway through the following draw pass.
@@ -1793,7 +1807,7 @@ bool TextRenderer::preparePage(const std::string &text)
                  (unsigned)estimated_need);
         if (!compactGlyphCache(estimated_need)) {
             clearGlyphCache();
-            _prepared_page_codepoints = cps;
+            _prepared_page_codepoints.assign(cps.begin(), cps.end());
         }
     }
 

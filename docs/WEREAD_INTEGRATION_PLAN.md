@@ -88,6 +88,8 @@ there is enough internal RAM to create the producer task.
    endpoint returns a complete EPUB package. Test a chapter containing both a
    baseline/progressive JPEG and PNG image.
 6. Exit after several page turns, reconnect, and check for the
-   `pending progress uploaded` log. Cookie values must never appear in logs.
+   `progress server-confirmed` log and cloud reading-time readback. An accepted
+   but unverified report remains queued. See `WEREAD_PROGRESS_SYNC.md`.
+   Cookie values must never appear in logs.
 7. Let `wr_skey` expire while retaining `wr_rt`; verify one renewal attempt.
    If renewal is rejected, the next shelf load must show a fresh QR login.

@@ -2,7 +2,14 @@
 
 #ifdef __cplusplus
 
+#if __has_include(<sdkconfig.h>)
+#include <sdkconfig.h>
+#endif
+#if CONFIG_IDF_TARGET_ESP32S31
+#include "M5UnifiedS31.hpp"
+#else
 #include "M5Unified.hpp"
+#endif
 
 #else
 

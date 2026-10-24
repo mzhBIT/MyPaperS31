@@ -1,0 +1,20 @@
+# Full application settings are shared with the P4 UI. Hardware-specific
+# options retain target dependencies in the shared configuration.
+rsource "../../../Kconfig.projbuild"
+
+menu "MyPaperS31 touch mapping"
+    config MYPAPER_S31_TOUCH_ROTATION
+        int "FT6336U mounting transform (0..7)"
+        range 0 7
+        default 1
+        help
+            The panel has offset_rotation=3. Transform 1 cancels it for a
+            portrait touch controller reporting X=0..683, Y=0..1215.
+            This changes touch mapping only, not screen orientation.
+    config MYPAPER_S31_TOUCH_MIRROR_X
+        bool "Mirror raw touch X axis"
+        default n
+    config MYPAPER_S31_TOUCH_MIRROR_Y
+        bool "Mirror raw touch Y axis"
+        default n
+endmenu

@@ -1,18 +1,25 @@
 #include "weread/WereadApi.h"
 
 #include "weread/WereadJson.h"
+#include "weread/WereadReport.h"
 #include "wifi/wifi_setting.h"
 
 #include <esp_log.h>
 #include "time/network_time.h"
 #include <esp_random.h>
 #include <freertos/FreeRTOS.h>
+#include <esp_idf_version.h>
+#if ESP_IDF_VERSION_MAJOR >= 6
+#include <psa/crypto.h>
+#else
 #include <mbedtls/sha256.h>
+#endif
 
 #include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <ctime>
+#include <sys/time.h>
 #include <string_view>
 
 namespace weread {
@@ -22,7 +29,6 @@ constexpr const char *TAG = "WEREAD_API";
 constexpr const char *WEB_HOST = "https://weread.qq.com";
 constexpr const char *GATEWAY_HOST = "https://i.weread.qq.com/api/agent/gateway";
 constexpr const char *SKILL_VERSION = "1.0.5";
-constexpr const char *READER_TOKEN = "3c5c8717f3daf09iop3423zafeqoi";
 constexpr const char *WEB_USER_AGENT =
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 "
@@ -105,7 +111,8 @@ std::string json_escape(const std::string &value)
     return output;
 }
 
-std::string params_json(const std::vector<std::pair<std::string, std::string>> &params)
+std::string params_json(const std::vector<std::pair<std::string, std::string>> &params,
+                        bool reading = false)
 {
     std::string body = "{";
     for (size_t i = 0; i < params.size(); ++i) {
@@ -116,7 +123,9 @@ std::string params_json(const std::vector<std::pair<std::string, std::string>> &
         // WeRead's signed chapter endpoint is type-sensitive. These fields
         // are JSON numbers in the web client; encoding them as strings makes
         // an otherwise correctly signed request return an empty object.
-        const bool numeric = key == "sc" || key == "st";
+        const bool numeric = key == "sc" || key == "st" || (reading &&
+            (key == "ci" || key == "co" || key == "pr" || key == "rt" ||
+             key == "ct" || key == "ts" || key == "rn"));
         const bool boolean = key == "prevChapter";
         if (numeric || boolean) body += value;
         else body += "\"" + json_escape(value) + "\"";
@@ -190,8 +199,10 @@ std::string utf8_prefix(std::string_view text, size_t max_chars)
             if ((static_cast<unsigned char>(text[offset + i]) & 0xc0) != 0x80) valid = false;
         }
         if (!valid) width = 1;
+        const size_t units = width == 4 ? 2 : 1;
+        if (count + units > max_chars) break;
         offset += width;
-        ++count;
+        count += units;
     }
     return std::string(text.substr(0, offset));
 }
@@ -249,7 +260,16 @@ std::string chapter_uid_json(const std::string &uid)
 std::string sha256_hex(const std::string &value)
 {
     uint8_t digest[32];
-    mbedtls_sha256(reinterpret_cast<const uint8_t *>(value.data()), value.size(), digest, 0);
+#if ESP_IDF_VERSION_MAJOR >= 6
+    size_t length = 0;
+    if (psa_crypto_init() != PSA_SUCCESS ||
+        psa_hash_compute(PSA_ALG_SHA_256, reinterpret_cast<const uint8_t *>(value.data()),
+                         value.size(), digest, sizeof(digest), &length) != PSA_SUCCESS ||
+        length != sizeof(digest)) return {};
+#else
+    if (mbedtls_sha256(reinterpret_cast<const uint8_t *>(value.data()), value.size(), digest, 0) != 0)
+        return {};
+#endif
     static const char hex[] = "0123456789abcdef";
     std::string output(64, '0');
     for (size_t i = 0; i < sizeof(digest); ++i) {
@@ -767,7 +787,7 @@ bool Api::fetch_psvts(const std::string &book_id, const std::string &chapter_uid
         *psvts = _psvts;
         return true;
     }
-    HttpResponse response = _client->get(*reader_url, *reader_url);
+    HttpResponse response = _client->get_html(*reader_url, *reader_url);
     if (!response.ok()) { if (error) *error = request_error("reader", response); return false; }
     ReaderState state;
     if (!extract_reader_state(response_view(response), &state)) {
@@ -886,27 +906,143 @@ bool Api::get_chapter(const std::string &book_id, const Chapter &chapter,
     return true;
 }
 
+bool Api::fetch_report_token(const std::string &referer, std::string *error)
+{
+    _reader_token.clear();
+    HttpResponse response = _client->get(std::string(WEB_HOST) + "/web/getConfig", referer);
+    if (!response.ok()) { if (error) *error = request_error("report config", response); return false; }
+    const auto root = response_view(response);
+    if (report::error_code(root) ||
+        !field_string(report::object(root), "token", &_reader_token) || _reader_token.empty()) {
+        if (error) *error = "report config unavailable errCode=" + std::to_string(report::error_code(root));
+        return false;
+    }
+    ESP_LOGI(TAG, "report config ready (token redacted)");
+    return true;
+}
+
+bool Api::get_progress(const std::string &book_id, RemoteProgress *progress, std::string *error)
+{
+    if (!_client || !progress || book_id.empty()) return false;
+    HttpResponse response = _client->get(std::string(WEB_HOST) +
+        "/web/book/getProgress?bookId=" + url_encode(book_id) + "&_=" +
+        std::to_string(int64_t(std::time(nullptr))*1000),
+        std::string(WEB_HOST) + "/web/reader/" + encode_id(book_id));
+    if (!response.ok()) { if (error) *error = request_error("progress readback", response); return false; }
+    const auto root = response_view(response);
+    if (report::error_code(root)) {
+        if (error) *error = "progress readback errCode=" + std::to_string(report::error_code(root));
+        return false;
+    }
+    const auto data = report::object(root);
+    std::string_view book;
+    const bool has_book = field_view(data, "book", &book);
+    if (has_book && book == "null") {
+        // Explicit absence is an unread book, unlike a missing/unknown schema.
+        *progress = RemoteProgress{};
+        progress->reading_seconds = 0; progress->percent = 0;
+        return true;
+    }
+    if (!has_book || book.empty() || book.front() != '{') {
+        if (error) *error = "progress readback has no book record";
+        return false;
+    }
+    RemoteProgress parsed;
+    field_string(book, "chapterUid", &parsed.chapter_uid);
+    const int64_t offset = field_int64(book, "chapterOffset", -1);
+    parsed.position_known = !parsed.chapter_uid.empty() && offset >= 0;
+    if (offset >= 0) parsed.chapter_offset = uint64_t(offset);
+    parsed.percent = field_int(book, "progress", -1);
+    parsed.reading_seconds = field_int64(book, "readingTime", -1);
+    parsed.update_time = field_int64(book, "updateTime", 0);
+    if (parsed.update_time > 100000000000LL) parsed.update_time /= 1000;
+    *progress = std::move(parsed);
+    return true;
+}
+
+std::vector<std::pair<std::string, std::string>> Api::reading_params(
+    const std::string &book_id, const Chapter &chapter, int percent,
+    uint64_t offset, const std::string &summary) const
+{
+    const int64_t now = std::time(nullptr);
+    return {
+        {"appId", web_app_id()}, {"b", encode_id(book_id)}, {"c", encode_id(chapter.uid)},
+        {"ci", std::to_string(chapter.index)}, {"co", std::to_string(offset)},
+        {"sm", utf8_prefix(summary,20)}, {"pr", std::to_string(percent)},
+        {"ct", std::to_string(now)}, {"ps", _psvts},
+        {"pc", _pclts.empty() || _pclts == "0" ? encode_id(std::to_string(now)) : _pclts},
+    };
+}
+
+bool Api::begin_reading(const std::string &book_id, const Chapter &chapter,
+                        int percent, uint64_t offset, const std::string &summary,
+                        std::string *error)
+{
+    _reader_entered = false;
+    if (!_client || !ensure_signed_request_time(error)) return false;
+    if (percent < 0) {
+        RemoteProgress cloud;
+        if (!get_progress(book_id,&cloud,error)) return false;
+        percent = cloud.percent;
+    }
+    if (percent < 0 || percent > 100) {
+        if (error) *error = "reading percentage unavailable";
+        return false;
+    }
+    std::string reader, ps;
+    if (!fetch_psvts(book_id,chapter.uid,&reader,&ps,error,false) ||
+        !fetch_report_token(reader,error)) return false;
+    // A fallback pc is fixed for the entire session, not regenerated per rt.
+    if (_pclts.empty() || _pclts == "0") _pclts = encode_id(std::to_string(std::time(nullptr)));
+    auto params = reading_params(book_id,chapter,percent,offset,summary);
+    params.push_back({"s",sign_query(sorted_query(params))});
+    HttpResponse response = _client->post_json_once(std::string(WEB_HOST)+"/web/book/read",
+                                                   params_json(params,true),reader);
+    const bool accepted = response.ok() && report::accepted(response_view(response));
+    ESP_LOGI(TAG,"reader session enter: book=%s http=%d accepted=%d errCode=%d offset=%llu",
+             book_id.c_str(),response.status,accepted,report::error_code(response_view(response)),
+             static_cast<unsigned long long>(offset));
+    _reader_entered = accepted;
+    if (!accepted && error) *error = "reading session entry not acknowledged";
+    return accepted;
+}
+
 bool Api::upload_progress(const std::string &book_id, const Chapter &chapter,
                           int progress_percent, uint32_t active_seconds,
                           uint64_t chapter_offset, const std::string &summary,
-                          std::string *error)
+                          std::string *error, ReportReceipt *receipt,
+                          const std::function<bool(const ReportReceipt&)> &checkpoint)
 {
-    if (!_client || book_id.empty() || chapter.uid.empty()) return false;
+    if (!_client || !receipt || !checkpoint || book_id.empty() || chapter.uid.empty()) return false;
     if (!ensure_signed_request_time(error)) return false;
-    std::string reader, psvts;
-    if (!fetch_psvts(book_id, chapter.uid, &reader, &psvts, error, false)) return false;
+    RemoteProgress before;
+    if (!get_progress(book_id, &before, error)) return false;
+    if (receipt->state != ReportReceipt::State::Ready) {
+        const bool verified = report::confirmed(*receipt, before);
+        ESP_LOGI(TAG, "report reconciliation: state=%u confirmed=%d seconds=%u cloud_rt=%lld",
+                 unsigned(receipt->state), verified, unsigned(receipt->seconds),
+                 static_cast<long long>(before.reading_seconds));
+        if (!verified && error) *error = "report awaiting server verification; not replayed";
+        return verified;
+    }
+    if (active_seconds && before.reading_seconds < 0) {
+        if (error) *error = "server reading-time baseline unavailable; report retained";
+        return false;
+    }
+    if (progress_percent < 0) progress_percent = before.percent;
+    if (progress_percent < 0 || progress_percent > 100) {
+        if (error) *error = "progress percentage unavailable; report retained";
+        return false;
+    }
+    if (!_reader_entered || _psvts_book != book_id || _reader_token.empty()) {
+        if (error) *error = "no live reading context; historical seconds not submitted";
+        return false;
+    }
+    const std::string reader = std::string(WEB_HOST)+"/web/reader/"+encode_id(book_id);
     const int64_t now = static_cast<int64_t>(std::time(nullptr));
-    const std::string pclts = _pclts.empty() || _pclts == "0"
-        ? encode_id(std::to_string(now)) : _pclts;
-    const std::string text = utf8_prefix(summary, 20);
-    std::vector<std::pair<std::string, std::string>> base = {
-        {"appId", web_app_id()}, {"b", encode_id(book_id)}, {"c", encode_id(chapter.uid)},
-        {"ci", std::to_string(chapter.index)}, {"co", std::to_string(chapter_offset)},
-        {"sm", text}, {"pr", std::to_string(std::clamp(progress_percent, 0, 100))},
-        {"ct", std::to_string(now)}, {"ps", psvts}, {"pc", pclts},
-    };
+    auto base = reading_params(book_id,chapter,progress_percent,chapter_offset,summary);
     auto post_read = [&](std::vector<std::pair<std::string, std::string>> params,
-                         const char *stage) -> bool {
+                         const char *stage, int *code) -> bool {
         params.push_back({"s", sign_query(sorted_query(params))});
         std::string body = "{";
         for (size_t i = 0; i < params.size(); ++i) {
@@ -918,35 +1054,67 @@ bool Api::upload_progress(const std::string &book_id, const Chapter &chapter,
             body += numeric ? params[i].second : "\"" + json_escape(params[i].second) + "\"";
         }
         body.push_back('}');
-        HttpResponse response = _client->post_json(std::string(WEB_HOST) + "/web/book/read", body, reader);
+        HttpResponse response = _client->post_json_once(std::string(WEB_HOST) + "/web/book/read", body, reader);
+        *code = report::error_code(response_view(response));
         if (!response.ok()) { if (error) *error = request_error(stage, response); return false; }
         const std::string_view root = response_view(response);
-        const int success = field_int(root, "succ", 0);
-        ESP_LOGI(TAG, "reader %s: succ=%d bytes=%u offset=%llu progress=%d rt=%u",
-                 stage, success, static_cast<unsigned>(response.size()),
+        const bool success = report::accepted(root);
+        ESP_LOGI(TAG, "reader %s: http=%d accepted=%d errCode=%d bytes=%u offset=%llu progress=%d rt=%u",
+                 stage, response.status, success, *code, static_cast<unsigned>(response.size()),
                  static_cast<unsigned long long>(chapter_offset), progress_percent,
-                 static_cast<unsigned>(active_seconds));
-        if (success != 1) {
-            if (error) *error = std::string(stage) + " update rejected";
+                 std::strcmp(stage,"report") == 0 ? static_cast<unsigned>(active_seconds) : 0U);
+        if (!success) {
+            if (error) *error = std::string(stage) + " not acknowledged errCode=" + std::to_string(*code);
             return false;
         }
         return true;
     };
-    if (!_reader_entered) {
-        if (!post_read(base, "enter")) return false;
-        _reader_entered = true;
+    int code = 0;
+    receipt->seconds = active_seconds;
+    receipt->reading_before = before.reading_seconds;
+    receipt->submitted_at = now;
+    receipt->chapter_uid = chapter.uid;
+    receipt->chapter_offset = chapter_offset;
+    receipt->percent = progress_percent;
+    for (unsigned attempt=0; attempt<2; ++attempt) {
+        timeval clock{};
+        gettimeofday(&clock, nullptr);
+        const int64_t timestamp_ms = int64_t(clock.tv_sec)*1000 + clock.tv_usec/1000;
+        const std::string timestamp = std::to_string(timestamp_ms);
+        const std::string random_text = std::to_string(esp_random()%1000);
+        auto params = base;
+        for (auto &param : params) if (param.first == "ct") param.second = std::to_string(timestamp_ms/1000);
+        params.push_back({"rt", std::to_string(active_seconds)});
+        params.push_back({"ts", timestamp});
+        params.push_back({"rn", random_text});
+        params.push_back({"sg", sha256_hex(timestamp + random_text + _reader_token)});
+        receipt->state = ReportReceipt::State::InFlight;
+        if (!checkpoint(*receipt)) { if (error) *error = "report journal write failed"; return false; }
+        code = 0;
+        const bool accepted = post_read(std::move(params), "report", &code);
+        if (!accepted && code) {
+            // Explicit rejection is not ambiguous. Only stale-token errors are
+            // retried, once; transport failures never replay reading seconds.
+            receipt->state = ReportReceipt::State::Ready;
+            if (!checkpoint(*receipt)) return false;
+            if (code == -2054 && attempt == 0 && fetch_report_token(reader, error)) continue;
+            return false;
+        }
+        if (accepted) {
+            receipt->state = ReportReceipt::State::Accepted;
+            if (!checkpoint(*receipt)) return false;
+        }
+        RemoteProgress after;
+        if (!get_progress(book_id, &after, error)) return false;
+        const bool verified = report::confirmed(*receipt, after);
+        ESP_LOGI(TAG, "report readback: accepted=%d confirmed=%d seconds=%u cloud_rt=%lld->%lld cloud_chapter=%s cloud_co=%llu",
+                 accepted, verified, unsigned(active_seconds),
+                 static_cast<long long>(before.reading_seconds), static_cast<long long>(after.reading_seconds),
+                 after.chapter_uid.c_str(),static_cast<unsigned long long>(after.chapter_offset));
+        if (!verified && error) *error = "report awaiting server verification; not replayed";
+        return verified;
     }
-    const uint32_t random = esp_random() % 1000;
-    const std::string timestamp = std::to_string(now * 1000 + random);
-    const std::string random_text = std::to_string(esp_random() % 1000);
-    std::vector<std::pair<std::string, std::string>> params = base;
-    params.push_back({"rt", std::to_string(active_seconds)});
-    params.push_back({"ts", timestamp});
-    params.push_back({"rn", random_text});
-    params.push_back({"sg", sha256_hex(timestamp + random_text +
-                                         (_reader_token.empty() ? READER_TOKEN : _reader_token))});
-    if (!post_read(std::move(params), "report")) return false;
-    return true;
+    return false;
 }
 
 }  // namespace weread

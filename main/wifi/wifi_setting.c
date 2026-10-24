@@ -7,7 +7,9 @@
 #include "esp_check.h"
 #include "esp_err.h"
 #include "esp_event.h"
+#if CONFIG_IDF_TARGET_ESP32P4
 #include "esp_hosted.h"
+#endif
 #include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -258,6 +260,10 @@ wifi_setting_network_mode_t wifi_setting_get_network_mode(void)
 
 esp_err_t wifi_setting_set_network_mode(wifi_setting_network_mode_t mode)
 {
+#if CONFIG_IDF_TARGET_ESP32S31
+    ESP_RETURN_ON_FALSE(mode == WIFI_SETTING_NETWORK_WIFI, ESP_ERR_NOT_SUPPORTED,
+                        TAG, "S31 ML307 backend is not adapted; keep native Wi-Fi selected");
+#endif
     ESP_RETURN_ON_FALSE(mode == WIFI_SETTING_NETWORK_WIFI ||
                             mode == WIFI_SETTING_NETWORK_CELLULAR,
                         ESP_ERR_INVALID_ARG, TAG, "Invalid network mode");
@@ -348,6 +354,10 @@ static esp_err_t wifi_setting_init_events(void)
 
 esp_err_t wifi_setting_c6_power_on(void)
 {
+#if CONFIG_IDF_TARGET_ESP32S31
+    s_c6_powered_on = true;
+    return ESP_OK;
+#else
     if (s_c6_powered_on) {
         return ESP_OK;
     }
@@ -361,10 +371,15 @@ esp_err_t wifi_setting_c6_power_on(void)
     vTaskDelay(pdMS_TO_TICKS(WIFI_SETTING_C6_BOOT_DELAY_MS));
     s_c6_powered_on = true;
     return ESP_OK;
+#endif
 }
 
 esp_err_t wifi_setting_c6_power_off(void)
 {
+#if CONFIG_IDF_TARGET_ESP32S31
+    s_c6_powered_on = false;
+    return ESP_OK;
+#else
     ESP_RETURN_ON_ERROR(gpio_reset_pin(WIFI_SETTING_C6_EN_GPIO), TAG, "Failed to reset C6 EN GPIO");
     ESP_RETURN_ON_ERROR(gpio_set_direction(WIFI_SETTING_C6_EN_GPIO, GPIO_MODE_OUTPUT),
                         TAG,
@@ -372,6 +387,7 @@ esp_err_t wifi_setting_c6_power_off(void)
     ESP_RETURN_ON_ERROR(gpio_set_level(WIFI_SETTING_C6_EN_GPIO, 0), TAG, "Failed to disable C6");
     s_c6_powered_on = false;
     return ESP_OK;
+#endif
 }
 
 esp_err_t wifi_setting_init(void)
@@ -399,7 +415,13 @@ esp_err_t wifi_setting_init(void)
 
     if (!s_wifi_initialized) {
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+#if CONFIG_IDF_TARGET_ESP32S31
+        wifi_setting_log_heap("driver-init-begin");
+#endif
         ESP_RETURN_ON_ERROR(esp_wifi_init(&cfg), TAG, "Failed to initialize Wi-Fi");
+#if CONFIG_IDF_TARGET_ESP32S31
+        wifi_setting_log_heap("driver-init-done");
+#endif
         s_wifi_initialized = true;
     }
 
@@ -718,10 +740,12 @@ esp_err_t wifi_setting_deinit(bool power_down_c6)
     s_connected_ssid[0] = '\0';
 
     if (power_down_c6) {
+#if CONFIG_IDF_TARGET_ESP32P4
         esp_err_t hosted_ret = esp_hosted_prepare_slave_power_down();
         if (hosted_ret != ESP_OK && first_error == ESP_OK) {
             first_error = hosted_ret;
         }
+#endif
         esp_err_t ret = wifi_setting_c6_power_off();
         if (ret != ESP_OK && first_error == ESP_OK) {
             first_error = ret;
@@ -731,7 +755,9 @@ esp_err_t wifi_setting_deinit(bool power_down_c6)
              * Keep the slave powered down long enough for queued events to be
              * discarded before another activity is allowed to boot it again.
              */
+#if CONFIG_IDF_TARGET_ESP32P4
             vTaskDelay(pdMS_TO_TICKS(WIFI_SETTING_C6_OFF_SETTLE_MS));
+#endif
         }
     }
 

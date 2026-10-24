@@ -1076,7 +1076,8 @@ public:
         }
         if (event.type != TouchEventType::Tap) return false;
         const Layout layout = make_layout(M5.Display.width());
-        if (event.y >= CONTROL_Y && event.y < CONTROL_Y + CONTROL_H) {
+        const int control_y = brightness_y();
+        if (event.y >= control_y && event.y < control_y + CONTROL_H) {
             if (event.x >= layout.minus_x && event.x < layout.minus_x + layout.button_w) change(-1);
             else if (event.x >= layout.plus_x && event.x < layout.plus_x + layout.button_w) change(1);
             else if (event.x >= layout.bar_x && event.x < layout.bar_x + layout.bar_area_w) {
@@ -1087,6 +1088,18 @@ public:
                 frontlight_set_level(level);
                 draw(false);
             }
+            return true;
+        }
+        if (frontlight_get_color_temperature() >= 0 &&
+            event.y >= temperature_y() && event.y < temperature_y() + CONTROL_H) {
+            int value = frontlight_get_color_temperature();
+            if (event.x >= layout.minus_x && event.x < layout.minus_x + layout.button_w) --value;
+            else if (event.x >= layout.plus_x && event.x < layout.plus_x + layout.button_w) ++value;
+            else if (event.x >= layout.bar_x && event.x < layout.bar_x + layout.bar_area_w)
+                value = ((event.x - layout.bar_x) * 10 + layout.bar_area_w - 1) / layout.bar_area_w;
+            else return false;
+            frontlight_set_color_temperature(std::clamp(value, 0, 10));
+            draw(false);
             return true;
         }
         return false;
@@ -1106,6 +1119,14 @@ public:
 private:
     static constexpr int CONTROL_Y = 350;
     static constexpr int CONTROL_H = 132;
+
+    static int brightness_y() {
+        return frontlight_get_color_temperature() >= 0
+            ? std::max(250, HEADER_H + 2 * system_font::line_height() + 70) : CONTROL_Y;
+    }
+    static int temperature_y() {
+        return brightness_y() + CONTROL_H + 48 + 2 * system_font::line_height() + 32;
+    }
 
     struct Layout {
         int minus_x;
@@ -1139,6 +1160,19 @@ private:
         draw(false);
     }
 
+    static void draw_controls(const Layout& layout, int y, int level) {
+        M5.Display.drawRoundRect(layout.minus_x, y, layout.button_w, CONTROL_H, 10, TFT_BLACK);
+        M5.Display.drawRoundRect(layout.plus_x, y, layout.button_w, CONTROL_H, 10, TFT_BLACK);
+        const int label_y = y + std::max(0, (CONTROL_H - system_font::line_height()) / 2);
+        system_font::draw_center(M5.Display, "-", layout.minus_x + layout.button_w / 2, label_y, TFT_BLACK);
+        system_font::draw_center(M5.Display, "+", layout.plus_x + layout.button_w / 2, label_y, TFT_BLACK);
+        for (int i = 0; i < 10; ++i) {
+            const int x = layout.bar_x + i * (layout.bar_w + layout.bar_gap);
+            if (i < level) M5.Display.fillRoundRect(x, y + 43, layout.bar_w, 46, 5, TFT_BLACK);
+            else M5.Display.drawRoundRect(x, y + 43, layout.bar_w, 46, 5, TFT_BLACK);
+        }
+    }
+
     void draw(bool quality)
     {
         const int level = frontlight_get_level();
@@ -1152,24 +1186,31 @@ private:
         system_font::draw_center(M5.Display, std::to_string(frontlight_get_percent()) + "%",
                                  width / 2, 180, TFT_BLACK);
 
-        M5.Display.drawRoundRect(layout.minus_x, CONTROL_Y, layout.button_w, CONTROL_H,
-                                 10, TFT_BLACK);
-        M5.Display.drawRoundRect(layout.plus_x, CONTROL_Y, layout.button_w, CONTROL_H,
-                                 10, TFT_BLACK);
-        system_font::draw_center(M5.Display, "-", layout.minus_x + layout.button_w / 2,
-                                 CONTROL_Y + 38, TFT_BLACK);
-        system_font::draw_center(M5.Display, "+", layout.plus_x + layout.button_w / 2,
-                                 CONTROL_Y + 38, TFT_BLACK);
-        for (int i = 0; i < 10; ++i) {
-            const int x = layout.bar_x + i * (layout.bar_w + layout.bar_gap);
-            const bool on = i < level;
-            if (on) M5.Display.fillRoundRect(x, CONTROL_Y + 43, layout.bar_w, 46, 5, TFT_BLACK);
-            else M5.Display.drawRoundRect(x, CONTROL_Y + 43, layout.bar_w, 46, 5, TFT_BLACK);
+        draw_controls(layout, brightness_y(), level);
+        const int temperature = frontlight_get_color_temperature();
+        int hint_y = 590;
+        if (temperature >= 0) {
+            using ui_locale::TextId;
+            const int title_y = brightness_y() + CONTROL_H + 48;
+            const int line = system_font::line_height();
+            system_font::draw_center(M5.Display, ui_locale::text(TextId::ColorTemperature), width / 2, title_y, TFT_BLACK);
+            const std::string value = temperature == 0 ? ui_locale::text(TextId::WarmLight) :
+                temperature == 5 ? ui_locale::text(TextId::NeutralLight) :
+                temperature == 10 ? ui_locale::text(TextId::CoolLight) :
+                std::to_string(10 - temperature) + " : " + std::to_string(temperature);
+            system_font::draw_center(M5.Display, value, width / 2, title_y + line + 12, TFT_BLACK);
+            draw_controls(layout, temperature_y(), temperature);
+            const int labels_y = temperature_y() + CONTROL_H + 16;
+            system_font::draw_left(M5.Display, ui_locale::text(TextId::WarmLight), layout.minus_x, labels_y, TFT_BLACK);
+            const std::string cool = ui_locale::text(TextId::CoolLight);
+            system_font::draw_right(M5.Display, cool, width - PAD, labels_y, TFT_BLACK);
+            hint_y = labels_y + line + 32;
         }
-        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::BrightnessStepHint),
-                                 width / 2, 590, TFT_DARKGRAY);
+        system_font::draw_center(M5.Display, ui_locale::text(temperature >= 0
+                                     ? ui_locale::TextId::BrightnessTenStepHint : ui_locale::TextId::BrightnessStepHint),
+                                 width / 2, hint_y, TFT_DARKGRAY);
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::FrontlightOffHint),
-                                 width / 2, 646, TFT_DARKGRAY);
+                                 width / 2, hint_y + system_font::line_height() + 12, TFT_DARKGRAY);
         M5.Display.display();
         M5.Display.endWrite();
     }
@@ -1298,7 +1339,7 @@ public:
             return true;
         }
         if (event.type != TouchEventType::Tap || event.y < ROW_Y ||
-            event.y >= ROW_Y + ROW_H * 3) return false;
+            event.y >= ROW_Y + ROW_H * ROW_COUNT) return false;
         _focus = (event.y - ROW_Y) / ROW_H;
         activate();
         return true;
@@ -1310,7 +1351,7 @@ public:
             return true;
         }
         if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
-            _focus = (_focus + (key == APP_KEY_DOWN ? 1 : 2)) % 3;
+            _focus = (_focus + (key == APP_KEY_DOWN ? 1 : ROW_COUNT - 1)) % ROW_COUNT;
             draw(false);
             return true;
         }
@@ -1322,7 +1363,12 @@ public:
     }
 private:
     static constexpr int ROW_Y = HEADER_H;
-    static constexpr int ROW_H = 210;
+#if CONFIG_IDF_TARGET_ESP32S31
+    static constexpr int ROW_COUNT = 4;
+#else
+    static constexpr int ROW_COUNT = 3;
+#endif
+    static constexpr int ROW_H = ROW_COUNT == 4 ? 180 : 210;
     int _focus = 0;
     bool _shown = false;
     std::string _status;
@@ -1334,9 +1380,33 @@ private:
             esp_err_t ret = time_basis_set_use_24_hour(!time_basis_use_24_hour());
             _status = ret == ESP_OK ? "" : esp_err_to_name(ret);
             draw(false);
-        } else {
+        } else if (_focus == 2) {
             ActivityManager::instance().push(new TimeBasisSettingsActivity());
+        } else {
+            set_manual_time();
         }
+    }
+
+    void set_manual_time()
+    {
+        using ui_locale::TextId;
+        TextInputOptions options;
+        options.title = ui_locale::text(TextId::ManualDateTime);
+        options.submit_label = ui_locale::text(TextId::Save);
+        options.start_in_chinese = false;
+        // Permit an overlong entry to be rejected, rather than silently
+        // accepting a truncated valid prefix.
+        options.max_bytes = 32;
+        char value[32]{};
+        const time_t now = time_basis_system_clock_valid() ? std::time(nullptr) : 1767225600;
+        time_basis_format_utc(now, value, sizeof(value), nullptr);
+        options.initial_text = value;
+        launch_text_input(options, [this](const std::string &input) {
+            const esp_err_t ret = network_time_set_manual(input.c_str());
+            _status = ui_locale::text(ret == ESP_OK ? TextId::ManualTimeSaved
+                : ret == ESP_ERR_INVALID_ARG ? TextId::ManualTimeInvalid : TextId::ManualTimeFailed);
+            // TextInput pops after this callback; on_show redraws this page.
+        });
     }
 
     void sync_network_time()
@@ -1378,7 +1448,8 @@ private:
         }
         const char *titles[] = {ui_locale::text(TextId::SyncTime),
                                 ui_locale::text(TextId::HourFormat),
-                                ui_locale::text(TextId::TimeBasis)};
+                                ui_locale::text(TextId::TimeBasis),
+                                ui_locale::text(TextId::ManualDateTime)};
         const std::string current_time = time_basis_system_clock_valid()
             ? std::string(datetime, 10) + " " + clock
             : ui_locale::text(TextId::TimeNotSet);
@@ -1386,8 +1457,9 @@ private:
             current_time,
             time_basis_use_24_hour() ? "24 h" : "12 h",
             time_basis_label(),
+            "YYYY/MM/DD HH:MM (2024-2099)",
         };
-        for (int i = 0; i < 3; ++i) {
+        for (int i = 0; i < ROW_COUNT; ++i) {
             const int top = ROW_Y + i * ROW_H;
             M5.Display.drawFastHLine(PAD, top + ROW_H - 1, width - 2 * PAD, TFT_BLACK);
             list_focus::draw(M5.Display, PAD, top, ROW_H, i == _focus);

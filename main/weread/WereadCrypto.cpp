@@ -3,7 +3,12 @@
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <mbedtls/base64.h>
+#include <esp_idf_version.h>
+#if ESP_IDF_VERSION_MAJOR >= 6
+#include <psa/crypto.h>
+#else
 #include <mbedtls/md5.h>
+#endif
 
 #include <algorithm>
 #include <cctype>
@@ -125,7 +130,14 @@ std::string md5_hex(const uint8_t *data, size_t size)
 {
     uint8_t digest[16] = {};
     if (!data && size) return {};
+#if ESP_IDF_VERSION_MAJOR >= 6
+    size_t length = 0;
+    if (psa_crypto_init() != PSA_SUCCESS ||
+        psa_hash_compute(PSA_ALG_MD5, data, size, digest, sizeof(digest), &length) != PSA_SUCCESS ||
+        length != sizeof(digest)) return {};
+#else
     if (mbedtls_md5(data, size, digest) != 0) return {};
+#endif
     char text[33] = {};
     for (int i = 0; i < 16; ++i) std::snprintf(text + i * 2, 3, "%02x", digest[i]);
     return text;

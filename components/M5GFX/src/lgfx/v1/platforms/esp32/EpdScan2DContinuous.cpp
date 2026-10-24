@@ -1,7 +1,8 @@
 #include "EpdScan2DContinuous.hpp"
 #include "MyPaper_EPD_Config.hpp"
+#include "EpdOeGateTest.h"
 
-#if defined(CONFIG_IDF_TARGET_ESP32P4) \
+#if (defined(CONFIG_IDF_TARGET_ESP32P4) || defined(CONFIG_IDF_TARGET_ESP32S31)) \
  && MYPAPER_EPD_USE_2D_ENGINE && MYPAPER_EPD_2D_CONTINUOUS_SCAN
 
 #include <algorithm>
@@ -34,12 +35,21 @@
 #include <soc/interrupts.h>
 #include <soc/io_mux_reg.h>
 #include <soc/lcd_cam_struct.h>
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+#include <hal/lcd_periph.h>
+#include <soc/gpio_struct.h>
+#include <esp_clk_tree.h>
+#include <esp_private/esp_clk_tree_common.h>
+#else
 #include <soc/lcd_periph.h>
+#endif
 #include <soc/soc_caps.h>
 
 // ESP32-P4's public esp_lcd RGB driver is disabled in IDF 5.3 even though the
 // LCD_CAM RGB timing registers and signals are present.  This backend uses the
 // public GDMA/RMT drivers and only the LCD HAL/LL register helpers.
+// S31 deliberately shares the same frame-start/stop and signal timing code;
+// only IDF6 DMA APIs, LCD clock setup and 8-bit geometry differ.
 
 namespace lgfx
 {
@@ -65,6 +75,15 @@ namespace lgfx
       rmt_channel_handle_t ckv_channel = nullptr;
       rmt_encoder_handle_t ckv_encoder = nullptr;
       SemaphoreHandle_t frame_done = nullptr;
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+      SemaphoreHandle_t dma_frame_done = nullptr;
+      rmt_channel_handle_t oe_channel = nullptr;
+      rmt_encoder_handle_t oe_encoder = nullptr;
+      rmt_sync_manager_handle_t oe_sync = nullptr;
+      uint32_t oe_rmt_route = 0;
+      uint16_t oe_first = 0, oe_end = 0;
+      bool oe_automatic = MYPAPER_EPD_S31_PARTIAL_OE_DEFAULT;
+#endif
       SemaphoreHandle_t producer_done[2] = {};
       SemaphoreHandle_t producer_space[2] = {};
       TaskHandle_t producer_tasks[2] = {};
@@ -74,6 +93,7 @@ namespace lgfx
       size_t frame_bytes = 0;
       size_t dma_node_count = 0;
       uint32_t line_period_us = MYPAPER_EPD_2D_LINE_PERIOD_US;
+      uint32_t pixel_clock_hz = MYPAPER_EPD_2D_PIXEL_CLOCK_HZ;
       size_t dma_alignment = 64;
       size_t line_bytes = 0;
       size_t bounce_bytes = 0;
@@ -93,6 +113,19 @@ namespace lgfx
     };
 
     continuous_scan_state_t scan_state;
+
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    static void abort_oe_test(continuous_scan_state_t* state)
+    {
+      if (!state->oe_sync) return;
+      // Cancels any pending encoder that still references a frame-local payload.
+      rmt_disable(state->oe_channel);
+      rmt_disable(state->ckv_channel);
+      gpio_set_level(static_cast<gpio_num_t>(state->bus.pin_oe), 0);
+      esp_rom_gpio_connect_out_signal(state->bus.pin_oe, SIG_GPIO_OUT_IDX, false, false);
+      ESP_LOGE(TAG, "OE test aborted; reboot before further scans");
+    }
+#endif
 
     static void IRAM_ATTR stream_fill_bounce(continuous_scan_state_t* state,
                                              uint8_t* output)
@@ -128,8 +161,16 @@ namespace lgfx
         gdma_channel_handle_t, gdma_event_data_t*, void* argument)
     {
       auto* state = static_cast<continuous_scan_state_t*>(argument);
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+      BaseType_t frame_wake = pdFALSE;
+      xSemaphoreGiveFromISR(state->dma_frame_done, &frame_wake);
+#endif
       if (!state->stream_active) {
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+        return frame_wake == pdTRUE;
+#else
         return false;
+#endif
       }
       const uint32_t index = __atomic_fetch_add(&state->bounce_eof_count, 1,
                                                 __ATOMIC_RELAXED) & 1u;
@@ -232,8 +273,17 @@ namespace lgfx
     static bool init_dma(continuous_scan_state_t* state)
     {
       gdma_channel_alloc_config_t channel_config = {};
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+      channel_config.flags.isr_cache_safe = true;
+#if SOC_GDMA_TRIG_PERIPH_LCD0_BUS == SOC_GDMA_BUS_AHB
+      esp_err_t err = gdma_new_ahb_channel(&channel_config, &state->dma_channel, nullptr);
+#else
+      esp_err_t err = gdma_new_axi_channel(&channel_config, &state->dma_channel, nullptr);
+#endif
+#else
       channel_config.direction = GDMA_CHANNEL_DIRECTION_TX;
       esp_err_t err = gdma_new_axi_channel(&channel_config, &state->dma_channel);
+#endif
       if (err != ESP_OK) {
         ESP_LOGE(TAG, "gdma_new_axi_channel failed: %s", esp_err_to_name(err));
         return false;
@@ -248,6 +298,9 @@ namespace lgfx
       gdma_strategy_config_t strategy = {};
       strategy.auto_update_desc = true;
       strategy.owner_check = true;
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+      strategy.eof_till_data_popped = false;
+#endif
       if ((err = gdma_apply_strategy(state->dma_channel, &strategy)) != ESP_OK) {
         ESP_LOGE(TAG, "gdma_apply_strategy failed: %s", esp_err_to_name(err));
         return false;
@@ -276,7 +329,11 @@ namespace lgfx
       state->dma_node_count = node_count;
       gdma_link_list_config_t links = {};
       links.num_items = node_count;
-      links.item_alignment = 8; // AXI GDMA descriptor alignment on ESP32-P4.
+#if defined(CONFIG_IDF_TARGET_ESP32S31) && SOC_GDMA_TRIG_PERIPH_LCD0_BUS == SOC_GDMA_BUS_AHB
+      links.item_alignment = 4;
+#else
+      links.item_alignment = 8;
+#endif
       links.flags.check_owner = true;
       if ((err = gdma_new_link_list(&links, &state->dma_links)) != ESP_OK) {
         ESP_LOGE(TAG, "gdma_new_link_list(%u) failed: %s",
@@ -297,7 +354,7 @@ namespace lgfx
 
     static bool init_streaming(continuous_scan_state_t* state)
     {
-      state->line_bytes = state->active_words * sizeof(uint16_t);
+      state->line_bytes = state->active_words * (state->bus.bus_width / 8);
       state->bounce_bytes = state->line_bytes * STREAM_BOUNCE_LINES;
       for (unsigned i = 0; i < 2; ++i) {
         state->bounce_buffers[i] = static_cast<uint8_t*>(
@@ -387,12 +444,55 @@ namespace lgfx
       return true;
     }
 
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    static bool init_oe(continuous_scan_state_t* state)
+    {
+      // IDF6 binds all RMT channel IRQs by module name. They MUST be allocated
+      // on the same CPU as CKV, not lazily from the core-1 scan task.
+      rmt_tx_channel_config_t channel{};
+      channel.gpio_num = static_cast<gpio_num_t>(state->bus.pin_oe);
+      channel.clk_src = RMT_CLK_SRC_DEFAULT;
+      channel.resolution_hz = RMT_RESOLUTION_HZ;
+      channel.mem_block_symbols = 48;
+      channel.trans_queue_depth = 1;
+      channel.flags.init_level = 0;
+      rmt_copy_encoder_config_t encoder{};
+      esp_err_t err = rmt_new_tx_channel(&channel, &state->oe_channel);
+      if (err == ESP_OK) err = rmt_new_copy_encoder(&encoder, &state->oe_encoder);
+      bool enabled = false;
+      if (err == ESP_OK) {
+        err = rmt_enable(state->oe_channel);
+        enabled = err == ESP_OK;
+      }
+      if (err == ESP_OK) state->oe_rmt_route = GPIO.func_out_sel_cfg[state->bus.pin_oe].val;
+      // Reserve the peripheral/IRQ, not ownership of the pin between scans.
+      gpio_set_level(static_cast<gpio_num_t>(state->bus.pin_oe), 0);
+      esp_rom_gpio_connect_out_signal(state->bus.pin_oe, SIG_GPIO_OUT_IDX, false, false);
+      if (err != ESP_OK) {
+        if (state->oe_channel) {
+          if (enabled) rmt_disable(state->oe_channel);
+          rmt_del_channel(state->oe_channel); state->oe_channel = nullptr;
+        }
+        if (state->oe_encoder) { rmt_del_encoder(state->oe_encoder); state->oe_encoder = nullptr; }
+        ESP_LOGW(TAG, "OE RMT init failed: %s; automatic gating disabled", esp_err_to_name(err));
+        return false;
+      }
+      ESP_LOGI(TAG, "OE RMT initialized with CKV on CPU%d; channel retained, pin idle=GPIO",
+               xPortGetCoreID());
+      return true;
+    }
+#endif
+
     static bool init_lcd(continuous_scan_state_t* state)
     {
-      // ESP32-P4 no longer implements periph_module_enable/reset.  Acquire the
-      // LCD_CAM RCC reference exactly as IDF's I80 driver does, but configure
-      // the peripheral in RGB timing mode below.
-      PERIPH_RCC_ACQUIRE_ATOMIC(lcd_periph_i80_signals.buses[0].module,
+      // Acquire the LCD_CAM RCC reference through the chip's signal table,
+      // then configure RGB timing directly rather than create a panel driver.
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+      const auto lcd_module = soc_lcd_rgb_signals[0].module;
+#else
+      const auto lcd_module = lcd_periph_i80_signals.buses[0].module;
+#endif
+      PERIPH_RCC_ACQUIRE_ATOMIC(lcd_module,
                                 ref_count) {
         if (ref_count == 0) {
           lcd_ll_enable_bus_clock(0, true);
@@ -401,6 +501,36 @@ namespace lgfx
       }
       lcd_hal_init(&state->lcd_hal, 0);
 
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+      // Use the same HAL/LL scan controls as P4. S31 alone needs its LCD
+      // trans-buffer powered and a fractional divider for the 8-bit bus.
+      lcd_ll_mem_set_low_power_mode(state->lcd_hal.dev, LCD_LL_MEM_LP_MODE_SHUT_DOWN);
+      lcd_ll_mem_power_by_pmu(state->lcd_hal.dev);
+      lcd_ll_enable_trans_buffer(state->lcd_hal.dev, true);
+      if (esp_clk_tree_enable_src(SOC_MOD_CLK_PLL_F160M, true) != ESP_OK) return false;
+      uint32_t source_hz = 0;
+      if (esp_clk_tree_src_get_freq_hz(SOC_MOD_CLK_PLL_F160M,
+              ESP_CLK_TREE_SRC_FREQ_PRECISION_CACHED, &source_hz) != ESP_OK) return false;
+      PERIPH_RCC_ATOMIC() {
+        lcd_ll_enable_clock(state->lcd_hal.dev, true);
+        lcd_ll_select_clk_src(state->lcd_hal.dev, LCD_CLK_SRC_PLL160M);
+      }
+      hal_utils_clk_div_t divider = {};
+      state->pixel_clock_hz = lcd_hal_cal_pclk_freq(&state->lcd_hal,
+          source_hz, MYPAPER_EPD_2D_PIXEL_CLOCK_HZ, &divider);
+      if (state->pixel_clock_hz != MYPAPER_EPD_2D_PIXEL_CLOCK_HZ) {
+        ESP_LOGE(TAG, "S31 pixel clock is not exact: requested=%lu actual=%lu",
+                 (unsigned long)MYPAPER_EPD_2D_PIXEL_CLOCK_HZ,
+                 (unsigned long)state->pixel_clock_hz);
+        return false;
+      }
+      PERIPH_RCC_ATOMIC() {
+        lcd_ll_enable_clock(state->lcd_hal.dev, true);
+        lcd_ll_select_clk_src(state->lcd_hal.dev, LCD_CLK_SRC_PLL160M);
+        lcd_ll_set_group_clock_coeff(state->lcd_hal.dev,
+            divider.integer, divider.denominator, divider.numerator);
+      }
+#else
       PERIPH_RCC_ATOMIC() {
         lcd_ll_enable_clock(state->lcd_hal.dev, true);
         lcd_ll_select_clk_src(state->lcd_hal.dev, LCD_CLK_SRC_PLL160M);
@@ -408,6 +538,7 @@ namespace lgfx
         lcd_ll_set_group_clock_coeff(state->lcd_hal.dev, 2, 0, 0);
       }
       lcd_ll_set_pixel_clock_prescale(state->lcd_hal.dev, 4);
+#endif
       lcd_ll_reset(state->lcd_hal.dev);
       lcd_ll_fifo_reset(state->lcd_hal.dev);
       lcd_ll_set_clock_idle_level(state->lcd_hal.dev, false);
@@ -415,17 +546,32 @@ namespace lgfx
       lcd_ll_enable_rgb_mode(state->lcd_hal.dev, true);
       lcd_ll_set_dma_read_stride(state->lcd_hal.dev, state->bus.bus_width);
       lcd_ll_set_data_wire_width(state->lcd_hal.dev, state->bus.bus_width);
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+      lcd_ll_enable_color_convert(state->lcd_hal.dev, false);
+#endif
       lcd_ll_set_phase_cycles(state->lcd_hal.dev, 0, 0, 1);
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+      // IDF6's S31 RGB initialization uses DMA-sized data output. A literal
+      // one-cycle data phase must not truncate the 8-bit source stream.
+      // VSYNC ISR below still stops the LCD at the end of this ONE frame.
+      lcd_ll_enable_output_always_on(state->lcd_hal.dev, true);
+#else
       lcd_ll_enable_output_always_on(state->lcd_hal.dev, false);
+#endif
       // LE is active high, STH/DE is active low, matching the working I80 CS.
       lcd_ll_set_idle_level(state->lcd_hal.dev, false, true, true);
       lcd_ll_set_blank_cycles(state->lcd_hal.dev, 1, 1);
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+      // Keep the LE raster framing used by IDF6's working RGB backend.
+      // LE is a physical latch clock here, not an unused display HSYNC.
+      lcd_ll_enable_output_hsync_in_porch_region(state->lcd_hal.dev, true);
+#else
       lcd_ll_enable_output_hsync_in_porch_region(state->lcd_hal.dev, false);
+#endif
       lcd_ll_enable_auto_next_frame(state->lcd_hal.dev, false);
 
       const uint32_t total_line_clocks =
-          (MYPAPER_EPD_2D_PIXEL_CLOCK_HZ / 1000000u)
-          * state->line_period_us;
+          uint64_t(state->pixel_clock_hz) * state->line_period_us / 1000000u;
       const uint32_t fixed_clocks = MYPAPER_EPD_2D_LE_HIGH_PCLKS
                                   + MYPAPER_EPD_2D_LINE_FRONT_PCLKS
                                   + state->active_words;
@@ -442,8 +588,15 @@ namespace lgfx
                                    state->active_words,
                                    remaining_clocks);
       lcd_ll_set_vertical_timing(state->lcd_hal.dev, 1, 0, state->rows, 1);
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+      lcd_ll_set_hsync_position(state->lcd_hal.dev, 0);
+#else
       lcd_ll_set_hsync_position(state->lcd_hal.dev, 1);
+#endif
 
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+      const int* data_signals = soc_lcd_rgb_signals[0].data_sigs;
+#else
       static constexpr int data_signals[16] = {
         LCD_DATA_OUT_PAD_OUT0_IDX,  LCD_DATA_OUT_PAD_OUT1_IDX,
         LCD_DATA_OUT_PAD_OUT2_IDX,  LCD_DATA_OUT_PAD_OUT3_IDX,
@@ -454,20 +607,33 @@ namespace lgfx
         LCD_DATA_OUT_PAD_OUT12_IDX, LCD_DATA_OUT_PAD_OUT13_IDX,
         LCD_DATA_OUT_PAD_OUT14_IDX, LCD_DATA_OUT_PAD_OUT15_IDX,
       };
+#endif
       for (unsigned i = 0; i < state->bus.bus_width; ++i) {
         connect_lcd_signal(state->bus.pin_data[i], data_signals[i]);
       }
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+      connect_lcd_signal(state->bus.pin_cl, soc_lcd_rgb_signals[0].pclk_sig);
+      connect_lcd_signal(state->bus.pin_le, soc_lcd_rgb_signals[0].hsync_sig);
+      connect_lcd_signal(state->bus.pin_sph, soc_lcd_rgb_signals[0].de_sig);
+#else
       connect_lcd_signal(state->bus.pin_cl, LCD_PCLK_PAD_OUT_IDX);
       connect_lcd_signal(state->bus.pin_le, LCD_H_SYNC_PAD_OUT_IDX);
       connect_lcd_signal(state->bus.pin_sph, LCD_H_ENABLE_PAD_OUT_IDX);
+#endif
       gpio_set_direction(static_cast<gpio_num_t>(state->bus.pin_spv), GPIO_MODE_OUTPUT);
       gpio_set_level(static_cast<gpio_num_t>(state->bus.pin_spv), 1);
 
-      lcd_ll_enable_interrupt(state->lcd_hal.dev, LCD_LL_EVENT_VSYNC_END, true);
+      PERIPH_RCC_ATOMIC() {
+        lcd_ll_enable_interrupt(state->lcd_hal.dev, LCD_LL_EVENT_VSYNC_END, true);
+      }
       lcd_ll_clear_interrupt_status(state->lcd_hal.dev, UINT32_MAX);
       const int flags = ESP_INTR_FLAG_IRAM | ESP_INTR_FLAG_SHARED | ESP_INTR_FLAG_LOWMED;
       const esp_err_t err = esp_intr_alloc_intrstatus(
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+          soc_lcd_rgb_signals[0].irq_id, flags,
+#else
           ETS_LCD_CAM_INTR_SOURCE, flags,
+#endif
           reinterpret_cast<uint32_t>(lcd_ll_get_interrupt_status_reg(state->lcd_hal.dev)),
           LCD_LL_EVENT_VSYNC_END, lcd_frame_isr, state, &state->lcd_interrupt);
       if (err != ESP_OK) {
@@ -485,7 +651,7 @@ namespace lgfx
     if (state->initialized) {
       return true;
     }
-    if (config.bus_width != 16 || (panel_width & 7) != 0
+    if ((config.bus_width != 16 && config.bus_width != 8) || (panel_width & 15) != 0
      || panel_width == 0 || panel_height == 0) {
       ESP_LOGE(TAG, "unsupported continuous geometry: %ux%u bus=%u",
                (unsigned)panel_width, (unsigned)panel_height,
@@ -494,11 +660,18 @@ namespace lgfx
     }
 
     state->bus = config;
-    state->active_words = panel_width >> 3; // eight 2-bit EPD pixels per 16-bit word
+    state->active_words = panel_width * 2 / config.bus_width; // bus transfers per row
     state->rows = panel_height;
-    state->frame_bytes = state->active_words * sizeof(uint16_t) * state->rows;
+    state->frame_bytes = (panel_width >> 2) * state->rows;
     state->line_period_us = MYPAPER_EPD_2D_LINE_PERIOD_US;
     state->frame_done = xSemaphoreCreateBinary();
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    state->dma_frame_done = xSemaphoreCreateBinary();
+    if (!state->dma_frame_done) {
+      ESP_LOGE(TAG, "DMA completion semaphore allocation failed");
+      return false;
+    }
+#endif
     if (state->frame_done == nullptr) {
       ESP_LOGE(TAG, "frame semaphore allocation failed");
       return false;
@@ -510,10 +683,16 @@ namespace lgfx
      || !init_lcd(state) || !init_ckv(state)) {
       return false;
     }
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    if (!init_oe(state)) state->oe_automatic = false;
+#endif
     state->initialized = true;
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    ESP_LOGI(TAG, "S31 partial OE default=%s guard_rows=8 startup_rows=3",
+             state->oe_automatic ? "on" : "off");
+#endif
     const uint32_t total_line_clocks =
-        (MYPAPER_EPD_2D_PIXEL_CLOCK_HZ / 1000000u)
-        * state->line_period_us;
+        uint64_t(state->pixel_clock_hz) * state->line_period_us / 1000000u;
     const uint32_t line_end_clocks = total_line_clocks
         - MYPAPER_EPD_2D_LE_HIGH_PCLKS
         - MYPAPER_EPD_2D_LINE_FRONT_PCLKS
@@ -522,7 +701,7 @@ namespace lgfx
              "continuous scan ready: active=%u words rows=%u frame=%u bytes pclk=%lu Hz line=%lu us h=%u/%u/%u/%lu CKV=%lu.%lu us",
              (unsigned)state->active_words, (unsigned)state->rows,
              (unsigned)state->frame_bytes,
-             (unsigned long)MYPAPER_EPD_2D_PIXEL_CLOCK_HZ,
+             (unsigned long)state->pixel_clock_hz,
              (unsigned long)state->line_period_us,
              (unsigned)MYPAPER_EPD_2D_LE_HIGH_PCLKS,
              (unsigned)MYPAPER_EPD_2D_LINE_FRONT_PCLKS,
@@ -540,13 +719,14 @@ namespace lgfx
       ESP_LOGW(TAG, "line timing change rejected before scan initialization");
       return false;
     }
-    const uint32_t clocks_per_us = MYPAPER_EPD_2D_PIXEL_CLOCK_HZ / 1000000u;
     const uint32_t fixed_clocks = MYPAPER_EPD_2D_LE_HIGH_PCLKS
                                 + MYPAPER_EPD_2D_LINE_FRONT_PCLKS
                                 + state->active_words;
-    const uint32_t total_line_clocks = clocks_per_us * line_period_us;
+    const uint64_t clock_product = uint64_t(state->pixel_clock_hz) * line_period_us;
+    const uint32_t total_line_clocks = clock_product / 1000000u;
     if (line_period_us < 10 || line_period_us > 30
-     || total_line_clocks <= fixed_clocks) {
+     || clock_product % 1000000u != 0 || total_line_clocks <= fixed_clocks
+     || MYPAPER_EPD_2D_CKV_HIGH_DUS >= line_period_us * 10u) {
       ESP_LOGE(TAG, "invalid runtime line timing: %lu us total=%lu fixed=%lu",
                (unsigned long)line_period_us, (unsigned long)total_line_clocks,
                (unsigned long)fixed_clocks);
@@ -575,6 +755,78 @@ namespace lgfx
   uint32_t epd2d_continuous_scan_get_line_period_us()
   {
     return scan_state.initialized ? scan_state.line_period_us : 0;
+  }
+
+  bool epd2d_continuous_scan_set_oe_test_window(uint16_t first, uint16_t end)
+  {
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    auto* state = &scan_state;
+    if (!state->initialized || end > state->rows || first > end
+        || (first == end && end != 0)) return false;
+    if (end && state->oe_sync) {
+      state->oe_first = first; state->oe_end = end;
+      return true;
+    }
+    // UI drains the complete display batch before entering this function.
+    if (state->oe_sync) { rmt_del_sync_manager(state->oe_sync); state->oe_sync = nullptr; }
+    state->oe_first = state->oe_end = 0;
+    gpio_set_level(static_cast<gpio_num_t>(state->bus.pin_oe), 0);
+    esp_rom_gpio_connect_out_signal(state->bus.pin_oe, SIG_GPIO_OUT_IDX, false, false);
+    if (end == 0) return true;
+
+    if (!state->oe_channel || !state->oe_encoder) return false;
+    rmt_channel_handle_t channels[] = {state->ckv_channel, state->oe_channel};
+    rmt_sync_manager_config_t sync{};
+    sync.tx_channel_array = channels;
+    sync.array_size = 2;
+    const esp_err_t err = rmt_new_sync_manager(&sync, &state->oe_sync);
+    if (err != ESP_OK) {
+      ESP_LOGE(TAG, "OE test unavailable: %s", esp_err_to_name(err));
+      epd2d_continuous_scan_set_oe_test_window(0, 0);
+      return false;
+    }
+    GPIO.func_out_sel_cfg[state->bus.pin_oe].val = state->oe_rmt_route;
+    state->oe_first = first; state->oe_end = end;
+    ESP_LOGD(TAG, "OE row gate armed: physical_rows=%u..%u guard=8 startup=3", first, end);
+    return true;
+#else
+    return first == 0 && end == 0;
+#endif
+  }
+
+  void epd2d_continuous_scan_set_oe_automatic(bool enabled)
+  {
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    scan_state.oe_automatic = enabled && scan_state.oe_channel != nullptr;
+#else
+    (void)enabled;
+#endif
+  }
+
+  bool epd2d_continuous_scan_prepare_oe_update(uint16_t first, uint16_t end)
+  {
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    if (!scan_state.oe_automatic) return true; // Diagnostic A/B owns OE.
+    // Whole-row-range updates (including portrait status-bar updates) cannot
+    // be isolated by source OE. Also skip if guards cover all physical rows.
+    if (first <= 8 && size_t(end) + 8 >= scan_state.rows) {
+      return epd2d_continuous_scan_set_oe_test_window(0, 0);
+    }
+    return epd2d_continuous_scan_set_oe_test_window(first, end);
+#else
+    (void)first; (void)end;
+    return true;
+#endif
+  }
+
+  void epd2d_continuous_scan_finish_oe_update()
+  {
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    // Restore GPIO ownership after rails are off, so VCOM measurement and
+    // every other board-level OE operation still work between batches.
+    if (scan_state.oe_automatic && scan_state.oe_sync)
+      epd2d_continuous_scan_set_oe_test_window(0, 0);
+#endif
   }
 
   bool epd2d_continuous_scan_frame(const uint8_t* data, size_t length,
@@ -636,13 +888,23 @@ namespace lgfx
     mount.buffer_alignment = state->dma_alignment;
     mount.length = length;
     mount.flags.mark_eof = true;
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    mount.flags.mark_final = GDMA_FINAL_LINK_TO_NULL;
+#else
     mount.flags.mark_final = true;
+#endif
     if ((err = gdma_link_mount_buffers(state->dma_links, 0, &mount, 1, nullptr)) != ESP_OK) {
       ESP_LOGE(TAG, "frame DMA mount failed: %s", esp_err_to_name(err));
       return false;
     }
 
     while (xSemaphoreTake(state->frame_done, 0) == pdTRUE) {}
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    while (xSemaphoreTake(state->dma_frame_done, 0) == pdTRUE) {}
+    // esp_lcd's S31 on-demand refresh resets the raster state on EVERY
+    // transmission. FIFO reset alone does not reset the line/frame state.
+    lcd_ll_reset(state->lcd_hal.dev);
+#endif
     lcd_ll_fifo_reset(state->lcd_hal.dev);
     lcd_ll_clear_interrupt_status(state->lcd_hal.dev, UINT32_MAX);
     lcd_ll_enable_auto_next_frame(state->lcd_hal.dev, false);
@@ -665,11 +927,41 @@ namespace lgfx
     transmit.flags.eot_level = 0;
 
     const int64_t scan_begin = esp_timer_get_time();
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    // Both channels remain armed until the SECOND rmt_transmit, so OE and
+    // CKV have one hardware start edge. No RTOS timer or per-row ISR.
+    rmt_symbol_word_t oe_symbols[16]{};
+    if (state->oe_sync) {
+      lgfx_epd_oe_test::Pulse pulses[32];
+      const size_t count = lgfx_epd_oe_test::build(pulses, 32, state->rows,
+          state->line_period_us * 10u, state->oe_first, state->oe_end);
+      if (!count) return false;
+      for (size_t i = 0; i < count; i += 2) {
+        oe_symbols[i/2].duration0 = pulses[i].ticks;
+        oe_symbols[i/2].level0 = pulses[i].level;
+        oe_symbols[i/2].duration1 = pulses[i+1].ticks;
+        oe_symbols[i/2].level1 = pulses[i+1].level;
+      }
+      rmt_transmit_config_t oe_transmit{};
+      oe_transmit.flags.eot_level = 0;
+      err = rmt_sync_reset(state->oe_sync);
+      if (err == ESP_OK) err = rmt_transmit(state->oe_channel, state->oe_encoder,
+          oe_symbols, count/2 * sizeof(rmt_symbol_word_t), &oe_transmit);
+      if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OE test arm failed: %s", esp_err_to_name(err));
+        abort_oe_test(state);
+        return false;
+      }
+    }
+#endif
     gpio_set_level(static_cast<gpio_num_t>(state->bus.pin_spv), 0);
     if ((err = rmt_transmit(state->ckv_channel, state->ckv_encoder,
                             &ckv_symbol, sizeof(ckv_symbol), &transmit)) != ESP_OK) {
       gpio_set_level(static_cast<gpio_num_t>(state->bus.pin_spv), 1);
       ESP_LOGE(TAG, "CKV start failed: %s", esp_err_to_name(err));
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+      abort_oe_test(state);
+#endif
       return false;
     }
     // Match epdiy's frame-start sequence: STV low for one row, high for one
@@ -683,10 +975,31 @@ namespace lgfx
     const bool completed = xSemaphoreTake(state->frame_done,
                                            pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
     lcd_ll_stop(state->lcd_hal.dev);
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    // VSYNC proves raster timing completed, NOT that all source bytes were
+    // consumed. A truncated transfer must fail closed instead of committing
+    // an incorrect physical framebuffer and compounding ghosts next refresh.
+    const bool dma_completed = xSemaphoreTake(state->dma_frame_done,
+                                                pdMS_TO_TICKS(20)) == pdTRUE;
+    if (!dma_completed) {
+      gdma_stop(state->dma_channel);
+      rmt_tx_wait_all_done(state->ckv_channel, 20);
+      abort_oe_test(state);
+      ESP_LOGE(TAG, "S31 raster ended without full-frame DMA EOF; scan rejected");
+      return false;
+    }
+#endif
     gpio_set_level(static_cast<gpio_num_t>(state->bus.pin_spv), 1);
     const uint32_t elapsed = static_cast<uint32_t>(esp_timer_get_time() - scan_begin);
     if (scan_time_us) { *scan_time_us = elapsed; }
     const esp_err_t rmt_wait = rmt_tx_wait_all_done(state->ckv_channel, 20);
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    if (state->oe_sync && (rmt_wait != ESP_OK || rmt_tx_wait_all_done(state->oe_channel, 20) != ESP_OK)) {
+      // Never allow an incomplete gate transaction to leak into another phase.
+      abort_oe_test(state);
+      return false;
+    }
+#endif
     if (!completed) {
       ESP_LOGE(TAG, "continuous frame timeout after %lu us",
                (unsigned long)elapsed);
@@ -860,6 +1173,15 @@ namespace lgfx
   {
     return false;
   }
+
+  bool epd2d_continuous_scan_set_oe_test_window(uint16_t first, uint16_t end)
+  {
+    return first == 0 && end == 0;
+  }
+
+  void epd2d_continuous_scan_set_oe_automatic(bool) {}
+  bool epd2d_continuous_scan_prepare_oe_update(uint16_t, uint16_t) { return true; }
+  void epd2d_continuous_scan_finish_oe_update() {}
 
   bool epd2d_continuous_scan_stream(
       Bus_EPD::epd_2d_line_renderer_t, void*, uint32_t,

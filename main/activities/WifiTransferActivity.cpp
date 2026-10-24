@@ -11,6 +11,7 @@
 #include "wifi/wifi_setting.h"
 
 #include <M5Unified.h>
+#include <sdkconfig.h>
 #include <dirent.h>
 #include <errno.h>
 #include <esp_dma_utils.h>
@@ -40,7 +41,51 @@ static const char *TAG = "WIFI_TRANSFER";
 static const char *AP_PASSWORD = "12345678";
 static const size_t UPLOAD_BUFFER_BYTES = 64 * 1024;
 static const size_t FILE_WRITE_BUFFER_BYTES = 64 * 1024;
+#if CONFIG_IDF_TARGET_ESP32S31
+static constexpr bool REQUIRE_DIRECT_SD_DMA = false;
+#else
+static constexpr bool REQUIRE_DIRECT_SD_DMA = true;
+#endif
+static constexpr bool valid_sd_write_buffer(bool present, size_t capacity, bool dma) {
+    return present && capacity >= FILE_WRITE_BUFFER_BYTES && (!REQUIRE_DIRECT_SD_DMA || dma);
+}
+static_assert(!valid_sd_write_buffer(false, FILE_WRITE_BUFFER_BYTES, true));
+static_assert(!valid_sd_write_buffer(true, FILE_WRITE_BUFFER_BYTES - 1, true));
+static_assert(valid_sd_write_buffer(true, FILE_WRITE_BUFFER_BYTES, true));
+static_assert(valid_sd_write_buffer(true, FILE_WRITE_BUFFER_BYTES, false) == !REQUIRE_DIRECT_SD_DMA);
 static const size_t UPLOAD_LOG_INTERVAL_BYTES = 1024 * 1024;
+static constexpr int64_t UPLOAD_LOG_INTERVAL_US = 2 * 1000 * 1000;
+static constexpr int64_t UPLOAD_IDLE_TIMEOUT_US = 30 * 1000 * 1000;
+
+static void log_transfer_link(const char* stage) {
+#if CONFIG_IDF_TARGET_ESP32S31
+    wifi_ps_type_t ps{};
+    const esp_err_t ps_err = esp_wifi_get_ps(&ps);
+    wifi_ap_record_t ap{};
+    const esp_err_t ap_err = esp_wifi_sta_get_ap_info(&ap);
+    wifi_phy_mode_t phy{};
+    const esp_err_t phy_err = esp_wifi_sta_get_negotiated_phymode(&phy);
+    const char* phy_name = "unknown";
+    if (phy_err == ESP_OK) {
+        switch (phy) {
+            case WIFI_PHY_MODE_LR: phy_name = "LR"; break;
+            case WIFI_PHY_MODE_11B: phy_name = "11b"; break;
+            case WIFI_PHY_MODE_11G: phy_name = "11g"; break;
+            case WIFI_PHY_MODE_11A: phy_name = "11a"; break;
+            case WIFI_PHY_MODE_HT20: phy_name = "HT20"; break;
+            case WIFI_PHY_MODE_HT40: phy_name = "HT40"; break;
+            case WIFI_PHY_MODE_HE20: phy_name = "HE20"; break;
+            default: break;
+        }
+    }
+    ESP_LOGI(TAG, "transfer link stage=%s STA=%s rssi=%d channel=%u phy=%s ps=%d ps_status=%s",
+             stage, esp_err_to_name(ap_err), ap_err == ESP_OK ? ap.rssi : 0,
+             ap_err == ESP_OK ? ap.primary : 0, phy_name,
+             ps_err == ESP_OK ? int(ps) : -1, esp_err_to_name(ps_err));
+#else
+    (void)stage;
+#endif
+}
 
 
 static const char FILE_MANAGER_HTML[] = R"HTML(<!doctype html>
@@ -111,6 +156,16 @@ static char *allocate_sd_write_buffer(size_t requested_size,
     if (in_psram) *in_psram = false;
     if (dma_alignment) *dma_alignment = 0;
 
+#if CONFIG_IDF_TARGET_ESP32S31
+    void* buffer = heap_caps_aligned_alloc(64, requested_size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (buffer) {
+        if (in_psram) *in_psram = true;
+    } else {
+        buffer = heap_caps_aligned_alloc(64, requested_size, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    }
+    if (buffer && actual_size) *actual_size = requested_size;
+    return static_cast<char*>(buffer);
+#else
     sdmmc_card_t *card = storage_sdcard_get_card();
     if (!card || !card->host.get_dma_info) return nullptr;
 
@@ -146,6 +201,7 @@ static char *allocate_sd_write_buffer(size_t requested_size,
     if (actual_size) *actual_size = allocated;
     if (dma_compatible) *dma_compatible = true;
     return static_cast<char *>(buffer);
+#endif
 }
 
 static std::string url_decode(const char *s)
@@ -421,10 +477,14 @@ private:
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
         cfg.static_rx_buf_num = 8;
         cfg.dynamic_rx_buf_num = 32;
+#if !CONFIG_IDF_TARGET_ESP32S31
+        // P4 hosted transport keeps its existing overrides. Native S31 uses
+        // WIFI_INIT_CONFIG_DEFAULT's TX policy (static with this PSRAM build).
         cfg.tx_buf_type = 1;
         cfg.static_tx_buf_num = 0;
         cfg.dynamic_tx_buf_num = 32;
         cfg.cache_tx_buf_num = 16;
+#endif
         cfg.csi_enable = 0;
         cfg.ampdu_rx_enable = 1;
         cfg.ampdu_tx_enable = 1;
@@ -536,6 +596,13 @@ private:
             return false;
         }
         _wifi_started = true;
+#if CONFIG_IDF_TARGET_ESP32S31
+        // This activity owns and later deinitializes its Wi-Fi driver. Avoid
+        // native STA modem-sleep pauses during bulk uploads; P4 hosted behavior
+        // is unchanged. A subsequent normal Wi-Fi init gets its own PS policy.
+        const esp_err_t ps_result = esp_wifi_set_ps(WIFI_PS_NONE);
+        ESP_LOGI(TAG, "STA transfer power-save disable: %s", esp_err_to_name(ps_result));
+#endif
         esp_wifi_connect();
 
         for (int i = 0; i < 80; ++i) {
@@ -917,12 +984,18 @@ private:
         std::string path = final_path + ".uploading";
         unlink(path.c_str());
         int64_t prealloc_t0 = esp_timer_get_time();
+#if CONFIG_IDF_TARGET_ESP32S31
+        // The IDF 6.1 FAT build disables f_expand. Use the existing streaming
+        // allocation fallback rather than modifying the shared SDK sources.
+        esp_err_t prealloc_result = ESP_ERR_NOT_SUPPORTED;
+#else
         esp_err_t prealloc_result = req->content_len > 0
                                       ? esp_vfs_fat_create_contiguous_file(STORAGE_SDCARD_MOUNT_POINT,
                                                                            path.c_str(),
                                                                            (uint64_t)req->content_len,
                                                                            true)
                                       : ESP_ERR_INVALID_SIZE;
+#endif
         int64_t prealloc_us = esp_timer_get_time() - prealloc_t0;
         FILE *fp = std::fopen(path.c_str(), prealloc_result == ESP_OK ? "r+b" : "wb");
         if (!fp) {
@@ -948,12 +1021,17 @@ private:
                                                   &file_buf_dma_compatible,
                                                   &file_buf_in_psram,
                                                   &file_buf_dma_alignment);
-        if (!file_buf || !file_buf_dma_compatible) {
-            ESP_LOGE(TAG, "failed to allocate DMA-compatible SD write buffer");
+        if (!valid_sd_write_buffer(file_buf != nullptr, file_buf_allocated, file_buf_dma_compatible)) {
+            ESP_LOGE(TAG, "SD write buffer unavailable: ptr=%p allocated=%u required=%u direct_dma_required=%d dma_ok=%d psram_free=%u psram_largest=%u",
+                     file_buf, (unsigned)file_buf_allocated, (unsigned)FILE_WRITE_BUFFER_BYTES,
+                     REQUIRE_DIRECT_SD_DMA, file_buf_dma_compatible,
+                     (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+                     (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
             std::fclose(fp);
             if (file_buf) free(file_buf);
             unlink(path.c_str());
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ui_locale::text(ui_locale::TextId::SdDmaBufferFailed));
+            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, ui_locale::text(REQUIRE_DIRECT_SD_DMA
+                ? ui_locale::TextId::SdDmaBufferFailed : ui_locale::TextId::SdWriteBufferFailed));
             if (self) self->record_upload(name, 0, false);
             return ESP_FAIL;
         }
@@ -966,13 +1044,14 @@ private:
             if (self) self->record_upload(name, 0, false);
             return ESP_FAIL;
         }
-        ESP_LOGI(TAG, "SD write buffer ptr=%p requested=%u allocated=%u dma_align=%u dma_ok=%d memory=%s",
+        ESP_LOGI(TAG, "SD write buffer ptr=%p requested=%u allocated=%u dma_align=%u dma_ok=%d memory=%s path=%s",
                  file_buf,
                  (unsigned)FILE_WRITE_BUFFER_BYTES,
                  (unsigned)file_buf_allocated,
                  (unsigned)file_buf_dma_alignment,
                  file_buf_dma_compatible ? 1 : 0,
-                 file_buf_in_psram ? "PSRAM" : "internal");
+                 file_buf_in_psram ? "PSRAM" : "internal",
+                 REQUIRE_DIRECT_SD_DMA ? "direct-dma" : "sdmmc-bounce");
 
         char *buf = (char *)heap_caps_malloc(UPLOAD_BUFFER_BYTES, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
         if (!buf) {
@@ -991,6 +1070,7 @@ private:
         size_t written = 0;
         size_t next_log = UPLOAD_LOG_INTERVAL_BYTES;
         int64_t t0 = esp_timer_get_time();
+        log_transfer_link("upload-begin");
         int64_t last_log_time = t0;
         size_t last_log_written = 0;
         int64_t recv_us = 0;
@@ -1000,19 +1080,39 @@ private:
         uint32_t recv_calls = 0;
         uint32_t write_calls = 0;
         uint32_t recv_timeouts = 0;
+        int64_t last_data_time = t0;
         while (remaining > 0) {
             int want = std::min<int>(remaining, UPLOAD_BUFFER_BYTES);
             int64_t recv_t0 = esp_timer_get_time();
+            errno = 0;
             int got = httpd_req_recv(req, buf, want);
+            const int recv_errno = errno;
             int64_t recv_elapsed = esp_timer_get_time() - recv_t0;
             recv_us += recv_elapsed;
             max_recv_us = std::max(max_recv_us, recv_elapsed);
             recv_calls++;
             if (got == HTTPD_SOCK_ERR_TIMEOUT) {
                 recv_timeouts++;
-                continue;
+                const int64_t idle_us = esp_timer_get_time() - last_data_time;
+                ESP_LOGW(TAG, "upload receive timeout: written=%u/%d remaining=%d idle=%lld ms timeouts=%u recv=%lld ms write=%lld ms",
+                         (unsigned)written, req->content_len, remaining, idle_us / 1000,
+                         (unsigned)recv_timeouts, recv_us / 1000, write_us / 1000);
+                log_transfer_link("receive-timeout");
+                if (idle_us < UPLOAD_IDLE_TIMEOUT_US) continue;
             }
             if (got <= 0) {
+                ESP_LOGE(TAG, "upload receive failed: got=%d errno=%d written=%u/%d remaining=%d elapsed=%lld ms recv_calls=%u timeouts=%u recv=%lld ms write=%lld ms recv_max=%lld ms write_max=%lld ms",
+                         got, recv_errno, (unsigned)written, req->content_len, remaining,
+                         (esp_timer_get_time() - t0) / 1000, (unsigned)recv_calls,
+                         (unsigned)recv_timeouts, recv_us / 1000, write_us / 1000,
+                         max_recv_us / 1000, max_write_us / 1000);
+                wifi_ap_record_t ap{};
+                if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK)
+                    ESP_LOGW(TAG, "upload STA link: rssi=%d channel=%u", ap.rssi, ap.primary);
+                ESP_LOGW(TAG, "upload heap: internal=%u largest=%u psram=%u",
+                         (unsigned)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+                         (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
                 heap_caps_free(buf);
                 std::fclose(fp);
                 if (file_buf) free(file_buf);
@@ -1021,6 +1121,9 @@ private:
                 if (self) self->record_upload(name, written, false);
                 return ESP_FAIL;
             }
+            last_data_time = esp_timer_get_time();
+            if (written == 0)
+                ESP_LOGI(TAG, "upload first body data: bytes=%d wait=%lld ms", got, (last_data_time - t0) / 1000);
             int64_t write_t0 = esp_timer_get_time();
             size_t n = std::fwrite(buf, 1, got, fp);
             int64_t write_elapsed = esp_timer_get_time() - write_t0;
@@ -1038,7 +1141,8 @@ private:
             }
             written += n;
             remaining -= got;
-            if (written >= next_log || remaining == 0) {
+            if (written >= next_log || remaining == 0 ||
+                esp_timer_get_time() - last_log_time >= UPLOAD_LOG_INTERVAL_US) {
                 int64_t now = esp_timer_get_time();
                 uint32_t average_kb = transfer_speed_kb(written, now - t0);
                 uint32_t interval_kb = transfer_speed_kb(written - last_log_written, now - last_log_time);

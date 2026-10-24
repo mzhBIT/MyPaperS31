@@ -121,6 +121,9 @@ int frontlight_get_level(void)
     return s_level;
 }
 
+int frontlight_get_color_temperature(void) { return -1; }
+void frontlight_set_color_temperature(int) {}
+
 int frontlight_get_percent(void)
 {
     // Ten user steps deliberately span only the quiet 0..50% hardware PWM

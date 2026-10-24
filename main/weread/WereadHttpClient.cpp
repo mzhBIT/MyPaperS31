@@ -1,4 +1,5 @@
 #include "weread/WereadHttpClient.h"
+#include <mutex>
 #include "weread/WereadOffline.h"
 #include "wifi/wifi_setting.h"
 
@@ -32,6 +33,8 @@ constexpr size_t MAX_RESPONSE_BYTES = 4 * 1024 * 1024;
 // client instances used by shelf/catalog/chapter jobs, matching the reference
 // implementation's process-wide cookie jar.
 std::map<std::string, std::string> runtime_cookies;
+std::mutex cookie_mutex;
+std::mutex http_mutex;
 
 bool allowed_cookie(const std::string &name)
 {
@@ -188,7 +191,7 @@ HttpClient::HttpClient()
 {
     _collector = new Collector();
     load_session(&_session);
-    _cookies = runtime_cookies;
+    { std::lock_guard<std::mutex> lock(cookie_mutex); _cookies = runtime_cookies; }
     for (const auto &[name, value] : _session.cookies) _cookies[name] = value;
     set_session(_session);
 }
@@ -262,6 +265,7 @@ std::string HttpClient::cookie_names() const
 
 void HttpClient::set_session(const Session &session)
 {
+    std::lock_guard<std::mutex> lock(cookie_mutex);
     _session = session;
     for (const auto &[name, value] : session.cookies) {
         if (allowed_cookie(name) && !value.empty()) {
@@ -286,6 +290,7 @@ void HttpClient::set_session(const Session &session)
 
 void HttpClient::clear_session()
 {
+    std::lock_guard<std::mutex> lock(cookie_mutex);
     _session.clear();
     _cookies.clear();
     runtime_cookies.clear();
@@ -294,6 +299,7 @@ void HttpClient::clear_session()
 
 void HttpClient::absorb_cookie_headers(const std::string &headers)
 {
+    std::lock_guard<std::mutex> lock(cookie_mutex);
     bool changed = false;
     size_t start = 0;
     while (start < headers.size()) {
@@ -335,6 +341,9 @@ HttpResponse HttpClient::perform_once(const char *method, const std::string &url
                                       bool account_headers, const std::string *bearer,
                                       bool send_cookies)
 {
+    // Reader heartbeat/comments/shelf can now run on separate workers. Keep
+    // only one active TLS transaction, and protect the shared cookie jar.
+    std::lock_guard<std::mutex> transaction(http_mutex);
     HttpResponse response;
     if (_cancelled) {
         response.error = "cancelled";
@@ -455,6 +464,13 @@ HttpResponse HttpClient::post_json(const std::string &url, const std::string &bo
                                    const std::string &referer)
 {
     return request("POST", url, &body, referer, true);
+}
+
+HttpResponse HttpClient::post_json_once(const std::string &url, const std::string &body,
+                                       const std::string &referer)
+{
+    if (offline_mode()) { HttpResponse r; r.error = "Offline mode"; return r; }
+    return perform_once("POST", url, &body, referer, false, true, false, nullptr, true);
 }
 
 HttpResponse HttpClient::post_json_bearer(const std::string &url, const std::string &body,

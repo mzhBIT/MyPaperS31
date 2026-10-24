@@ -1,25 +1,35 @@
 #include "Bus_EPD_S31.hpp"
+#include "EpdScan2DContinuous.hpp"
 #if defined(CONFIG_IDF_TARGET_ESP32S31)
 #include "../common.hpp"
 #include <algorithm>
 #include <cstring>
 #include <esp_cache.h>
 #include <esp_log.h>
-#include <esp_lcd_panel_ops.h>
 #include <esp_rom_sys.h>
+#include <esp_rom_gpio.h>
 #include <esp_timer.h>
+#include <soc/gpio_sig_map.h>
+#include <soc/gpio_struct.h>
 
 namespace lgfx { inline namespace v1 {
 static constexpr char TAG[] = "EPD_S31";
 static constexpr size_t FRAME_BYTES = 1216 * 684 / 4;
+static constexpr uint64_t ROW_CLOCK_PRODUCT =
+    uint64_t(MYPAPER_EPD_2D_PIXEL_CLOCK_HZ) * MYPAPER_EPD_2D_LINE_PERIOD_US;
+static constexpr uint32_t ROW_CLOCKS = ROW_CLOCK_PRODUCT / 1000000u;
+static_assert(ROW_CLOCK_PRODUCT % 1000000u == 0,
+              "RGB row must contain an integral number of pixel clocks");
+static_assert(ROW_CLOCKS > 304u + MYPAPER_EPD_2D_LE_HIGH_PCLKS
+                                     + MYPAPER_EPD_2D_LINE_FRONT_PCLKS,
+              "RGB row must leave room for data and porches");
+static_assert(MYPAPER_EPD_2D_CKV_HIGH_DUS > 0
+              && MYPAPER_EPD_2D_CKV_HIGH_DUS < MYPAPER_EPD_2D_LINE_PERIOD_US * 10u,
+              "CKV high time must be shorter than the RMT row period");
 static constexpr uint8_t IO_ADDR = 0x20, TPS_ADDR = 0x68;
 
 Bus_EPD_S31::~Bus_EPD_S31() {
   if (_pwr_on) powerControl(false);
-  if (_ckv) { rmt_disable(_ckv); rmt_del_channel(_ckv); }
-  if (_encoder) rmt_del_encoder(_encoder);
-  if (_rgb) esp_lcd_panel_del(_rgb);
-  if (_frame_done) vSemaphoreDelete(_frame_done);
 }
 
 bool Bus_EPD_S31::readReg(uint8_t address, uint8_t reg, uint8_t& value) {
@@ -37,15 +47,10 @@ bool Bus_EPD_S31::updateIo(uint8_t port, uint8_t mask, uint8_t value) {
   return readReg(IO_ADDR, 2 + port, out)
       && writeReg(IO_ADDR, 2 + port, (out & ~mask) | (value & mask));
 }
-bool IRAM_ATTR Bus_EPD_S31::frameDone(esp_lcd_panel_handle_t,
-    const esp_lcd_rgb_panel_event_data_t*, void* ctx) {
-  BaseType_t wake = pdFALSE;
-  xSemaphoreGiveFromISR(static_cast<Bus_EPD_S31*>(ctx)->_frame_done, &wake);
-  return wake == pdTRUE;
-}
 bool Bus_EPD_S31::init() {
   if (_initialized) return true;
-  if (_rgb || _frame_done) return false; // fail closed after partial initialization
+  if (_init_attempted) return false; // fail closed after partial initialization
+  _init_attempted = true;
   if (!i2c::init(1, 0, 1).has_value()) return false;
   // Preserve unrelated outputs: P05 supplies the screen, P12 resets touch.
   uint8_t cfg0, cfg1;
@@ -61,61 +66,42 @@ bool Bus_EPD_S31::init() {
     gpio_set_direction(static_cast<gpio_num_t>(pin), GPIO_MODE_OUTPUT);
     gpio_set_level(static_cast<gpio_num_t>(pin), pin == _config.pin_spv);
   }
-  _frame_done = xSemaphoreCreateBinary();
-  if (!_frame_done) return false;
-  esp_lcd_rgb_panel_config_t rgb = {};
-  rgb.clk_src = LCD_CLK_SRC_DEFAULT;
-  rgb.data_width = 8;
-  // No color conversion: each byte is four packed 2-bit EPD drive codes.
-  rgb.in_color_format = LCD_COLOR_FMT_GRAY8;
-  rgb.out_color_format = LCD_COLOR_FMT_GRAY8;
-  rgb.num_fbs = 1;
-  rgb.dma_burst_size = 64;
-  rgb.flags.fb_in_psram = true;
-  rgb.flags.refresh_on_demand = true;
-  rgb.timings.pclk_hz = MYPAPER_EPD_2D_PIXEL_CLOCK_HZ;
-  rgb.timings.h_res = 304;
-  rgb.timings.v_res = 684;
-  rgb.timings.hsync_pulse_width = MYPAPER_EPD_2D_LE_HIGH_PCLKS;
-  rgb.timings.hsync_back_porch = MYPAPER_EPD_2D_LINE_FRONT_PCLKS;
-  rgb.timings.hsync_front_porch = 340 - 304 - rgb.timings.hsync_pulse_width - rgb.timings.hsync_back_porch;
-  rgb.timings.vsync_pulse_width = 1;
-  rgb.timings.vsync_back_porch = 0;
-  rgb.timings.vsync_front_porch = 1;
-  rgb.timings.flags.hsync_idle_low = true;
-  rgb.timings.flags.de_idle_high = true;
-  rgb.hsync_gpio_num = static_cast<gpio_num_t>(_config.pin_le);
-  rgb.vsync_gpio_num = GPIO_NUM_NC;
-  rgb.de_gpio_num = static_cast<gpio_num_t>(_config.pin_sph);
-  rgb.pclk_gpio_num = static_cast<gpio_num_t>(_config.pin_cl);
-  rgb.disp_gpio_num = GPIO_NUM_NC;
-  for (size_t i = 0; i < 8; ++i) rgb.data_gpio_nums[i] = static_cast<gpio_num_t>(_config.pin_data[i]);
-  esp_err_t err = esp_lcd_new_rgb_panel(&rgb, &_rgb);
-  if (err != ESP_OK) { ESP_LOGE(TAG, "RGB init: %s", esp_err_to_name(err)); _rgb = nullptr; return false; }
-  esp_lcd_rgb_panel_event_callbacks_t callbacks = {};
-  callbacks.on_vsync = frameDone;
-  if (esp_lcd_rgb_panel_register_event_callbacks(_rgb, &callbacks, this) != ESP_OK
-      || esp_lcd_panel_reset(_rgb) != ESP_OK || esp_lcd_panel_init(_rgb) != ESP_OK
-      || esp_lcd_rgb_panel_get_frame_buffer(_rgb, 1, reinterpret_cast<void**>(&_rgb_frame)) != ESP_OK) return false;
-  rmt_tx_channel_config_t rmt = {};
-  rmt.gpio_num = static_cast<gpio_num_t>(_config.pin_ckv);
-  rmt.clk_src = RMT_CLK_SRC_DEFAULT;
-  rmt.resolution_hz = 10000000;
-  rmt.mem_block_symbols = 64;
-  rmt.trans_queue_depth = 1;
-  rmt_copy_encoder_config_t encoder = {};
-  if (rmt_new_tx_channel(&rmt, &_ckv) != ESP_OK
-      || rmt_new_copy_encoder(&encoder, &_encoder) != ESP_OK
-      || rmt_enable(_ckv) != ESP_OK) return false;
-  ESP_LOGI(TAG, "8-bit RGB ready: 20MHz 17us/row, CKV=16.3us VCOM=%u mV", MYPAPER_EPD_VCOM_MV);
+  if (!epd2d_continuous_scan_init(_config, 1216, 684)) return false;
+  ESP_LOGI(TAG, "shared P4 HAL/LL scan ready: bus=8 pclk=%lu Hz row_clocks=%lu period=%u us CKV=%u.%u us VCOM=%u mV",
+           (unsigned long)MYPAPER_EPD_2D_PIXEL_CLOCK_HZ, (unsigned long)ROW_CLOCKS,
+           unsigned(MYPAPER_EPD_2D_LINE_PERIOD_US), unsigned(MYPAPER_EPD_2D_CKV_HIGH_DUS / 10),
+           unsigned(MYPAPER_EPD_2D_CKV_HIGH_DUS % 10), MYPAPER_EPD_VCOM_MV);
   _initialized = true;
   return true;
 }
 bool Bus_EPD_S31::powerControl(bool on) {
   if (!on) {
+    // Mirror the P4 quiet shutdown instead of clearing every control bit at
+    // once. Disable the panel output and park the scan lines while the bias
+    // rails are still up, hold that state for 20 ms so the source/gate drivers
+    // can discharge, then drop PWRUP before WAKEUP. The previous one-shot
+    // shutdown cut the rails with the last frame still on the source lines,
+    // which left residual charge that accumulated as ghosting over successive
+    // epd_text (DU4) refreshes.  pin_pwr is this board's MODE line (GPIO19),
+    // not a PMIC PWRUP: P4 asserts MODE=H for sequential scanning and drops it
+    // during shutdown.
     gpio_set_level(static_cast<gpio_num_t>(_config.pin_oe), 0);
     gpio_set_level(static_cast<gpio_num_t>(_config.pin_pwr), 0);
-    const bool ok = updateIo(0, 0x07, 0);
+    gpio_set_level(static_cast<gpio_num_t>(_config.pin_le), 0);
+    gpio_set_level(static_cast<gpio_num_t>(_config.pin_ckv), 0);
+    gpio_set_level(static_cast<gpio_num_t>(_config.pin_cl), 0);
+    gpio_set_level(static_cast<gpio_num_t>(_config.pin_sph), 0);
+    gpio_set_level(static_cast<gpio_num_t>(_config.pin_spv), 0);
+    for (int i = 0; i < _config.bus_width; ++i) {
+      gpio_set_level(static_cast<gpio_num_t>(_config.pin_data[i]), 0);
+    }
+    // TCA9555 port 0: VCOM_CTRL=P00, PWRUP=P01, WAKEUP=P02. Keep all three
+    // asserted while the panel settles, then drop PWRUP, then WAKEUP.
+    bool ok = updateIo(0, 0x07, 0x07);
+    delay(20);
+    ok = updateIo(0, 0x07, 0x04) && ok;
+    delay(1);
+    ok = updateIo(0, 0x07, 0x00) && ok;
     _pwr_on = false; _last_off = millis(); _off_valid = true;
     return ok;
   }
@@ -143,39 +129,136 @@ bool Bus_EPD_S31::powerControl(bool on) {
   _pwr_on = true;
   return true;
 }
+bool Bus_EPD_S31::measureVCOM(uint32_t* vcom_mV, uint32_t timeout_ms) {
+  if (!vcom_mV) return false;
+  *vcom_mV = 0;
+  // Panel_EPD_2D::measureVCOM has already drained the refresh queue. Do not
+  // attempt to measure while a failed scan may still own its DMA source.
+  if (!_initialized || _scan_failed || !timeout_ms) return false;
+  constexpr uint8_t VCOM1 = 0x03, VCOM2 = 0x04, ENABLE = 0x01;
+  constexpr uint8_t INT1 = 0x07, PG = 0x0f;
+  constexpr uint8_t ACQ = 0x80, PROG = 0x40, HIZ = 0x20, ACQC = 0x02;
+  const bool was_on = _pwr_on;
+  const int old_oe = gpio_get_level(static_cast<gpio_num_t>(_config.pin_oe));
+  const int old_mode = gpio_get_level(static_cast<gpio_num_t>(_config.pin_pwr));
+  const int old_spv = gpio_get_level(static_cast<gpio_num_t>(_config.pin_spv));
+  // refresh_on_demand is idle here and Panel_EPD_2D has drained all scans.
+  // XSTL/SPH is RGB DE during refresh. Save the complete matrix route,
+  // including inversion/OE selection, before temporarily driving it as GPIO.
+  const uint32_t old_sph_route = GPIO.func_out_sel_cfg[_config.pin_sph].val;
+  bool sph_taken = false;
+  uint8_t old_v1 = 0, old_v2 = 0, old_enable = 0;
+  uint8_t int1 = 0, pg = 0, result_lsb = 0, result_msb = 0;
+  bool saved = false, measured = false;
+  const char* stage = "wake";
+  gpio_set_level(static_cast<gpio_num_t>(_config.pin_oe), 0);
+  do {
+    if (!was_on) {
+      if (_off_valid && millis() - _last_off < 250)
+        delay(250 - (millis() - _last_off));
+      // TCA9555 port 0: VCOM_CTRL=P00, PWRUP=P01, WAKEUP=P02.
+      if (!updateIo(0, 0x07, 0x04)) break;
+      delay(50);
+    }
+    stage = "save-registers";
+    if (!readReg(TPS_ADDR, VCOM1, old_v1)
+        || !readReg(TPS_ADDR, VCOM2, old_v2)
+        || !readReg(TPS_ADDR, ENABLE, old_enable)) break;
+    saved = true;
+    stage = "panel-control";
+    // Match the verified P4 sequence: MODE/VCOM_CTRL low, OE/WAKEUP
+    // high, SPV low while raising PWRUP. Do NOT scan a neutral RGB frame.
+    gpio_set_level(static_cast<gpio_num_t>(_config.pin_spv), 0);
+    gpio_set_level(static_cast<gpio_num_t>(_config.pin_pwr), 0);
+    gpio_set_level(static_cast<gpio_num_t>(_config.pin_oe), 1);
+    if (!updateIo(0, 0x07, 0x04)
+        || !updateIo(0, 0x07, 0x06)) break;
+    delay(1);
+    gpio_set_level(static_cast<gpio_num_t>(_config.pin_spv), 1);
+    gpio_set_level(static_cast<gpio_num_t>(_config.pin_sph), 1);
+    esp_rom_gpio_connect_out_signal(_config.pin_sph, SIG_GPIO_OUT_IDX, false, false);
+    sph_taken = true;
+    delay(20);
+    if (!writeReg(TPS_ADDR, ENABLE, 0x3f)) break;
+    stage = "power-good";
+    const uint32_t power_start = millis();
+    bool rails_ok = false;
+    do {
+      if (!readReg(TPS_ADDR, PG, pg)) break;
+      if ((pg & 0xfa) == 0xfa) { rails_ok = true; break; }
+      delay(2);
+    } while (millis() - power_start < timeout_ms);
+    if (!rails_ok) break;
+
+    stage = "acquire";
+    if (!readReg(TPS_ADDR, INT1, int1)
+        || !writeReg(TPS_ADDR, VCOM2, HIZ | ACQ)) break; // P4: 0xA0, never PROG
+    const uint32_t acquire_start = millis();
+    do {
+      if (!readReg(TPS_ADDR, INT1, int1)) break;
+      if (int1 & ACQC) {
+        measured = readReg(TPS_ADDR, VCOM1, result_lsb)
+                && readReg(TPS_ADDR, VCOM2, result_msb);
+        break;
+      }
+      delay(1);
+    } while (millis() - acquire_start < timeout_ms);
+  } while (false);
+
+  // One cleanup path for success, timeout, I2C failure and scan failure.
+  // Lower PWRUP before reconnecting VCOM. Keep WAKEUP high for I2C restore.
+  gpio_set_level(static_cast<gpio_num_t>(_config.pin_oe), 0);
+  bool restored = updateIo(0, 0x07, 0x04);
+  delay(50);
+  // Restore peripheral ownership with panel output disabled on every exit,
+  // before powerControl can re-enable OE. No LCD reset or frame allocation.
+  if (sph_taken) GPIO.func_out_sel_cfg[_config.pin_sph].val = old_sph_route;
+  if (saved) {
+    const bool v1_ok = writeReg(TPS_ADDR, VCOM1, old_v1);
+    const bool v2_ok = writeReg(TPS_ADDR, VCOM2, old_v2 & ~(ACQ | PROG));
+    const bool en_ok = writeReg(TPS_ADDR, ENABLE, old_enable & 0x3f);
+    restored = v1_ok && v2_ok && en_ok && restored;
+  }
+  _pwr_on = false;
+  _last_off = millis();
+  _off_valid = true;
+  if (was_on && restored && !_scan_failed) {
+    restored = powerControl(true);
+    if (restored && saved) {
+      // powerControl programs the normal configured voltage. Preserve the
+      // actual pre-measurement register state as well (not the ADC result).
+      const bool v1_ok = writeReg(TPS_ADDR, VCOM1, old_v1);
+      const bool v2_ok = writeReg(TPS_ADDR, VCOM2, old_v2 & ~(ACQ | PROG));
+      const bool en_ok = writeReg(TPS_ADDR, ENABLE, old_enable & 0x3f);
+      restored = v1_ok && v2_ok && en_ok;
+    }
+    if (restored) {
+      gpio_set_level(static_cast<gpio_num_t>(_config.pin_pwr), old_mode);
+      gpio_set_level(static_cast<gpio_num_t>(_config.pin_oe), old_oe);
+    } else {
+      powerControl(false);
+    }
+  } else {
+    const bool off_ok = updateIo(0, 0x07, 0);
+    restored = off_ok && restored;
+    gpio_set_level(static_cast<gpio_num_t>(_config.pin_pwr), 0);
+    if (was_on) restored = false; // Remain safely off after restoration failure.
+  }
+  gpio_set_level(static_cast<gpio_num_t>(_config.pin_spv), old_spv);
+  const uint32_t result = (result_lsb | (uint32_t(result_msb & 1) << 8)) * 10;
+  ESP_LOGI(TAG, "VCOM measurement P4-sequence: ok=%d stage=%s INT1=0x%02x PG=0x%02x kickback=%lu mV restored=%d was_on=%d",
+           measured && restored, stage, int1, pg, (unsigned long)result, restored, was_on);
+  if (!measured || !restored) return false;
+  *vcom_mV = result;
+  return true;
+}
 bool Bus_EPD_S31::write2DFrame(const uint8_t* data, size_t length,
     uint32_t timeout_ms, uint32_t* elapsed) {
   if (elapsed) *elapsed = 0;
-  if (_scan_failed || !_pwr_on || !_rgb_frame || !data || length != FRAME_BYTES) return false;
-  // The driver's framebuffer is exclusively owned until frame + CKV finish.
-  memcpy(_rgb_frame, data, length);
-  if (esp_cache_msync(_rgb_frame, length, ESP_CACHE_MSYNC_FLAG_DIR_C2M
-      | ESP_CACHE_MSYNC_FLAG_TYPE_DATA) != ESP_OK) return false;
-  while (xSemaphoreTake(_frame_done, 0) == pdTRUE) {}
-  rmt_symbol_word_t symbol = {};
-  symbol.level0 = 1; symbol.duration0 = MYPAPER_EPD_2D_CKV_HIGH_DUS;
-  symbol.level1 = 0; symbol.duration1 = MYPAPER_EPD_2D_LINE_PERIOD_US * 10 - symbol.duration0;
-  rmt_transmit_config_t tx = {};
-  tx.loop_count = 689;
-  const int64_t start = esp_timer_get_time();
-  gpio_set_level(static_cast<gpio_num_t>(_config.pin_spv), 0);
-  if (rmt_transmit(_ckv, _encoder, &symbol, sizeof(symbol), &tx) != ESP_OK) {
-    _scan_failed = true;
-    gpio_set_level(static_cast<gpio_num_t>(_config.pin_oe), 0);
-    return false;
-  }
-  esp_rom_delay_us(MYPAPER_EPD_2D_LINE_PERIOD_US);
-  gpio_set_level(static_cast<gpio_num_t>(_config.pin_spv), 1);
-  esp_rom_delay_us(MYPAPER_EPD_2D_LINE_PERIOD_US + MYPAPER_EPD_2D_CKV_HIGH_DUS / 10);
-  const esp_err_t submit = esp_lcd_rgb_panel_refresh(_rgb);
-  const bool done = submit == ESP_OK && xSemaphoreTake(_frame_done, pdMS_TO_TICKS(timeout_ms)) == pdTRUE;
-  const bool ckv_done = rmt_tx_wait_all_done(_ckv, timeout_ms) == ESP_OK;
-  if (elapsed) *elapsed = esp_timer_get_time() - start;
-  if (!done || !ckv_done) {
-    // Stop output immediately; never overwrite an in-flight buffer on retry.
+  if (!_initialized || _scan_failed || !_pwr_on || !data || length != FRAME_BYTES) return false;
+  if (!epd2d_continuous_scan_frame(data, length, timeout_ms, elapsed)) {
     gpio_set_level(static_cast<gpio_num_t>(_config.pin_oe), 0);
     _scan_failed = true;
-    ESP_LOGE(TAG, "scan failed: submit=%s frame=%d CKV=%d", esp_err_to_name(submit), done, ckv_done);
     return false;
   }
   return true;

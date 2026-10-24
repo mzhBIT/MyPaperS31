@@ -2,6 +2,12 @@
 # This replaces the upstream standalone CMakeLists.txt which uses project()
 # — incompatible with ESP-IDF's component system.
 
+if(IDF_VERSION_MAJOR GREATER_EQUAL 6)
+    set(_freetype_libc esp_libc)
+else()
+    set(_freetype_libc newlib)
+endif()
+
 idf_component_register(
     SRCS
         # Base system layer (generic, no mmap required)
@@ -53,7 +59,7 @@ idf_component_register(
         "include"
 
     PRIV_REQUIRES
-        newlib
+        ${_freetype_libc}
 
     PRIV_INCLUDE_DIRS
         "include"

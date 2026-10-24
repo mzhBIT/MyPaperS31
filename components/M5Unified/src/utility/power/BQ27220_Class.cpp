@@ -3,7 +3,7 @@
 
 #include "BQ27220_Class.hpp"
 
-#include <M5Unified.h>
+#include <M5GFX.h>
 
 #include <algorithm>
 #include <math.h>
@@ -21,7 +21,7 @@ namespace m5
       if (length == 0) {
         return true;
       }
-      M5.delay(10);
+      lgfx::delay(10);
       if (_i2c->readRegister(_addr, 0x3E, regData, length, _freq)) {
         return true;
       }
@@ -38,7 +38,7 @@ namespace m5
       read_MuxAddrdata(0x00, 0x0001, read_data, 4);
   // printf("BQ27220 W:0x00->0x0001 R:0x%02X %02X %02X %02X\r\n", read_data[0], read_data[1], read_data[2], read_data[3]);
 
-      M5.delay(200);
+      lgfx::delay(200);
 
       //  exit_sealed
       read_MuxAddrdata(0x00, 0x8000);
@@ -50,6 +50,29 @@ namespace m5
     }
 
     return _init;
+  }
+
+  bool BQ27220_Class::beginReadOnly(uint16_t& voltage_mV)
+  {
+    uint8_t buf[2];
+    _init = _i2c->readRegister(_addr, 0x08, buf, 2, _freq);
+    if (_init) {
+      voltage_mV = uint16_t(buf[0]) | (uint16_t(buf[1]) << 8);
+      _init = voltage_mV >= 2500 && voltage_mV <= 5000;
+    }
+    return _init;
+  }
+
+  bool BQ27220_Class::readMeasurement(uint16_t& voltage_mV, int16_t& current_mA)
+  {
+    uint8_t voltage[2], current[2];
+    if (!_i2c->readRegister(_addr, 0x08, voltage, 2, _freq)
+        || !_i2c->readRegister(_addr, 0x0c, current, 2, _freq)) return false;
+    const uint16_t mv = uint16_t(voltage[0]) | (uint16_t(voltage[1]) << 8);
+    if (mv < 2500 || mv > 5000) return false;
+    voltage_mV = mv;
+    current_mA = static_cast<int16_t>(uint16_t(current[0]) | (uint16_t(current[1]) << 8));
+    return true;
   }
 
   int16_t BQ27220_Class::getCurrent_mA(void)

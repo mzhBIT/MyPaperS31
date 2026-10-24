@@ -59,6 +59,7 @@ public:
     const std::string &path() const { return _path; }
     const std::string &cover_image_href() const { return _cover_href; }
     const std::string &weread_book_id() const { return _weread_book.id; }
+    const std::vector<weread::Chapter> &weread_chapters() const { return _weread_chapters; }
     const weread::Chapter *weread_chapter(int index) const {
         return index >= 0 && index < static_cast<int>(_weread_chapters.size())
                    ? &_weread_chapters[static_cast<size_t>(index)] : nullptr;

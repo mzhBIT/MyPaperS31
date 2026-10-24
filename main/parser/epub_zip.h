@@ -5,6 +5,7 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include "memory/AppAllocator.h"
 
 class EpubZip {
 public:
@@ -33,7 +34,10 @@ public:
 
 private:
     std::string _path;
-    std::unordered_map<std::string, Entry> _entries;
+    using EntryMap = std::unordered_map<std::string, Entry,
+        std::hash<std::string>, std::equal_to<std::string>,
+        app_memory::Allocator<std::pair<const std::string, Entry>>>;
+    EntryMap _entries;
 
     bool load_central_directory(FILE *fp);
     bool load_index_cache(const char *source_path);

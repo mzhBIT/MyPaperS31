@@ -1,6 +1,7 @@
 // Reading dashboard geometry adapted from read-pico-reader app_dashboard.c.
 // Copyright 2026 mindreset. SPDX-License-Identifier: Apache-2.0
 #include "activities/ReadingHomeActivity.h"
+#include "ui/BatteryStatus.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "activities/BookshelfActivity.h"
@@ -165,10 +166,10 @@ class ReadingHomeActivity final : public Activity {
         if(!wifi) M5.Display.drawLine(wifi_x-12,28,wifi_x+12,52,gray(96));
         M5.Display.drawRoundRect(606,29,40,22,6,TFT_BLACK);
         M5.Display.fillRect(648,36,5,8,TFT_BLACK);
-        // Keep the battery icon without a percentage or fabricated SOC.
+        battery_status::draw_fill(610,33,32,14);
     }
     void nav() {
-        M5.Display.fillRect(0,layout::nav_top,684,120,gray(238));
+        M5.Display.fillRect(0,layout::nav_top,684,120,TFT_WHITE);
         M5.Display.drawFastHLine(0,layout::nav_top,684,gray(160));
         M5.Display.fillRect(57,1097,56,5,TFT_BLACK);
         const uint8_t *icons[]={pico_shelf_icons::house,pico_shelf_icons::library_big,
@@ -176,10 +177,10 @@ class ReadingHomeActivity final : public Activity {
         const char *labels[]={tr(TextId::FileNavHome),tr(TextId::Bookshelf),tr(TextId::ReadingHomeFileManager),tr(TextId::Settings)};
         for(int i=0;i<4;++i) {
             const int cx=(2*i+1)*684/8;
-            icon(icons[i],cx,1141,44,0,238);
+            icon(icons[i],cx,1141,44,0,255);
             const int pixels=fit_px(labels[i],ui_px(17),159);
             const int cy=std::max(1180,1169+(system_font::ink_height(labels[i],pixels)+1)/2);
-            centered(labels[i],cx,cy,pixels,159,238);
+            centered(labels[i],cx,cy,pixels,159,255);
         }
     }
     void resume_area() {

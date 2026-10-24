@@ -4,6 +4,7 @@
 #include "EpdPairIndices.h"
 #include "EpdGc16Dual.h"
 #include "EpdChangedPixels.h"
+#include "EpdScan2DContinuous.hpp"
 
 #if SOC_LCD_I80_SUPPORTED && (defined(CONFIG_IDF_TARGET_ESP32S3) || defined(CONFIG_IDF_TARGET_ESP32P4) || defined(CONFIG_IDF_TARGET_ESP32S31))
 
@@ -1195,7 +1196,7 @@ namespace lgfx
     int spread = lgfx_epd_page_turn::fast_spread;
     int slots = 24;
     int next = 0;
-    int ready[35] = {}; // -1 free; otherwise complete absolute phase number.
+    int ready[38] = {}; // Up to 18 base phases + slow spread 20; -1 means free.
     bool abort = false;
     bool finished = false;
     bool external_stack = false;
@@ -1460,6 +1461,27 @@ namespace lgfx
 #if (defined(CONFIG_IDF_TARGET_ESP32P4) || defined(CONFIG_IDF_TARGET_ESP32S31)) \
  && MYPAPER_EPD_USE_2D_ENGINE && MYPAPER_EPD_2D_CONTINUOUS_SCAN
     _scan_frame_bytes_2d = (memory_w >> 2) * memory_h;
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    // Reserve before UI font/book allocations can fragment PSRAM. Text and
+    // GC16/HD batches are serialized by this panel's single refresh task, so
+    // they can borrow the same storage rather than retain two large caches.
+    const size_t arena_bytes = size_t(MYPAPER_EPD_2D_GC16_PIPELINE_SLOTS)
+                             * _scan_frame_bytes_2d;
+    if (!_phase_arena_2d) {
+      _phase_arena_2d = static_cast<uint8_t*>(heap_caps_aligned_alloc(
+          64, arena_bytes, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM));
+      if (!_phase_arena_2d) {
+        ESP_LOGE(TAG_2D, "S31 phase arena allocation failed: bytes=%u free=%u largest=%u",
+                 (unsigned)arena_bytes,
+                 (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+                 (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        return false;
+      }
+      _phase_arena_capacity_2d = arena_bytes;
+      ESP_LOGI(TAG_2D, "S31 shared phase arena ready: slots=%d bytes=%u",
+               MYPAPER_EPD_2D_GC16_PIPELINE_SLOTS, (unsigned)arena_bytes);
+    }
+#endif
     _scan_frame_2d = static_cast<uint8_t*>(heap_caps_aligned_alloc(
         64, _scan_frame_bytes_2d,
         MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
@@ -2118,7 +2140,9 @@ namespace lgfx
  && MYPAPER_EPD_USE_2D_ENGINE && MYPAPER_EPD_2D_CONTINUOUS_SCAN \
  && MYPAPER_EPD_2D_PRECOMPUTE_WAVEFORM
       animation_requested = update.animation_direction != 0 && me->_physical_state_known &&
-          selected.type == WAVEFORM_MODE_DU4 && selected.phases->phases == 15 &&
+          selected.type == WAVEFORM_MODE_DU4 &&
+          (selected.phases->phases == 15 || selected.phases->phases == 16
+           || selected.phases->phases == 18) &&
           panel_w == memory_w && scan_rows == panel_h &&
           me->_cfg.offset_x == 0 && me->_cfg.offset_y == 0 &&
           panel_w%16 == 0 && update.animation_rotation<8 &&
@@ -2368,7 +2392,15 @@ namespace lgfx
         const size_t phase_cache_bytes = phase_frame_bytes
                                        * size_t(phase_storage_count);
         bool du4_workspace_reused = false;
-        if (selected.type == WAVEFORM_MODE_DU4) {
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+        if (me->_phase_arena_2d && phase_cache_bytes <= me->_phase_arena_capacity_2d) {
+          phase_frames = me->_phase_arena_2d;
+          du4_workspace_reused = selected.type == WAVEFORM_MODE_DU4;
+          // Not temporary: only the panel's refresh task borrows this arena.
+          // It must never enter DU4's evictable cache or per-batch free path.
+        }
+#endif
+        if (selected.type == WAVEFORM_MODE_DU4 && phase_frames == nullptr) {
           if (me->_du4_phase_frames_2d == nullptr
            || me->_du4_phase_frame_capacity_2d < phase_cache_bytes) {
             uint8_t* expanded = static_cast<uint8_t*>(heap_caps_aligned_alloc(
@@ -2408,9 +2440,11 @@ namespace lgfx
         }
         if (phase_frames == nullptr) {
           ESP_LOGE(TAG_2D,
-                   "phase cache allocation failed: phases=%d cached=%d bytes=%u; batch aborted to preserve waveform timing",
+                   "phase cache allocation failed: phases=%d cached=%d bytes=%u psram_free=%u psram_largest=%u; batch aborted to preserve waveform timing",
                    phase_count, cached_phase_count,
-                   (unsigned)phase_cache_bytes);
+                   (unsigned)phase_cache_bytes,
+                   (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
+                   (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
           heap_caps_free(phase_frame_map);
           heap_caps_free(representative_phases);
           heap_caps_free(unique_transitions);
@@ -2891,11 +2925,19 @@ namespace lgfx
         if (animation_deferred_source && uxTaskPriorityGet(nullptr)>1)
           animation_pipeline.done=xSemaphoreCreateBinary();
         animation_pipeline.slots=animation_pipeline.done ? std::min(12,count) : count;
-        for (int i=0;i<35;++i) animation_pipeline.ready[i]=-1;
+        for (auto& ready : animation_pipeline.ready) ready=-1;
         size_t bytes = size_t(animation_pipeline.slots)*me->_scan_frame_bytes_2d;
+        // S31's LCD GDMA can read aligned ordinary PSRAM directly, but its
+        // PSRAM heap does not advertise MALLOC_CAP_DMA. The shared scanner
+        // enforces alignment/cache writeback. P4 retains its existing caps.
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+        constexpr uint32_t animation_cache_caps = MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM;
+#else
+        constexpr uint32_t animation_cache_caps = MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA;
+#endif
         const int64_t alloc_begin=esp_timer_get_time();
         animation_frames = static_cast<uint8_t*>(heap_caps_aligned_alloc(
-            64, bytes, MALLOC_CAP_8BIT | MALLOC_CAP_SPIRAM | MALLOC_CAP_DMA));
+            64, bytes, animation_cache_caps));
         const int64_t alloc_done=esp_timer_get_time();
         const int direction=update.animation_direction;
         const int slot=direction>0 ? direction-1 : 4-direction-1;
@@ -2960,7 +3002,7 @@ namespace lgfx
               // sequence, preserving already primed frames, or use normal DU4.
               bytes=size_t(count)*me->_scan_frame_bytes_2d;
               auto *full=static_cast<uint8_t*>(heap_caps_aligned_alloc(
-                  64,bytes,MALLOC_CAP_8BIT|MALLOC_CAP_SPIRAM|MALLOC_CAP_DMA));
+                  64,bytes,animation_cache_caps));
               if (full) std::memcpy(full,animation_frames,
                   size_t(animation_pipeline.next)*me->_scan_frame_bytes_2d);
               heap_caps_free(animation_frames); animation_frames=full;
@@ -3005,14 +3047,30 @@ namespace lgfx
             for (int unique=0;unique<cached_phase_count;++unique)
               if (!du4_pipeline.ready[unique]) render_du4_pipeline_unique(&du4_pipeline,unique);
           }
-          ESP_LOGW(TAG_2D, "page turn cache allocation failed: bytes=%u; using normal DU4", unsigned(bytes));
+          ESP_LOGW(TAG_2D, "page turn cache/layout unavailable: bytes=%u caps=0x%lx psram_free=%u psram_largest=%u layout_ready=%d; using normal DU4",
+                   unsigned(bytes), (unsigned long)animation_cache_caps,
+                   (unsigned)heap_caps_get_free_size(animation_cache_caps),
+                   (unsigned)heap_caps_get_largest_free_block(animation_cache_caps),
+                   int(layout_ready));
         }
       }
 
+#if defined(CONFIG_IDF_TARGET_ESP32S31) && MYPAPER_EPD_2D_CONTINUOUS_SCAN && !MYPAPER_EPD_2D_LINE_STREAM
+      // Use the FINAL physical dirty rectangle, after recovery/animation may
+      // have promoted it to full screen. Configure only while panel is off.
+      if (!epd2d_continuous_scan_prepare_oe_update(update.y, uint16_t(update.y + update.h))) {
+        // Resource failure restores GPIO ownership; do not lose a UI update
+        // solely because the experimental gate could not be allocated.
+        ESP_LOGW(TAG_2D, "partial OE unavailable; using ordinary neutral-mask scan");
+      }
+#endif
       if (!bus->powerControl(true)) {
         ESP_LOGE(TAG_2D, "power on failed; batch aborted before scan");
         me->_physical_state_known = false;
         bus->powerControl(false);
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+        epd2d_continuous_scan_finish_oe_update();
+#endif
         finish_animation_pipeline(&animation_pipeline,true);
         if (gc16_pipeline_active) {
           finish_gc16_phase_pipeline(&gc16_pipeline, true);
@@ -3333,6 +3391,9 @@ namespace lgfx
       }
 
       const bool power_off_ok = bus->powerControl(false);
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+      epd2d_continuous_scan_finish_oe_update();
+#endif
       heap_caps_free(animation_frames);
       if (phase_frames_temporary) {
         heap_caps_free(phase_frames);

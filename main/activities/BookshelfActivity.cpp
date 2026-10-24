@@ -2,6 +2,8 @@
 // Copyright 2026 mindreset. SPDX-License-Identifier: Apache-2.0
 // Local activity integration and localization: MyPaper contributors.
 #include "activities/BookshelfActivity.h"
+#include "ui/BatteryStatus.h"
+#include "ui/ShelfStatusBar.h"
 #include "activities/FileBrowserActivity.h"
 #include "activities/ReadingHomeActivity.h"
 #include "activities/Activity.h"
@@ -46,10 +48,10 @@ const char *tr(const char *en, const char *cn, const char *tw) {
     return lang == ui_locale::Language::English ? en :
         lang == ui_locale::Language::TraditionalChinese ? tw : cn;
 }
-void text(const std::string &s, int x, int y, int px, int ink = 0, int bg = 238) {
+void text(const std::string &s, int x, int y, int px, int ink = 0, int bg = 255) {
     system_font::draw_on_background(M5.Display, s, x, y, px, gray(ink), gray(bg));
 }
-void centered(const std::string &s, int cx, int cy, int px, int ink = 0, int bg = 238) {
+void centered(const std::string &s, int cx, int cy, int px, int ink = 0, int bg = 255) {
     text(s, cx - system_font::measure(s, px) / 2,
          system_font::centered_y(s,cy,px), px, ink, bg);
 }
@@ -62,7 +64,7 @@ int fit_px(const std::string &s, int px, int width) {
         [](const std::string &value,int size) { return system_font::measure(value,size); });
 }
 void ui_centered(const std::string &s, int cx, int cy, int base,
-                 int width, int ink = 0, int bg = 238) {
+                 int width, int ink = 0, int bg = 255) {
     centered(s,cx,cy,fit_px(s,ui_px(base),width),ink,bg);
 }
 // UTF-8 safe wrapping with the selected system face, not byte truncation.
@@ -90,7 +92,7 @@ std::vector<std::string> wrap(const std::string &s, int px, int width, int lines
     if (!line.empty()) out.push_back(line);
     return out;
 }
-void icon(const uint8_t *mask, int cx, int cy, int size, int ink = 0, int bg = 238) {
+void icon(const uint8_t *mask, int cx, int cy, int size, int ink = 0, int bg = 255) {
     // Original 72px 4bpp coverage masks, sampled at pixel centers.
     const int step=(72<<16)/size, half=step/2-(1<<15);
     for (int y = 0; y < size; ++y) {
@@ -207,7 +209,7 @@ class BookshelfActivity final : public Activity {
             size_t(bookshelf_press::max_dirty_width/2)*area.h,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)));
         if(!feedback_crop) return false;
         auto& gfx=*feedback_canvas;
-        gfx.setDither(false); gfx.fillScreen(gray(238));
+        gfx.setDither(false); gfx.fillScreen(TFT_WHITE);
         for(int other=row*3;other<row*3+3 && first+other<int(books.size());++other) {
             auto r=layout::cover(style,other);r.y-=area.y;
             if(raised && other==slot) r.y-=bookshelf_press::lift;
@@ -321,20 +323,18 @@ class BookshelfActivity final : public Activity {
         if(pct==0) std::snprintf(label,sizeof(label),"%s",tr("Not started · 0%","未开始 · 0%","未開始 · 0%"));
         if(pct==100) std::snprintf(label,sizeof(label),"%s",tr("Finished · 100%","已读完 · 100%","已讀完 · 100%"));
         text(label,244,system_font::centered_y(label,r.y+143,19),19,0,255);
-        M5.Display.fillRoundRect(244,r.y+163,378,11,5,gray(208));
+        M5.Display.fillRoundRect(244,r.y+163,378,11,5,TFT_WHITE);
         int filled=378*pct/100;
         if(filled) M5.Display.fillRoundRect(244,r.y+163,filled,11,std::min(5,filled/2),gray(64));
         M5.Display.drawRoundRect(244,r.y+163,378,11,5,gray(80));
         if(slot<3) M5.Display.drawFastHLine(50,r.y+196,584,gray(96));
     }
     void draw_clock(const std::string &clock) {
-        const int y=system_font::centered_y(clock,40,28);
-        text(clock,36,y,28);
+        shelf_status_bar::draw_clock(clock);
         last_clock=clock;
     }
     void draw_wifi(bool enabled) {
-        icon(pico_shelf_icons::wifi,570,40,28,enabled?0:144);
-        if(!enabled) M5.Display.drawLine(558,28,582,52,gray(96));
+        shelf_status_bar::draw_wifi(enabled);
     }
     void status() {
         char clock[24]="--:--";
@@ -342,9 +342,7 @@ class BookshelfActivity final : public Activity {
         draw_clock(clock);
         draw_wifi(wifi_setting_is_enabled());
         last_status_ms=lgfx::millis();
-        M5.Display.drawRect(606,29,40,22,TFT_BLACK);
-        M5.Display.fillRect(648,36,5,8,TFT_BLACK);
-        // Battery icon only: no percentage without a reliable measurement.
+        shelf_status_bar::draw_battery();
     }
     void header() {
         status();
@@ -415,7 +413,7 @@ class BookshelfActivity final : public Activity {
         const int height = full ? 1216 : 899;
         M5.Display.setClipRect(0,top,684,height);
         const int64_t setup_end = esp_timer_get_time();
-        M5.Display.fillRect(0,top,684,height,gray(238));
+        M5.Display.fillRect(0,top,684,height,TFT_WHITE);
         const int64_t clear_end = esp_timer_get_time();
         if(full) header();
         const int64_t header_end = esp_timer_get_time();
@@ -440,7 +438,7 @@ class BookshelfActivity final : public Activity {
             }
         }
         const int64_t rails_end = esp_timer_get_time();
-        if(books.empty()) ui_centered(ui_locale::text(ui_locale::TextId::BookshelfEmpty),342,270,28,600,0,style==Style::List?255:238);
+        if(books.empty()) ui_centered(ui_locale::text(ui_locale::TextId::BookshelfEmpty),342,270,28,600,0,255);
         if(keyboard_focus && !books.empty()) {
             auto r=layout::cover(style,focus%capacity());
             M5.Display.drawRect(r.x-3,r.y-3,r.w+6,r.h+6,TFT_BLACK);
@@ -514,7 +512,7 @@ public:
         const auto previous_mode=M5.Display.getEpdMode();
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_text);
-        M5.Display.fillRect(0,0,684,72,gray(238));
+        M5.Display.fillRect(0,0,684,72,TFT_WHITE);
         status();
         M5.Display.display(0,0,684,72);
         M5.Display.endWrite();

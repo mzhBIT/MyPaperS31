@@ -21,6 +21,9 @@ namespace m5
     {}
 
     bool begin(void);
+    // Passive board integration: no reset, unseal or data-flash writes.
+    bool beginReadOnly(uint16_t& voltage_mV);
+    bool readMeasurement(uint16_t& voltage_mV, int16_t& current_mA);
 
     int16_t getCurrent_mA(void);
     int16_t getVoltage_mV(void);

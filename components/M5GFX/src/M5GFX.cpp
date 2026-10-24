@@ -2908,7 +2908,7 @@ The usage of each pin is as follows.
     _panel_last.reset(p);
     auto bc = bus_epd->config();
     bc.bus_width = 8;
-    bc.bus_speed = 20000000;
+    bc.bus_speed = MYPAPER_EPD_2D_PIXEL_CLOCK_HZ;
     for (int i = 0; i < 8; ++i) bc.pin_data[i] = 8 + i;
     bc.pin_cl = 16; bc.pin_le = 17; bc.pin_oe = 18;
     bc.pin_sph = 4; bc.pin_pwr = 19; bc.pin_ckv = 40; bc.pin_spv = 35;
@@ -2929,10 +2929,27 @@ The usage of each pin is as follows.
     tc.pin_sda = 0; tc.pin_scl = 1; tc.pin_rst = -1; tc.pin_int = -1;
     tc.i2c_port = 1; tc.i2c_addr = 0x38; tc.freq = 400000;
     tc.x_min = 0; tc.x_max = 683; tc.y_min = 0; tc.y_max = 1215;
-    tc.offset_rotation = 0; tc.bus_shared = true;
+#if CONFIG_MYPAPER_S31_TOUCH_MIRROR_X
+    std::swap(tc.x_min, tc.x_max);
+#endif
+#if CONFIG_MYPAPER_S31_TOUCH_MIRROR_Y
+    std::swap(tc.y_min, tc.y_max);
+#endif
+    // Raw FT6336U coordinates are portrait. Panel offset 3 + touch offset 1
+    // yields transform 0; an odd touch offset also gives portrait calibration
+    // dimensions instead of stretching each axis to the other's resolution.
+#ifdef CONFIG_MYPAPER_S31_TOUCH_ROTATION
+    tc.offset_rotation = CONFIG_MYPAPER_S31_TOUCH_ROTATION;
+#else
+    tc.offset_rotation = 1;
+#endif
+    tc.bus_shared = true;
     t->config(tc);
     p->touch(t);
     ESP_LOGI(LIBRARY_NAME, "MyPaperS31: 8-bit EPD / FT6336U");
+    ESP_LOGI(LIBRARY_NAME, "S31 touch mapping: raw_x=%u..%u raw_y=%u..%u offset=%u panel_offset=3",
+             unsigned(tc.x_min), unsigned(tc.x_max), unsigned(tc.y_min), unsigned(tc.y_max),
+             unsigned(tc.offset_rotation));
     goto init_clear;
   }
 #elif defined (CONFIG_IDF_TARGET_ESP32C6)

@@ -34,7 +34,7 @@ endif()
 
 ### If you use arduino-esp32 components, please activate next comment line.
 if (IDF_TARGET STREQUAL "esp32s31")
-    list(APPEND COMPONENT_REQUIRES esp_driver_spi esp_driver_i2c)
+    list(APPEND COMPONENT_REQUIRES esp_driver_spi esp_driver_i2c esp_driver_dma esp_hal_i2s)
 endif()
 # list(APPEND COMPONENT_REQUIRES arduino-esp32)
 

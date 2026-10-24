@@ -48,6 +48,9 @@ public:
     HttpResponse get_html(const std::string &url, const std::string &referer = {});
     HttpResponse post_json(const std::string &url, const std::string &body,
                            const std::string &referer = {});
+    // Non-idempotent reading reports must not retry an ambiguous transport error.
+    HttpResponse post_json_once(const std::string &url, const std::string &body,
+                               const std::string &referer = {});
     HttpResponse post_json_bearer(const std::string &url, const std::string &body,
                                   const std::string &bearer,
                                   const std::string &referer = {});

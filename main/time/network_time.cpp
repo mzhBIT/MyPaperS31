@@ -1,4 +1,8 @@
 #include "time/network_time.h"
+#include "time/time_basis.h"
+#include <M5Unified.h>
+#include <sys/time.h>
+#include <sdkconfig.h>
 
 #include <atomic>
 #include <ctime>
@@ -52,7 +56,33 @@ extern "C" esp_err_t network_time_sync(uint32_t timeout_ms)
             }
         }
     }
+    if (ret == ESP_OK) {
+#if CONFIG_IDF_TARGET_ESP32S31
+        if (!M5.Rtc.writeUtc(std::time(nullptr))) {
+            ESP_LOGW(TAG, "network time applied, but RTC persistence failed");
+        }
+#endif
+    }
     s_sync_busy.store(false);
+    return ret;
+}
+
+extern "C" esp_err_t network_time_set_manual(const char *local_datetime)
+{
+    int64_t utc;
+    if (!time_basis_parse_manual(local_datetime, &utc)) return ESP_ERR_INVALID_ARG;
+    bool expected = false;
+    if (!s_sync_busy.compare_exchange_strong(expected, true)) return ESP_ERR_INVALID_STATE;
+    esp_err_t ret = ESP_OK;
+#if CONFIG_IDF_TARGET_ESP32S31
+    if (!M5.Rtc.isEnabled() || !M5.Rtc.writeUtc(static_cast<time_t>(utc))) ret = ESP_FAIL;
+#endif
+    if (ret == ESP_OK) {
+        timeval tv{static_cast<time_t>(utc), 0};
+        if (settimeofday(&tv, nullptr) != 0) ret = ESP_FAIL;
+    }
+    s_sync_busy.store(false);
+    ESP_LOGI(TAG, "manual time: result=%s unix=%lld", esp_err_to_name(ret), static_cast<long long>(utc));
     return ret;
 }
 

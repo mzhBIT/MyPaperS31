@@ -1,21 +1,31 @@
 {
-  "idf.currentSetup": "D:\\Software\\esp32\\.espressif\\v5.3.5\\esp-idf",
+  "idf.currentSetup": "D:\\Software\\esp32\\.espressif\\v6.1\\esp-idf",
+  "idf.buildPath": "${workspaceFolder}/build-s31",
+  "idf.sdkconfigDefaults": [
+    "configs/mypapers31/sdkconfig.defaults"
+  ],
+  "idf.cmakeCompilerArgs": [
+    "-G", "Ninja", "-DPYTHON_DEPS_CHECKED=1", "-DESP_PLATFORM=1",
+    "-DMYPAPER_BOARD=MyPaperS31",
+    "-DIDF_TARGET=esp32s31",
+    "-DSDKCONFIG=${workspaceFolder}/build-s31/sdkconfig"
+  ],
   "idf.openOcdConfigs": [
-    "board/esp32p4-builtin.cfg"
+    "board/esp32s31-builtin.cfg"
   ],
   "idf.customExtraVars": {
-    "IDF_TARGET": "esp32p4",
+    "IDF_TARGET": "esp32s31",
     "IDF_COMPONENT_CHECK_NEW_VERSION": "0"
   },
   "clangd.path": "C:\\Espressif\\tools\\esp-clang\\16.0.1-fe4f10a809\\esp-clang\\bin\\clangd.exe",
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
-    "--compile-commands-dir=e:\\opensource\\epdiy-main\\MyPaperP4\\build"
+    "--compile-commands-dir=e:\\opensource\\epdiy-main\\MyPaperP4/build-s31"
   ],
   "idf.flashType": "UART",
-  "idf.flashBaudRate": "921600",
-  "idf.port": "COM10",
+  "idf.flashBaudRate": "460800",
+  "idf.port": "COM5",
   "python-envs.defaultEnvManager": "ms-python.python:conda",
   "python-envs.defaultPackageManager": "ms-python.python:conda",
   "chatgpt.followUpQueueMode": "steer"

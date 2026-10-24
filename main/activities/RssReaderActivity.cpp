@@ -20,6 +20,7 @@
 #include "ui/reader_book_cover.h"
 #include "utils/CooperativeYield.h"
 #include "wifi/wifi_setting.h"
+#include "rss/RssHttpPolicy.h"
 
 #include <M5Unified.h>
 #include <esp_crt_bundle.h>
@@ -31,6 +32,10 @@
 #include <esp_netif.h>
 #include <esp_task.h>
 #include <esp_wifi.h>
+#include <esp_timer.h>
+#include <lwip/netdb.h>
+#include <lwip/inet.h>
+#include <strings.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
 #include <freertos/task.h>
@@ -53,6 +58,32 @@
 
 static const char *TAG = "RSS";
 static const char *RSS_CONFIG_PATH = "/sdcard/rss.txt";
+static void log_feed_dns(const std::string& url)
+{
+#if CONFIG_LOG_MAXIMUM_LEVEL >= 3
+    std::string origin, host;
+    if (!rss_http::split_url(url, origin, host)) return;
+    addrinfo hints = {};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    addrinfo* addresses = nullptr;
+    const int64_t start = esp_timer_get_time();
+    const int ret = getaddrinfo(host.c_str(), nullptr, &hints, &addresses);
+    unsigned count = 0;
+    for (auto* p = addresses; p && count < 4; p = p->ai_next) {
+        if (p->ai_family != AF_INET) continue;
+        char ip[INET_ADDRSTRLEN] = {};
+        const auto* addr = reinterpret_cast<const sockaddr_in*>(p->ai_addr);
+        if (inet_ntop(AF_INET, &addr->sin_addr, ip, sizeof(ip)))
+            ESP_LOGI(TAG, "feed DNS host=%s IPv4[%u]=%s", host.c_str(), count++, ip);
+    }
+    if (addresses) freeaddrinfo(addresses);
+    ESP_LOGI(TAG, "feed DNS done host=%s ret=%d candidates=%u time=%lld ms",
+             host.c_str(), ret, count, (esp_timer_get_time() - start) / 1000);
+#else
+    (void)url;
+#endif
+}
 static const int TOP_H = header_layout::height;
 static const int ARTICLE_TOP_H = 50;
 static const int FEED_ROW_H = 78;
@@ -1426,22 +1457,71 @@ private:
         cfg.timeout_ms = 12000;
         cfg.crt_bundle_attach = esp_crt_bundle_attach;
         cfg.user_agent = "MyPaperS3 RSS Reader";
+        // Keep hostname/SNI verification; only restrict address resolution.
+        cfg.addr_type = HTTP_ADDR_TYPE_INET;
+        cfg.disable_auto_redirect = true; // Streaming open/read needs an explicit loop.
+        cfg.max_redirection_count = rss_http::max_redirects;
+        std::string location;
+        cfg.user_data = &location;
+        cfg.event_handler = [](esp_http_client_event_t* event) -> esp_err_t {
+            if (event->event_id == HTTP_EVENT_ON_HEADER && event->header_key && event->header_value
+                && !strcasecmp(event->header_key, "Location"))
+                *static_cast<std::string*>(event->user_data) = event->header_value;
+            return ESP_OK;
+        };
         esp_http_client_handle_t client = esp_http_client_init(&cfg);
         if (!client) return false;
         // Every RSS request uses a fresh handle, so keeping the HTTP/1.1
         // connection alive only makes unframed feeds wait for a timeout.
         esp_http_client_set_header(client, "Connection", "close");
-        esp_err_t err = esp_http_client_open(client, 0);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "open failed %s: %s", url.c_str(), esp_err_to_name(err));
+        std::string current_url = url;
+        std::vector<std::string> visited{url};
+        int64_t content_length = -1;
+        bool chunked = false, response_ready = false;
+        int status = 0;
+        for (unsigned hop = 0; hop <= rss_http::max_redirects; ++hop) {
+            location.clear();
+            log_feed_dns(current_url);
+            ESP_LOGI(TAG, "feed connect begin family=IPv4 hop=%u url=%s", hop, current_url.c_str());
+            const int64_t connect_start = esp_timer_get_time();
+            esp_err_t err = esp_http_client_open(client, 0);
+            if (err != ESP_OK) {
+                const int socket_errno = esp_http_client_get_errno(client);
+                ESP_LOGW(TAG, "open failed %s: %s family=IPv4 errno=%d time=%lld ms",
+                         current_url.c_str(), esp_err_to_name(err), socket_errno,
+                         (esp_timer_get_time() - connect_start) / 1000);
+                log_tls_heap("feed-open-failed");
+                break;
+            }
+            content_length = esp_http_client_fetch_headers(client);
+            chunked = esp_http_client_is_chunked_response(client);
+            status = esp_http_client_get_status_code(client);
+            ESP_LOGI(TAG, "feed response status=%d content_length=%lld chunked=%d time=%lld ms",
+                     status, (long long)content_length, chunked ? 1 : 0,
+                     (esp_timer_get_time() - connect_start) / 1000);
+            if (!rss_http::redirect_status(status)) {
+                response_ready = status >= 200 && status < 300;
+                break;
+            }
+            std::string next;
+            if (hop == rss_http::max_redirects ||
+                !rss_http::redirect_target(current_url, location, next) ||
+                std::find(visited.begin(), visited.end(), next) != visited.end()) {
+                ESP_LOGW(TAG, "feed redirect rejected: hop=%u location=%s", hop, location.c_str());
+                break;
+            }
+            ESP_LOGI(TAG, "feed redirect status=%d target=%s", status, next.c_str());
+            // Discard redirect bodies by closing, rather than mixing HTML into RSS.
+            esp_http_client_close(client);
+            if (esp_http_client_set_url(client, next.c_str()) != ESP_OK) break;
+            current_url = std::move(next);
+            visited.push_back(current_url);
+        }
+        if (!response_ready) {
+            esp_http_client_close(client);
             esp_http_client_cleanup(client);
             return false;
         }
-        const int64_t content_length = esp_http_client_fetch_headers(client);
-        const bool chunked = esp_http_client_is_chunked_response(client);
-        const int status = esp_http_client_get_status_code(client);
-        ESP_LOGI(TAG, "feed response status=%d content_length=%lld chunked=%d",
-                 status, (long long)content_length, chunked ? 1 : 0);
         // The connection/handshake may legitimately need the longer timeout,
         // but a news feed that sends no body data for two seconds has stalled.
         esp_http_client_set_timeout_ms(client, 2000);

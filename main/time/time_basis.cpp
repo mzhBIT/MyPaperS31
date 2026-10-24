@@ -257,6 +257,16 @@ extern "C" bool time_basis_parse_legacy_beijing(const char *display,
                     DEFAULT_OFFSET, utc_seconds);
 }
 
+extern "C" bool time_basis_parse_manual(const char *display, int64_t *utc_seconds)
+{
+    int64_t beijing_utc;
+    if (!utc_seconds || !time_basis_parse_legacy_beijing(display, &beijing_utc)
+        || display[0] != '2' || display[1] != '0') return false;
+    *utc_seconds = beijing_utc + (DEFAULT_OFFSET - time_basis_get_offset_minutes()) * 60;
+    if (*utc_seconds < 1704067200) return false;
+    return true;
+}
+
 extern "C" bool time_basis_format_utc(int64_t utc_seconds, char *display,
                                          size_t capacity, int64_t *sort_key)
 {
