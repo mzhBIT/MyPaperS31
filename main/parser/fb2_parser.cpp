@@ -190,6 +190,7 @@ int base64_value(unsigned char c)
 
 bool Fb2Book::open(const char *path)
 {
+    metadata_memory::Budget budget;
     const int64_t open_started = esp_timer_get_time();
     close();
     if (!path || !path[0]) return false;
@@ -325,7 +326,8 @@ bool Fb2Book::open(const char *path)
                         section.title = tag_content(xml, "title", section.start, title_limit);
                         if (section.title.empty()) section.title = "Section " + std::to_string(number + 1);
                         const size_t index = _sections.size();
-                        _sections.push_back(section);
+                        if (!budget.add(_sections.size(),sizeof(section),{section.id.size(),section.href.size(),section.title.size()})) { _last_error="Book navigation exceeds metadata memory limit"; return false; }
+            _sections.push_back(section);
                         if (section.in_spine) _spine_indices.push_back(index);
                         // FB2 footnotes normally target the section id, but some
                         // generators put the destination id on a child paragraph.
@@ -364,6 +366,7 @@ bool Fb2Book::open(const char *path)
             section.start = body_open_end + 1;
             section.end = body_close;
             const size_t index = _sections.size();
+            if (!budget.add(_sections.size(),sizeof(section),{section.id.size(),section.href.size(),section.title.size()})) { _last_error="Book navigation exceeds metadata memory limit"; return false; }
             _sections.push_back(section);
             _spine_indices.push_back(index);
             _anchor_hrefs[section.id] = section.href;
@@ -399,11 +402,11 @@ void Fb2Book::close()
     _last_error.clear();
     title.clear();
     author.clear();
-    _sections.clear();
-    _spine_indices.clear();
-    _binaries.clear();
-    _anchor_hrefs.clear();
-    _binary_hrefs.clear();
+    metadata_memory::release(_sections);
+    metadata_memory::release(_spine_indices);
+    metadata_memory::release(_binaries);
+    metadata_memory::release(_anchor_hrefs);
+    metadata_memory::release(_binary_hrefs);
 }
 
 bool Fb2Book::read_range(uint64_t start, uint64_t end, std::string *out) const

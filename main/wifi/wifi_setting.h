@@ -46,6 +46,7 @@ esp_err_t wifi_setting_set_power_mode(wifi_setting_power_mode_t mode);
 // selected. Safe to call at boot and after a temporary AP-mode transfer.
 esp_err_t wifi_setting_start_always_on(void);
 // Releases an app's network use. In Always On mode the Wi-Fi connection stays.
+// S31 on-demand mode stops the radio but retains driver/netif for the next app.
 esp_err_t wifi_setting_release(void);
 esp_err_t wifi_setting_init(void);
 esp_err_t wifi_setting_scan(wifi_setting_ap_t *records,
@@ -65,6 +66,8 @@ bool wifi_setting_load_credentials(char *ssid,
 esp_err_t wifi_setting_save_credentials(const char *ssid, const char *password);
 esp_err_t wifi_setting_clear_credentials(void);
 esp_err_t wifi_setting_deinit(bool power_down_c6);
+bool wifi_setting_background_busy(void);
+esp_err_t wifi_setting_resume_saved_async(void);
 
 #ifdef __cplusplus
 }

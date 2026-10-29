@@ -11,6 +11,7 @@
 #include "renderer/TextRenderer.h"
 #include "renderer/ReaderPageBuffer.h"
 #include "ui/SystemFont.h"
+#include "ui/ReaderHeader.h"
 #include "ui/reader_background.h"
 #include "utils/CooperativeYield.h"
 #include <M5Unified.h>
@@ -23,7 +24,7 @@
 #include <vector>
 
 static const char *TAG = "READER";
-static const int TOP_H = 50;
+static const int TOP_H = reader_header::height;
 static TxtBook g_book;
 static TxtPage g_page;
 static uint32_t g_offset = 0;
@@ -62,22 +63,15 @@ static int reader_header_height()
 
 static void draw_page_number(lgfx::LGFXBase &gfx, int w, uint32_t offset) {
     if (!reader_header_visible()) return;
-    // Clear old page number area then draw new one
-    gfx.fillRect(w - 170, 0, 170, TOP_H, TFT_WHITE);
-    gfx.setTextColor(TFT_BLACK, TFT_WHITE);
     uint32_t size = g_book.file_size();
     double pct = size ? ((double)offset * 100.0 / (double)size) : 0.0;
     if (pct > 100.0) pct = 100.0;
     char pg[32]; snprintf(pg, sizeof(pg), "%.2f%%", pct);
-    system_font::draw_right(gfx, pg, w - 5, 3);
+    reader_header::draw(gfx, w, g_book.title, pg);
 }
-static void draw_page_number(int w) { draw_page_number(M5.Display, w, g_page.start_offset); }
 
 static void draw_topbar(lgfx::LGFXBase &gfx, int w, uint32_t offset) {
     if (!reader_header_visible()) return;
-    gfx.fillRect(0, 0, w, TOP_H, TFT_WHITE);
-    gfx.setTextColor(TFT_BLACK, TFT_WHITE);
-    system_font::draw_center(gfx, system_font::ellipsize(g_book.title, w - 180), w / 2, 3);
     draw_page_number(gfx, w, offset);
 }
 static void draw_topbar(int w) { draw_topbar(M5.Display, w, g_page.start_offset); }
@@ -214,6 +208,7 @@ static void draw_content(int w, int h, lgfx::LGFXBase &gfx = M5.Display,
 class ReaderActivity : public Activity {
     bool m_seen_show = false;
     BookReadingTimer m_reading_timer;
+    std::string m_header_clock;
     ReaderOverlay m_overlay;
     int m_swipe_animation=0;
     ReaderAutoPage m_auto_page;
@@ -241,9 +236,11 @@ public:
     ~ReaderActivity() {
         m_reading_timer.finish();
         g_book.save_progress(g_page.start_offset, g_history);
+        reader_text_renderer().releaseFontStreamCache();
     }
 
     void on_hide() override { m_reading_timer.pause(); m_auto_page.reset(); }
+    void on_standby_resume() override { m_reading_timer.resume(); m_auto_page.reset(); }
 
     void on_show() override {
         m_frame.reset();
@@ -284,6 +281,8 @@ public:
 
     void loop() override {
         run_prefetch();
+        if (reader_header_visible() && !m_overlay.visible() && !M5.Display.displayBusy())
+            reader_header::update_clock(m_header_clock);
         const bool allowed = !m_overlay.visible() && !M5.Display.displayBusy() && !g_page.eof &&
             (!m_frame.buffer || m_frame.ready || !cache_enabled());
         if (m_auto_page.due(esp_timer_get_time(), reader_auto_page_seconds(), allowed)) {
@@ -334,6 +333,12 @@ public:
         return true;
     }
 
+    bool on_navigation_key(int direction) override { return on_key(direction < 0 ? APP_KEY_UP : APP_KEY_DOWN); }
+    bool on_cover_home_key() override { return on_key(APP_KEY_BACK); }
+    bool on_reader_menu_key() override {
+        return on_key(m_overlay.visible() ? APP_KEY_BACK : APP_KEY_READER_MENU);
+    }
+
     bool on_key(int key) override {
         m_auto_page.reset();
         int w = M5.Display.width(), h = M5.Display.height();
@@ -347,7 +352,7 @@ public:
             ActivityManager::instance().pop();
             return true;
         }
-        if (key == APP_KEY_EXTRA) {
+        if (key == APP_KEY_EXTRA || key == APP_KEY_READER_MENU) {
             m_overlay.open(ReaderOverlay::Tab::Settings);
             m_overlay.redraw();
             return true;
@@ -401,23 +406,19 @@ public:
         if (imported) ESP_LOGI(TAG, "redraw framebuffer hit offset=%lu vertical=%d",
             (unsigned long)g_page.start_offset, g_page.vertical);
         if (imported) {
-            if (reader_header_visible()) draw_topbar(w);
+            // The dynamic header is drawn below, after importing the page.
         } else if (reader_background_enabled()) {
             reader_background_draw(M5.Display, w, h);
-            if (reader_header_visible()) draw_topbar(w);
         } else if (mode == epd_mode_t::epd_quality
                 || mode == epd_mode_t::epd_hd) {
             M5.Display.fillScreen(TFT_WHITE);
-            if (reader_header_visible()) draw_topbar(w);
         } else {
             // Only clear content area, topbar stays unchanged
             int clear_y = reader_header_height();
             M5.Display.fillRect(0, clear_y, w, h - clear_y, TFT_WHITE);
         }
         int64_t t1 = esp_timer_get_time();
-        if (mode != epd_mode_t::epd_quality && mode != epd_mode_t::epd_hd) {
-            draw_page_number(w);
-        }
+        if (reader_header_visible()) draw_topbar(w);
         int64_t t2 = esp_timer_get_time();
         if (!imported) draw_content(w, h);
         if (m_overlay.visible()) m_overlay.draw();

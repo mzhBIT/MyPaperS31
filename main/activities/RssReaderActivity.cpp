@@ -1118,6 +1118,7 @@ public:
     ~RssReaderActivity() override
     {
         stop_article_image_loader();
+        reader_text_renderer().releaseFontStreamCache();
         if (_image_result_queue) {
             vQueueDelete(_image_result_queue);
             _image_result_queue = nullptr;
@@ -1186,6 +1187,15 @@ public:
         }
     }
 
+    bool can_standby() const override { return !_image_load_busy; }
+    void on_standby_enter() override { _auto_page.reset(); }
+    void on_standby_resume() override { _auto_page.reset(); }
+    bool on_navigation_key(int direction) override { return on_key(direction < 0 ? APP_KEY_UP : APP_KEY_DOWN); }
+    bool on_cover_home_key() override { return _view == View::Article && on_key(APP_KEY_BACK); }
+    bool on_reader_menu_key() override {
+        if (_view != View::Article || bing_wallpaper_mode()) return false;
+        return on_key(_reader_overlay.visible() ? APP_KEY_BACK : APP_KEY_EXTRA);
+    }
     bool on_key(int key) override
     {
         _auto_page.reset();

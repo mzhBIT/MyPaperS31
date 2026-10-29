@@ -412,8 +412,18 @@ int lgfx_pngle_prepare(pngle_t *pngle, lgfx_pngle_read_callback_t read_cb, void*
   pngle->trans_color = LGFX_PNGLE_NON_TRANS_COLOR;
   lgfx_tinfl_init(&pngle->inflator);
 
-  if (pngle->read_callback(user_data, pngle->read_buf, 29) != 29
-   || memcmp_P(pngle->read_buf, png_header, sizeof(png_header))) return PNGLE_ERROR("Incorrect PNG signature");
+  const uint32_t header_bytes = pngle->read_callback(user_data, pngle->read_buf, 29);
+  if (header_bytes != 29) {
+    fprintf(stderr, "[pngle] header read short: got=%u expected=29\n", (unsigned)header_bytes);
+    return PNGLE_ERROR("Incomplete PNG header");
+  }
+  if (memcmp_P(pngle->read_buf, png_header, sizeof(png_header))) {
+    fprintf(stderr, "[pngle] header mismatch: first16=");
+    for (unsigned i = 0; i < sizeof(png_header); ++i)
+      fprintf(stderr, "%02x", (unsigned)pngle->read_buf[i]);
+    fprintf(stderr, " expected=89504e470d0a1a0a0000000d49484452\n");
+    return PNGLE_ERROR("Incorrect PNG signature or IHDR header");
+  }
 
   memcpy(&(pngle->hdr), &pngle->read_buf[16], sizeof(pngle_ihdr_t));
   pngle->hdr.width  = swap32(pngle->hdr.width );

@@ -32,7 +32,7 @@ esp_err_t settings_restore_defaults()
     // are user data, rather than system preferences.
     static constexpr const char *names[] = {
         "wifi_cfg", "frontlight", "frontlight_s31", "home_ui", "time_basis", "ds_chat", "amap",
-        "reader_style", "rss_reader", "reader_bg", "rss_reader_bg",
+        "reader_style", "rss_reader", "reader_bg", "rss_reader_bg", "standby_bg",
         "reader_cover", "rss_reader_cover", "script_mode", "writing_mode",
         "audio_out", "text_input", "weread_pref", "system_ui", "system_font", "bookshelf_ui"
     };

@@ -127,6 +127,7 @@ public:
     void on_create() override { _symbols = stocks::load_watchlist(); refresh(); }
     void on_show() override { _dirty = true; }
     bool allow_system_back() const override { return false; }
+    bool can_standby() const override { return !_request; }
     void loop() override {
         if (_request && _request->done.load(std::memory_order_acquire)) {
             if (_request->success) {

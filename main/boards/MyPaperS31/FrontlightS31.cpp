@@ -15,11 +15,12 @@ constexpr char TAG[] = "S31_FRONTLIGHT";
 constexpr char NVS_NS[] = "frontlight_s31";
 constexpr auto MODE = LEDC_LOW_SPEED_MODE;
 bool initialized = false;
-int level = 0, temperature = 5;
+bool suspended = false;
+int level = 0, temperature = 500;
 frontlight_mix::Duty active{};
 
 bool apply(int next_level, int next_temperature) {
-    const auto next = frontlight_mix::mix(next_level, next_temperature);
+    const auto next = frontlight_mix::mix_continuous(suspended ? 0 : next_level, next_temperature);
     auto write = [](ledc_channel_t ch, uint32_t duty) {
         // Immediate PWM only. The combined set_duty_and_update API uses the
         // fade service's per-channel locks in IDF 6.1, even without a fade.
@@ -48,8 +49,8 @@ void save() {
     nvs_handle_t h;
     esp_err_t err = nvs_open(NVS_NS, NVS_READWRITE, &h);
     if (err == ESP_OK) {
-        err = nvs_set_u8(h, "level", level);
-        if (err == ESP_OK) err = nvs_set_u8(h, "cct", temperature);
+        err = nvs_set_u16(h, "brightness", level);
+        if (err == ESP_OK) err = nvs_set_u16(h, "cct_fine", temperature);
         if (err == ESP_OK) err = nvs_commit(h);
         nvs_close(h);
     }
@@ -100,27 +101,48 @@ void frontlight_init(void) {
         nvs_get_u8(h, "cct", &stored_temperature);
         nvs_close(h);
     }
-    temperature = stored_temperature <= 10 ? stored_temperature : 5;
-    const int restored_level = stored_level <= 10 ? stored_level : 0;
+    temperature = stored_temperature <= 10 ? stored_temperature * 100 : 500;
+    int restored_level = stored_level <= 10 ? stored_level * 100 : 0;
+    if (nvs_open(NVS_NS, NVS_READONLY, &h) == ESP_OK) {
+        uint16_t fine = restored_level;
+        if (nvs_get_u16(h, "brightness", &fine) == ESP_OK && fine <= 1000) restored_level = fine;
+        fine = temperature;
+        if (nvs_get_u16(h, "cct_fine", &fine) == ESP_OK && fine <= 1000) temperature = fine;
+        nvs_close(h);
+    }
     initialized = true;
     if (apply(restored_level, temperature)) level = restored_level;
     ESP_LOGI(TAG, "ready cool=GPIO%d warm=GPIO%d active_high=1 PWM=20000Hz level=%d cct=%d",
              frontlight_cool, frontlight_warm, level, temperature);
 }
-int frontlight_get_level(void) { return level; }
-int frontlight_get_percent(void) { return level * 5; }
-int frontlight_get_color_temperature(void) { return temperature; }
+int frontlight_get_level(void) { return (level + 50) / 100; }
+int frontlight_get_brightness(void) { return level; }
+void frontlight_save_brightness(void) { if (initialized) save(); }
+int frontlight_get_percent(void) { return level / 20; }
+int frontlight_get_color_temperature(void) { return (temperature + 50) / 100; }
+int frontlight_get_color_temperature_fine(void) { return temperature; }
+void frontlight_save_settings(void) { if (initialized) save(); }
+void frontlight_set_suspended(bool value) {
+    const int saved_level = level;
+    suspended = value;
+    if (initialized) apply(level, temperature);
+    level = saved_level; // A temporary sleep override must never change the setting.
+}
 void frontlight_set_level(int value) {
-    value = frontlight_mix::clamp(value);
+    frontlight_preview_brightness(frontlight_mix::clamp(value) * 100);
+    frontlight_save_brightness();
+}
+void frontlight_preview_brightness(int value) {
+    value = value < 0 ? 0 : value > 1000 ? 1000 : value;
     if (!initialized || value == level || !apply(value, temperature)) return;
-    level = value; save();
-    ESP_LOGI(TAG, "brightness=%d%% cct=%d cool_duty=%lu warm_duty=%lu",
-             frontlight_get_percent(), temperature, (unsigned long)active.cool, (unsigned long)active.warm);
+    level = value;
 }
 void frontlight_set_color_temperature(int value) {
-    value = frontlight_mix::clamp(value);
+    frontlight_preview_color_temperature(frontlight_mix::clamp(value) * 100);
+    frontlight_save_settings();
+}
+void frontlight_preview_color_temperature(int value) {
+    value = frontlight_mix::clamp_fine(value);
     if (!initialized || value == temperature || !apply(level, value)) return;
-    temperature = value; save();
-    ESP_LOGI(TAG, "brightness=%d%% cct=%d cool_duty=%lu warm_duty=%lu",
-             frontlight_get_percent(), temperature, (unsigned long)active.cool, (unsigned long)active.warm);
+    temperature = value;
 }

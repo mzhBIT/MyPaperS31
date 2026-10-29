@@ -123,6 +123,7 @@ public:
         else _auto_input = true;
     }
     bool allow_system_back() const override { return false; }
+    bool can_standby() const override { return !_request; }
     void loop() override {
         if (M5.Display.displayBusy() || _input.visible()) return;
         if (_request && _request->done.load(std::memory_order_acquire)) {

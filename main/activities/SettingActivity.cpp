@@ -1,5 +1,7 @@
 #include "activities/SettingActivity.h"
 #include "activities/SystemFontSettingsActivity.h"
+#include "activities/ReaderBackgroundPickerActivity.h"
+#include "ui/standby_wallpaper.h"
 #include "ui/ListFocus.h"
 
 #include "activities/Activity.h"
@@ -10,6 +12,7 @@
 #include "deepseek/DeepSeekConfig.h"
 #include "deepseek/DeepSeekClient.h"
 #include "frontlight/frontlight.h"
+#include "ui/FrontlightControls.h"
 #include "map/AmapConfig.h"
 #include "map/MapCache.h"
 #include "activities/OfflineMapPickerActivity.h"
@@ -45,7 +48,11 @@ constexpr int PAD = 20;
 constexpr int SETTINGS_ROW_Y = HEADER_H;
 constexpr int SETTINGS_ROW_H = 110;
 constexpr int SETTINGS_ROW_GAP = 0;
+#if CONFIG_IDF_TARGET_ESP32S31
+constexpr int SETTINGS_ITEM_COUNT = 11;
+#else
 constexpr int SETTINGS_ITEM_COUNT = 10;
+#endif
 constexpr int SETTINGS_VISIBLE_ROWS = 9;
 
 constexpr int SCAN_TOP = HEADER_H;
@@ -1065,154 +1072,126 @@ private:
 };
 
 class FrontlightSettingsActivity final : public Activity {
+    using Kind = frontlight_controls::Kind;
 public:
-    void on_create() override { draw(true); }
-
-    bool on_touch(const TouchEvent &event) override
-    {
-        if (event.type == TouchEventType::Back || header_back_hit(event)) {
-            ActivityManager::instance().pop();
+    ~FrontlightSettingsActivity() override { finish_drag(); }
+    void on_create() override { _sequence = touch_input_contact().sequence; draw(true); }
+    void on_hide() override { finish_drag(); }
+    void loop() override {
+        for (int row=0; row<rows(); ++row)
+            if (_shown[row] != frontlight_controls::value(Kind(row))) _dirty |= 1u << row;
+        const auto contact = touch_input_contact();
+        if (contact.down && contact.sequence != _sequence) {
+            _sequence = contact.sequence;
+            _drag = slider_hit(contact.start_x, contact.start_y);
+            if (_drag >= 0) touch_input_claim_contact();
+        }
+        if (_drag >= 0) {
+            preview(_drag, contact.x);
+            if (!contact.down) finish_drag();
+        }
+        if (_dirty && !M5.Display.displayBusy() &&
+            (_drag < 0 || uint32_t(lgfx::millis()-_last_draw) >= 160)) draw_dirty();
+    }
+    bool on_touch(const TouchEvent& event) override {
+        int row = _drag >= 0 ? _drag : slider_hit(event.start_x, event.start_y);
+        if (row < 0 && event.type == TouchEventType::Tap) row = slider_hit(event.x, event.y);
+        if (row >= 0) {
+            preview(row, event.x);
+            if (!touch_input_contact().down) finish_drag();
             return true;
+        }
+        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+            ActivityManager::instance().pop(); return true;
         }
         if (event.type != TouchEventType::Tap) return false;
-        const Layout layout = make_layout(M5.Display.width());
-        const int control_y = brightness_y();
-        if (event.y >= control_y && event.y < control_y + CONTROL_H) {
-            if (event.x >= layout.minus_x && event.x < layout.minus_x + layout.button_w) change(-1);
-            else if (event.x >= layout.plus_x && event.x < layout.plus_x + layout.button_w) change(1);
-            else if (event.x >= layout.bar_x && event.x < layout.bar_x + layout.bar_area_w) {
-                const int level = std::clamp(
-                    ((event.x - layout.bar_x) * 10 + layout.bar_area_w - 1)
-                        / layout.bar_area_w,
-                    0, 10);
-                frontlight_set_level(level);
-                draw(false);
-            }
-            return true;
-        }
-        if (frontlight_get_color_temperature() >= 0 &&
-            event.y >= temperature_y() && event.y < temperature_y() + CONTROL_H) {
-            int value = frontlight_get_color_temperature();
-            if (event.x >= layout.minus_x && event.x < layout.minus_x + layout.button_w) --value;
-            else if (event.x >= layout.plus_x && event.x < layout.plus_x + layout.button_w) ++value;
-            else if (event.x >= layout.bar_x && event.x < layout.bar_x + layout.bar_area_w)
-                value = ((event.x - layout.bar_x) * 10 + layout.bar_area_w - 1) / layout.bar_area_w;
-            else return false;
-            frontlight_set_color_temperature(std::clamp(value, 0, 10));
-            draw(false);
+        for (row=0; row<rows(); ++row) {
+            if (event.y < slider_y(row)-44 || event.y >= slider_y(row)+44) continue;
+            if (event.x < left()-20) change(row, -1);
+            else if (event.x > right()+20) change(row, 1);
             return true;
         }
         return false;
     }
-
-    bool on_key(int key) override
-    {
-        if (key == APP_KEY_BACK) {
-            ActivityManager::instance().pop();
-            return true;
-        }
-        if (key == APP_KEY_UP) { change(1); return true; }
-        if (key == APP_KEY_DOWN) { change(-1); return true; }
+    bool on_key(int key) override {
+        if (key == APP_KEY_BACK) { ActivityManager::instance().pop(); return true; }
+        if (key == APP_KEY_UP) { change(0, 1); return true; }
+        if (key == APP_KEY_DOWN) { change(0, -1); return true; }
         return false;
     }
-
 private:
-    static constexpr int CONTROL_Y = 350;
-    static constexpr int CONTROL_H = 132;
-
-    static int brightness_y() {
-        return frontlight_get_color_temperature() >= 0
-            ? std::max(250, HEADER_H + 2 * system_font::line_height() + 70) : CONTROL_Y;
+    int _drag = -1, _shown[2] = {-1, -1};
+    unsigned _dirty = 0;
+    bool _unsaved = false;
+    uint32_t _sequence = 0, _last_draw = 0;
+    static int rows() { return frontlight_controls::has_temperature() ? 2 : 1; }
+    static int left() { return 120; }
+    static int right() { return M5.Display.width()-120; }
+    static int row_height() {
+        return std::min<int>(2*system_font::line_height()+220,
+            (M5.Display.height()-HEADER_H-60-system_font::line_height())/rows());
     }
-    static int temperature_y() {
-        return brightness_y() + CONTROL_H + 48 + 2 * system_font::line_height() + 32;
+    static int row_top(int row) { return HEADER_H+20+row*row_height(); }
+    static int slider_y(int row) { return row_top(row)+row_height()-system_font::line_height()-52; }
+    static int slider_hit(int x, int y) {
+        if (x < left()-14 || x > right()+14) return -1;
+        for (int row=0; row<rows(); ++row)
+            if (y >= slider_y(row)-40 && y < slider_y(row)+40) return row;
+        return -1;
     }
-
-    struct Layout {
-        int minus_x;
-        int plus_x;
-        int button_w;
-        int bar_x;
-        int bar_area_w;
-        int bar_w;
-        int bar_gap;
-    };
-
-    static Layout make_layout(int width)
-    {
-        constexpr int margin = 20;
-        constexpr int side_gap = 12;
-        constexpr int bar_gap = 6;
-        // The page is portrait (684 px wide).  Keep the - / bars / + groups
-        // within that live width rather than using the panel's 1216 px axis.
-        const int button_w = std::clamp(width / 8, 72, 88);
-        const int minus_x = margin;
-        const int plus_x = width - margin - button_w;
-        const int bar_x = minus_x + button_w + side_gap;
-        const int bar_area_w = std::max(10, plus_x - side_gap - bar_x);
-        const int bar_w = std::max(4, (bar_area_w - 9 * bar_gap) / 10);
-        return {minus_x, plus_x, button_w, bar_x, bar_area_w, bar_w, bar_gap};
+    void adjust(int row, int value) {
+        value = std::clamp(value, 0, 1000);
+        if (value == frontlight_controls::value(Kind(row))) return;
+        frontlight_controls::preview(Kind(row), value);
+        _dirty |= 1u << row; _unsaved = true;
     }
-
-    void change(int delta)
-    {
-        frontlight_set_level(std::clamp(frontlight_get_level() + delta, 0, 10));
-        draw(false);
+    void preview(int row, int x) { adjust(row, frontlight_controls::from_x(x, left(), right())); }
+    void finish_drag() {
+        _drag = -1;
+        if (_unsaved) { frontlight_save_settings(); _unsaved = false; }
     }
-
-    static void draw_controls(const Layout& layout, int y, int level) {
-        M5.Display.drawRoundRect(layout.minus_x, y, layout.button_w, CONTROL_H, 10, TFT_BLACK);
-        M5.Display.drawRoundRect(layout.plus_x, y, layout.button_w, CONTROL_H, 10, TFT_BLACK);
-        const int label_y = y + std::max(0, (CONTROL_H - system_font::line_height()) / 2);
-        system_font::draw_center(M5.Display, "-", layout.minus_x + layout.button_w / 2, label_y, TFT_BLACK);
-        system_font::draw_center(M5.Display, "+", layout.plus_x + layout.button_w / 2, label_y, TFT_BLACK);
-        for (int i = 0; i < 10; ++i) {
-            const int x = layout.bar_x + i * (layout.bar_w + layout.bar_gap);
-            if (i < level) M5.Display.fillRoundRect(x, y + 43, layout.bar_w, 46, 5, TFT_BLACK);
-            else M5.Display.drawRoundRect(x, y + 43, layout.bar_w, 46, 5, TFT_BLACK);
+    void change(int row, int delta) {
+        adjust(row, frontlight_controls::value(Kind(row)) + delta*frontlight_controls::step(Kind(row)));
+        finish_drag();
+    }
+    void draw_row(int row) {
+        const int width=M5.Display.width(), top=row_top(row), y=slider_y(row), line=system_font::line_height();
+        M5.Display.fillRect(0, top, width, row_height(), TFT_WHITE);
+        system_font::draw_center(M5.Display, frontlight_controls::title(Kind(row)), width/2, top);
+        system_font::draw_center(M5.Display, frontlight_controls::label(Kind(row)), width/2, top+line+12);
+        frontlight_controls::draw_slider(M5.Display, Kind(row), left(), right(), y);
+        M5.Display.drawRoundRect(20, y-44, 76, 88, 10, TFT_BLACK);
+        M5.Display.drawRoundRect(width-96, y-44, 76, 88, 10, TFT_BLACK);
+        system_font::draw_center(M5.Display, "-", 58, y-line/2);
+        system_font::draw_center(M5.Display, "+", width-58, y-line/2);
+        if (row == 1) {
+            system_font::draw_left(M5.Display, ui_locale::text(ui_locale::TextId::WarmLight), left()-14, y+32);
+            system_font::draw_right(M5.Display, ui_locale::text(ui_locale::TextId::CoolLight), right()+14, y+32);
         }
+        _shown[row] = frontlight_controls::value(Kind(row));
     }
-
-    void draw(bool quality)
-    {
-        const int level = frontlight_get_level();
-        const int width = M5.Display.width();
-        const Layout layout = make_layout(width);
+    void draw_dirty() {
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
+        int first=rows(), last=0;
+        for (int row=0; row<rows(); ++row) if (_dirty & (1u<<row)) {
+            draw_row(row); first=std::min(first,row); last=row;
+        }
+        if (first < rows()) M5.Display.display(0, row_top(first), M5.Display.width(), (last-first+1)*row_height());
+        M5.Display.endWrite();
+        _dirty=0; _last_draw=lgfx::millis();
+    }
+    void draw(bool quality) {
         M5.Display.startWrite();
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_text);
         M5.Display.fillScreen(TFT_WHITE);
         draw_header(ui_locale::text(ui_locale::TextId::Frontlight));
-        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Brightness), width / 2, HEADER_H + 14, TFT_BLACK);
-        system_font::draw_center(M5.Display, std::to_string(frontlight_get_percent()) + "%",
-                                 width / 2, 180, TFT_BLACK);
-
-        draw_controls(layout, brightness_y(), level);
-        const int temperature = frontlight_get_color_temperature();
-        int hint_y = 590;
-        if (temperature >= 0) {
-            using ui_locale::TextId;
-            const int title_y = brightness_y() + CONTROL_H + 48;
-            const int line = system_font::line_height();
-            system_font::draw_center(M5.Display, ui_locale::text(TextId::ColorTemperature), width / 2, title_y, TFT_BLACK);
-            const std::string value = temperature == 0 ? ui_locale::text(TextId::WarmLight) :
-                temperature == 5 ? ui_locale::text(TextId::NeutralLight) :
-                temperature == 10 ? ui_locale::text(TextId::CoolLight) :
-                std::to_string(10 - temperature) + " : " + std::to_string(temperature);
-            system_font::draw_center(M5.Display, value, width / 2, title_y + line + 12, TFT_BLACK);
-            draw_controls(layout, temperature_y(), temperature);
-            const int labels_y = temperature_y() + CONTROL_H + 16;
-            system_font::draw_left(M5.Display, ui_locale::text(TextId::WarmLight), layout.minus_x, labels_y, TFT_BLACK);
-            const std::string cool = ui_locale::text(TextId::CoolLight);
-            system_font::draw_right(M5.Display, cool, width - PAD, labels_y, TFT_BLACK);
-            hint_y = labels_y + line + 32;
-        }
-        system_font::draw_center(M5.Display, ui_locale::text(temperature >= 0
-                                     ? ui_locale::TextId::BrightnessTenStepHint : ui_locale::TextId::BrightnessStepHint),
-                                 width / 2, hint_y, TFT_DARKGRAY);
+        for (int row=0; row<rows(); ++row) draw_row(row);
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::FrontlightOffHint),
-                                 width / 2, hint_y + system_font::line_height() + 12, TFT_DARKGRAY);
+            M5.Display.width()/2, row_top(rows())+12, TFT_DARKGRAY);
         M5.Display.display();
         M5.Display.endWrite();
+        _dirty=0; _last_draw=lgfx::millis();
     }
 };
 
@@ -1812,6 +1791,7 @@ private:
         else if (_focus == 6) ActivityManager::instance().push(new DateTimeSettingsActivity());
         else if (_focus == 8) ActivityManager::instance().push(new RestoreDefaultsActivity());
         else if (_focus == 9) launch_system_font_settings();
+        else if (_focus == 10) launch_standby_wallpaper_picker();
         else if (_focus == 7) {
             const bool enabled = !home_icon_frames_enabled();
             const esp_err_t result = home_set_icon_frames_enabled(enabled);
@@ -1877,6 +1857,13 @@ private:
                   home_icon_frames_enabled() ? text(TextId::On) : text(TextId::Off), false);
         draw_item(8, text(TextId::RestoreDefaults), text(TextId::RestoreDefaultsDetail));
         draw_item(9, text(TextId::SystemFont), std::to_string(system_font::pixel_size()) + " px");
+#if CONFIG_IDF_TARGET_ESP32S31
+        std::string wallpaper = standby_wallpaper_path();
+        const auto slash = wallpaper.find_last_of('/');
+        if (slash != std::string::npos) wallpaper = wallpaper.substr(slash+1);
+        draw_item(10, text(TextId::StandbyWallpaper), wallpaper.empty()
+            ? text(TextId::StandbyKeepScreen) : wallpaper);
+#endif
         M5.Display.display();
         M5.Display.endWrite();
     }
@@ -1941,6 +1928,11 @@ private:
 void launch_settings()
 {
     ActivityManager::instance().push(new SettingActivity());
+}
+
+void switch_to_reading_settings()
+{
+    ActivityManager::instance().show_above_root(new SettingActivity());
 }
 
 bool ensure_wifi_configured_or_show_guide()

@@ -102,6 +102,7 @@ bool copy_regular_file(const std::string &source_path, const std::string &target
 
 bool ReflowBook::open(const char *path)
 {
+    metadata_memory::Budget budget;
     close();
     if (!path || !path[0]) return false;
     _path = path;
@@ -119,7 +120,9 @@ bool ReflowBook::open(const char *path)
 
         const std::string epub_path = weread::store::epub_payload_path(_weread_book.id);
         const bool packaged_epub = regular_file_exists(epub_path) && _weread_epub.open(epub_path.c_str());
+        if (!metadata_memory::Budget::reserve_allowed(_weread_chapters.size(),sizeof(ReflowSectionItem))) { close(); _last_error="Book navigation exceeds metadata memory limit"; return false; }
         _sections.reserve(_weread_chapters.size());
+        if (!metadata_memory::Budget::reserve_allowed(_weread_chapters.size(),sizeof(ReflowTocItem))) { close(); _last_error="Book navigation exceeds metadata memory limit"; return false; }
         _toc.reserve(_weread_chapters.size());
         for (size_t i = 0; i < _weread_chapters.size(); ++i) {
             const auto &chapter = _weread_chapters[i];
@@ -128,7 +131,9 @@ bool ReflowBook::open(const char *path)
                 const int spine = std::clamp(chapter.index - 1, 0, _weread_epub.spine_count() - 1);
                 href = _weread_epub.spine_item(spine).href;
             }
+            if (!budget.add(_sections.size(),sizeof(ReflowSectionItem),{256})) { close(); _last_error="Book navigation exceeds metadata memory limit"; return false; }
             _sections.push_back({chapter.uid, href, "application/xhtml+xml", 0});
+            if (!budget.add(_toc.size(),sizeof(ReflowTocItem),{256})) { close(); _last_error="Book navigation exceeds metadata memory limit"; return false; }
             _toc.push_back({chapter.title, href, static_cast<int>(i), 0});
         }
         return !_sections.empty();
@@ -141,14 +146,18 @@ bool ReflowBook::open(const char *path)
         _format = Format::Mobi;
         title = _mobi.title;
         _cover_href = _mobi.cover_image_href();
+        if (!metadata_memory::Budget::reserve_allowed(_mobi.section_count(),sizeof(ReflowSectionItem))) { close(); _last_error="Book navigation exceeds metadata memory limit"; return false; }
         _sections.reserve(_mobi.section_count());
         for (int i = 0; i < _mobi.section_count(); ++i) {
             const auto &source = _mobi.section_item(i);
+            if (!budget.add(_sections.size(),sizeof(ReflowSectionItem),{256})) { close(); _last_error="Book navigation exceeds metadata memory limit"; return false; }
             _sections.push_back({source.id, source.href, source.media_type, source.uncompressed_size});
         }
+        if (!metadata_memory::Budget::reserve_allowed(_mobi.toc_count(),sizeof(ReflowTocItem))) { close(); _last_error="Book navigation exceeds metadata memory limit"; return false; }
         _toc.reserve(_mobi.toc_count());
         for (int i = 0; i < _mobi.toc_count(); ++i) {
             const auto &source = _mobi.toc_item(i);
+            if (!budget.add(_toc.size(),sizeof(ReflowTocItem),{256})) { close(); _last_error="Book navigation exceeds metadata memory limit"; return false; }
             _toc.push_back({source.title, source.href, source.spine_index, source.depth});
         }
         return true;
@@ -159,7 +168,9 @@ bool ReflowBook::open(const char *path)
         title = file_stem(path);
         for (const auto &page : _comic.pages()) {
             const int index = static_cast<int>(_sections.size());
+            if (!budget.add(_sections.size(),sizeof(ReflowSectionItem),{256})) { close(); _last_error="Book navigation exceeds metadata memory limit"; return false; }
             _sections.push_back({"comic-" + std::to_string(index), page.href, "application/xhtml+xml", 0});
+            if (!budget.add(_toc.size(),sizeof(ReflowTocItem),{256})) { close(); _last_error="Book navigation exceeds metadata memory limit"; return false; }
             _toc.push_back({page.title, page.href, index, 0});
         }
         _cover_href = _comic.pages().front().image_href;
@@ -171,8 +182,10 @@ bool ReflowBook::open(const char *path)
         title = _docx.title();
         for (const auto &section : _docx.sections()) {
             const int index = static_cast<int>(_sections.size());
+            if (!budget.add(_sections.size(),sizeof(ReflowSectionItem),{256})) { close(); _last_error="Book navigation exceeds metadata memory limit"; return false; }
             _sections.push_back({"docx-" + std::to_string(index), section.href,
                                  "application/xhtml+xml", static_cast<uint32_t>(section.html.size())});
+            if (!budget.add(_toc.size(),sizeof(ReflowTocItem),{256})) { close(); _last_error="Book navigation exceeds metadata memory limit"; return false; }
             _toc.push_back({section.title, section.href, index, section.depth});
         }
         return !_sections.empty();
@@ -185,13 +198,17 @@ bool ReflowBook::open(const char *path)
         _format = Format::Fb2;
         title = _fb2.title;
         _cover_href = _fb2.cover_image_href();
+        if (!metadata_memory::Budget::reserve_allowed(_fb2.section_count(),sizeof(ReflowSectionItem))) { close(); _last_error="Book navigation exceeds metadata memory limit"; return false; }
         _sections.reserve(_fb2.section_count());
+        if (!metadata_memory::Budget::reserve_allowed(_fb2.section_count(),sizeof(ReflowTocItem))) { close(); _last_error="Book navigation exceeds metadata memory limit"; return false; }
         _toc.reserve(_fb2.section_count());
         for (int i = 0; i < _fb2.section_count(); ++i) {
             const auto &source = _fb2.section_item(i);
             const uint32_t size = source.end > source.start
                 ? static_cast<uint32_t>(std::min<uint64_t>(source.end - source.start, UINT32_MAX)) : 0;
+            if (!budget.add(_sections.size(),sizeof(ReflowSectionItem),{256})) { close(); _last_error="Book navigation exceeds metadata memory limit"; return false; }
             _sections.push_back({source.id, source.href, "application/xhtml+xml", size});
+            if (!budget.add(_toc.size(),sizeof(ReflowTocItem),{256})) { close(); _last_error="Book navigation exceeds metadata memory limit"; return false; }
             _toc.push_back({source.title, source.href, i, 0});
         }
         return true;
@@ -210,31 +227,24 @@ bool ReflowBook::open(const char *path)
         }
         _format = Format::Markdown;
         title = !headings.empty() ? headings.front().title : file_stem(path);
+        if (!budget.add(_sections.size(),sizeof(ReflowSectionItem),{256})) { close(); _last_error="Book navigation exceeds metadata memory limit"; return false; }
         _sections.push_back({"markdown", _path, "text/markdown", static_cast<uint32_t>(std::min<size_t>(markdown.size(), UINT32_MAX))});
         // Navigation currently addresses sections, not offsets inside a
         // section. Keep one valid entry rather than listing headings that
         // would all jump back to the first page.
+        if (!budget.add(_toc.size(),sizeof(ReflowTocItem),{256})) { close(); _last_error="Book navigation exceeds metadata memory limit"; return false; }
         _toc.push_back({title, _path, 0, 0});
         return true;
     }
 
     if (!_epub.open(path)) {
-        _last_error = "Could not parse EPUB container/OPF";
+        _last_error = _epub.last_error().empty() ? "Could not parse EPUB container/OPF" : _epub.last_error();
         return false;
     }
     _format = Format::Epub;
     title = _epub.title;
     _cover_href = _epub.cover_image_href();
-    _sections.reserve(_epub.spine_count());
-    for (int i = 0; i < _epub.spine_count(); ++i) {
-        const auto &source = _epub.spine_item(i);
-        _sections.push_back({source.id, source.href, source.media_type, source.uncompressed_size});
-    }
-    _toc.reserve(_epub.toc_count());
-    for (int i = 0; i < _epub.toc_count(); ++i) {
-        const auto &source = _epub.toc_item(i);
-        _toc.push_back({source.title, source.href, source.spine_index, source.depth});
-    }
+    _epub.take_navigation(_sections,_toc);
     return true;
 }
 
@@ -251,10 +261,10 @@ void ReflowBook::close()
     _cover_href.clear();
     _last_error.clear();
     title.clear();
-    _sections.clear();
-    _toc.clear();
+    metadata_memory::release(_sections);
+    metadata_memory::release(_toc);
     _weread_book = {};
-    _weread_chapters.clear();
+    metadata_memory::release(_weread_chapters);
     _weread_active_chapter = -1;
 }
 

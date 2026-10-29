@@ -43,6 +43,26 @@ struct Bank {
 // the normal working set; at most 24 SD faces leave 8 FAT handles for other I/O.
 std::array<Bank, 12> banks;
 uint32_t bank_tick = 0;
+constexpr size_t UI_GLYPH_POOL_BUDGET = 768 * 1024;
+constexpr int UI_GLYPH_POOL_INITIAL = 8 * 1024;
+size_t pool_bytes() {
+    size_t total=0;
+    for (const auto &b : banks)
+        total += b.primary.stats().glyph_pool_capacity + b.builtin.stats().glyph_pool_capacity + b.fallback.stats().glyph_pool_capacity;
+    return total;
+}
+bool make_pool_room(void *owner, size_t extra) {
+    while (pool_bytes()+extra > UI_GLYPH_POOL_BUDGET) {
+        Bank *oldest=nullptr;
+        for (auto &b : banks) {
+            if (&b==owner || !b.px) continue;
+            if (!oldest || b.last_used < oldest->last_used) oldest=&b;
+        }
+        if (!oldest) return false;
+        oldest->clear(); // Also releases FreeType data and shared file references.
+    }
+    return true;
+}
 bool font_file(const std::string &path) {
     const char *ext = strrchr(path.c_str(), '.');
     struct stat st = {};
@@ -77,15 +97,22 @@ void initialize() {
     if (nvs_get_str(h, "path", path, &length) == ESP_OK && path[0]) selected_path = path;
     nvs_close(h);
 }
-ReaderTextStyle style(const std::string &path, int px) {
+ReaderTextStyle style(const std::string &path, int px, Bank *owner=nullptr, bool secondary=false) {
     ReaderTextStyle result;
     result.font_path = path.c_str();
     result.font_size = px;
     result.line_spacing = 0;
-    result.glyph_cache_limit = 256;
-    result.advance_cache_limit = 512;
-    result.glyph_pool_bytes = 128 * 1024;
+    result.glyph_cache_limit = secondary ? 96 : px==size_px ? 256 : 128;
+    result.advance_cache_limit = secondary ? 128 : px==size_px ? 512 : 256;
+    // The normal UI size gets the larger working set; auxiliary sizes and
+    // fallback fonts start small and grow only after rendering real glyphs.
+    result.glyph_pool_bytes = secondary ? 32*1024 : px==size_px ? 128*1024 :
+        std::clamp(px*px*24, 16*1024, 64*1024);
+    result.glyph_pool_initial_bytes = UI_GLYPH_POOL_INITIAL;
+    result.allow_glyph_pool_growth = owner ? make_pool_room : nullptr;
+    result.glyph_pool_owner = owner;
     result.font_stream_windows = 4; // 64 KiB UI stream cache.
+    result.share_font_stream = true; // One file/cache per font, across sizes.
     return result;
 }
 Bank &bank(int px) {
@@ -98,16 +125,17 @@ Bank &bank(int px) {
     // Release all faces, including a previously used SD fallback. Resetting
     // only primary left an unused fallback's file descriptor pinned.
     slot->clear();
+    make_pool_room(slot, 2*UI_GLYPH_POOL_INITIAL);
     slot->px = px;
     slot->last_used = ++bank_tick;
     slot->revision = revision;
     slot->fallback_tried = slot->fallback_ok = false;
     const std::string resolved = embedded_font::matches(selected_path.c_str()) || !font_file(selected_path)
         ? embedded_font::path : selected_path;
-    slot->primary_ok = slot->primary.begin(style(resolved, px));
+    slot->primary_ok = slot->primary.begin(style(resolved, px, slot));
     slot->builtin_ok = false;
     if (!slot->primary_ok || resolved != embedded_font::path)
-        slot->builtin_ok = slot->builtin.begin(style(embedded_font::path, px));
+        slot->builtin_ok = slot->builtin.begin(style(embedded_font::path, px, slot, true));
     return *slot;
 }
 TextRenderer *face_for(Bank &b, uint32_t cp) {
@@ -122,7 +150,8 @@ TextRenderer *face_for(Bank &b, uint32_t cp) {
         if (preferred == fonts.end()) preferred = std::find(fonts.begin(), fonts.end(), "/sdcard/fonts/Hei.ttf");
         if (preferred != fonts.end()) std::iter_swap(fonts.begin() + 1, preferred);
         for (size_t i = 1; i < fonts.size(); ++i) {
-            if (fonts[i] != selected_path && b.fallback.begin(style(fonts[i], b.px))) {
+            if (fonts[i] != selected_path && make_pool_room(&b, UI_GLYPH_POOL_INITIAL) &&
+                b.fallback.begin(style(fonts[i], b.px, &b, true))) {
                 b.fallback_ok = true;
                 break;
             }

@@ -9,6 +9,10 @@
 #include "ui/SystemFont.h"
 #include "ui/UiLocale.h"
 #include "wifi/wifi_setting.h"
+#include "wifi/S31WifiPolicy.h"
+#include "wifi/TcpReceiveTest.h"
+#include "wifi/TransferSessionGate.h"
+#include "wifi/TransferDiagnostics.h"
 
 #include <M5Unified.h>
 #include <sdkconfig.h>
@@ -26,6 +30,9 @@
 #include <esp_netif_ip_addr.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
+#if CONFIG_IDF_TARGET_ESP32S31
+#include <esp_private/esp_wifi_he_private.h>
+#endif
 #include <nvs_flash.h>
 #include <sys/stat.h>
 #include <sys/unistd.h>
@@ -36,6 +43,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <atomic>
+#include <mutex>
 
 static const char *TAG = "WIFI_TRANSFER";
 static const char *AP_PASSWORD = "12345678";
@@ -56,6 +65,15 @@ static_assert(valid_sd_write_buffer(true, FILE_WRITE_BUFFER_BYTES, false) == !RE
 static const size_t UPLOAD_LOG_INTERVAL_BYTES = 1024 * 1024;
 static constexpr int64_t UPLOAD_LOG_INTERVAL_US = 2 * 1000 * 1000;
 static constexpr int64_t UPLOAD_IDLE_TIMEOUT_US = 30 * 1000 * 1000;
+#if CONFIG_IDF_TARGET_ESP32S31
+// Session-only trial: reopening transfer keeps the choice until reboot. Normal
+// application Wi-Fi settings remain independent of this diagnostic selector.
+static unsigned s_transfer_protocol = 2, s_transfer_power = 0;
+static bool s_transfer_he_stbc = true, s_transfer_ampdu = true;
+// Values map exactly to documented SDK power buckets (0.25 dBm units).
+static constexpr int8_t TRANSFER_POWER_QDBM[] = {S31_WIFI_DEFAULT_TX_POWER_QDBM,56,80};
+static const char* const TRANSFER_PROTOCOL_NAMES[] = {"b/g", "b/g/n", "b/g/n/ax"};
+#endif
 
 static void log_transfer_link(const char* stage) {
 #if CONFIG_IDF_TARGET_ESP32S31
@@ -106,16 +124,23 @@ pre{white-space:pre-wrap;background:#f3f3f3;padding:12px}.toolbar{display:flex;g
 <button onclick="up()" data-i18n="WebUp"></button><button onclick="reload()" data-i18n="WebRefresh"></button><button onclick="mkdirPrompt()" data-i18n="WebNewFolder"></button>
 <label class="upload"><span data-i18n="WebUploadHere"></span><input id="directFiles" type="file" multiple class="hidden" onchange="uploadFiles('directFiles',currentPath)"></label></div>
 <div id="entries" data-i18n="WebLoading"></div></section>
+<section id="diagnostics" class="box hidden"><strong data-i18n="TransferDiagnostics"></strong>
+<div class="toolbar"><button onclick="refreshDiagnostics()" data-i18n="WebRefresh"></button><button onclick="location.href='/api/diagnostics?download=1'" data-i18n="TransferDiagnosticsSave"></button></div>
+<div class="muted" data-i18n="TransferDiagnosticsHint"></div><pre id="diagnosticResult">--</pre></section>
 <p><progress id="bar" value="0" max="100"></progress></p><pre id="log" data-i18n="WebReady"></pre>
 <script>
 const translations=__UI_LOCALE__;const t=key=>translations[key]||key;
 document.documentElement.lang=translations.lang;document.title='MyPaperP4 '+t('WifiTransfer');
 document.querySelectorAll('[data-i18n]').forEach(el=>el.textContent=t(el.dataset.i18n));
 let currentPath='/';const $=id=>document.getElementById(id);const log=t=>$('log').textContent=t;
+const hasDiagnostics=__TRANSFER_DIAGNOSTICS__;
+$('diagnostics').classList.toggle('hidden',!hasDiagnostics);
+async function refreshDiagnostics(){if(!hasDiagnostics)return;try{const r=await fetch('/api/diagnostics',{cache:'no-store'});if(!r.ok)throw Error(r.status);$('diagnosticResult').textContent=JSON.stringify(await r.json(),null,2)}catch(e){$('diagnosticResult').textContent=t('WebNetworkError')+' '+e.message}}
+if(hasDiagnostics)refreshDiagnostics();
 function tab(id){$('smart').classList.toggle('hidden',id!=='smart');$('manager').classList.toggle('hidden',id!=='manager');if(id==='manager')reload()}
 function request(method,url){return fetch(url,{method}).then(async r=>({ok:r.ok,status:r.status,text:await r.text()}))}
 function sendFile(f,path,onp){return new Promise(resolve=>{const x=new XMLHttpRequest();let u='/upload?name='+encodeURIComponent(f.name);if(path)u+='&path='+encodeURIComponent(path);x.open('POST',u);x.upload.onprogress=e=>{if(e.lengthComputable)onp(e.loaded,e.total)};x.onload=()=>resolve({ok:x.status>=200&&x.status<300,text:x.responseText,status:x.status});x.onerror=()=>resolve({ok:false,text:t('WebNetworkError'),status:0});x.send(f)})}
-async function uploadFiles(id,path){const files=[...$(id).files];if(!files.length)return;let out='';for(let i=0;i<files.length;i++){const f=files[i];out+=t('WebUploading')+f.name+'...\n';log(out);const r=await sendFile(f,path,(n,total)=>{$('bar').value=Math.round(((i+n/total)*100)/files.length)});out+=(r.ok?t('WebOk'):t('WebError')+' '+r.status+': ')+r.text+'\n';log(out)}$('bar').value=100;$(id).value='';if(path)reload()}
+async function uploadFiles(id,path){const files=[...$(id).files];if(!files.length)return;let out='';for(let i=0;i<files.length;i++){const f=files[i];out+=t('WebUploading')+f.name+'...\n';log(out);const r=await sendFile(f,path,(n,total)=>{$('bar').value=Math.round(((i+n/total)*100)/files.length)});out+=(r.ok?t('WebOk'):t('WebError')+' '+r.status+': ')+r.text+'\n';log(out);await refreshDiagnostics()}$('bar').value=100;$(id).value='';if(path)reload()}
 function join(p,n){return p==='/'?'/'+n:p+'/'+n}function up(){if(currentPath==='/')return;currentPath=currentPath.slice(0,currentPath.lastIndexOf('/'))||'/';reload()}
 function btn(text,fn,alt=true){const b=document.createElement('button');b.textContent=text;if(alt)b.className='alt';b.onclick=fn;return b}
 async function reload(){const r=await fetch('/api/list?path='+encodeURIComponent(currentPath));if(!r.ok){log(await r.text());return}const data=await r.json();currentPath=data.path;$('path').textContent=currentPath;const box=$('entries');box.textContent='';for(const e of data.entries){const row=document.createElement('div');row.className='row';const name=document.createElement(e.dir?'button':'span');name.textContent=(e.dir?t('WebDir'):'')+e.name;if(e.dir){name.className='alt';name.onclick=()=>{currentPath=join(currentPath,e.name);reload()}}const acts=document.createElement('div');acts.className='actions';if(!e.dir)acts.appendChild(btn(t('WebDownload'),()=>location.href='/download?path='+encodeURIComponent(join(currentPath,e.name))));acts.appendChild(btn(t('Rename'),()=>renamePrompt(e.name)));acts.appendChild(btn(t('Delete'),()=>removeEntry(e.name)));row.append(name,acts);box.appendChild(row)}if(!data.entries.length)box.textContent=t('WebEmptyDirectory')}
@@ -356,15 +381,27 @@ static bool ensure_upload_dir(const char *path)
 class WifiTransferActivity : public Activity {
 public:
     explicit WifiTransferActivity(bool hotspot = false) : _force_hotspot(hotspot) {}
+    bool can_standby() const override { return !_running; }
     ~WifiTransferActivity() override { stop(); }
 
     void on_create() override
     {
+#if CONFIG_IDF_TARGET_ESP32S31
+        _protocol = s_transfer_protocol;
+        _power = s_transfer_power;
+        _he_stbc = s_transfer_he_stbc;
+        _ampdu = s_transfer_ampdu;
+#endif
         _starting = true;
         draw();
         _running = start();
         if (!_running) stop();
         _starting = false;
+        _session_gate.open();
+#if CONFIG_IDF_TARGET_ESP32S31
+        _link_stamp = connection_stamp();
+        _next_link_check = esp_timer_get_time()+2000000;
+#endif
         vTaskDelay(pdMS_TO_TICKS(200));
         draw();
     }
@@ -373,10 +410,78 @@ public:
 
     void loop() override
     {
-        if (_dirty) {
-            _dirty = false;
+#if CONFIG_IDF_TARGET_ESP32S31
+        if ((_requested_protocol >= 0 || _requested_stbc >= 0 || _requested_ampdu >= 0 || _requested_power >= 0) && !M5.Display.displayBusy()) {
+            const unsigned next = _requested_protocol >= 0 ? unsigned(_requested_protocol) : _protocol;
+            const bool next_stbc = _requested_stbc >= 0 ? bool(_requested_stbc) : _he_stbc;
+            const bool next_ampdu = _requested_ampdu >= 0 ? bool(_requested_ampdu) : _ampdu;
+            const unsigned next_power = _requested_power >= 0 ? unsigned(_requested_power) : _power;
+            _requested_protocol = _requested_stbc = _requested_ampdu = _requested_power = -1;
+            if (!_session_gate.try_begin_switch()) {
+                _notice = ui_locale::text(ui_locale::TextId::TransferProtocolBusy);
+                _dirty = true;
+            } else {
+                stop(false);
+                _running = false;
+                _protocol = s_transfer_protocol = next;
+                _power = s_transfer_power = next_power;
+                _he_stbc = s_transfer_he_stbc = next_stbc;
+                _ampdu = s_transfer_ampdu = next_ampdu;
+                _notice.clear();
+                _starting = true;
+                draw();
+                _running = start();
+                if (!_running) stop(false);
+                _starting = false;
+                _session_gate.open();
+                _link_stamp = connection_stamp();
+                _next_link_check = esp_timer_get_time()+2000000;
+                _dirty = true;
+            }
+        }
+        if (_running && !M5.Display.displayBusy() && !_session_gate.busy() && esp_timer_get_time() >= _next_link_check) {
+            _next_link_check = esp_timer_get_time()+2000000;
+            const int stamp = connection_stamp();
+            if (stamp != _link_stamp) { _link_stamp = stamp; _dirty = true; }
+        }
+#endif
+        if (_diagnostics.generation() != _diagnostic_generation) {
+            _diagnostic_generation = _diagnostics.generation();
+            _dirty = true;
+        }
+        if (!M5.Display.displayBusy() && _dirty.exchange(false)) {
             draw();
         }
+    }
+
+    bool on_touch(const TouchEvent& event) override {
+#if CONFIG_IDF_TARGET_ESP32S31
+        if (event.type == TouchEventType::Tap && !_starting &&
+            event.y >= _protocol_button_y && event.y < _protocol_button_y + _trial_line_h+20) {
+            const int width = (M5.Display.width()-64)/3;
+            for (unsigned i=0; i<3; ++i) {
+                const int x=24+int(i)*(width+8);
+                if (event.x >= x && event.x < x+width) {
+                    if (i != _protocol || !_running) _requested_protocol = int(i);
+                    return true;
+                }
+            }
+        }
+        if (event.type == TouchEventType::Tap && !_starting && event.x >= 24 && event.x < M5.Display.width()-24) {
+            if (event.y >= _stbc_y && event.y < _stbc_y + _trial_line_h+8) {
+                _requested_stbc = !_he_stbc; return true;
+            }
+            if (event.y >= _ampdu_y && event.y < _ampdu_y + _trial_line_h+8) {
+                _requested_ampdu = !_ampdu; return true;
+            }
+            if (event.y >= _power_y && event.y < _power_y + _trial_line_h+8) {
+                _requested_power = int((_power+1)%3); return true;
+            }
+        }
+#else
+        (void)event;
+#endif
+        return false;
     }
 
     bool on_key(int key) override
@@ -390,9 +495,16 @@ public:
 
     void record_upload(const std::string &name, size_t bytes, bool ok)
     {
+        std::lock_guard<std::mutex> lock(_stats_mutex);
         std::snprintf(_last_name, sizeof(_last_name), "%s", name.c_str());
         _last_bytes = bytes;
         _last_ok = ok;
+#if CONFIG_IDF_TARGET_ESP32S31
+        const int64_t elapsed = _upload_begin_us ? esp_timer_get_time()-_upload_begin_us : 0;
+        _last_speed[_protocol][trial_flags()] = transfer_speed_kb(bytes, elapsed);
+        _trial_done[_protocol][trial_flags()] = ok;
+        _trial_failed[_protocol][trial_flags()] = !ok;
+#endif
         _dirty = true;
     }
 
@@ -400,6 +512,7 @@ private:
     bool _force_hotspot = false;
     bool _running = false;
     httpd_handle_t _server = nullptr;
+    TcpReceiveTest _tcp_receive_test;
     esp_netif_t *_wifi_netif = nullptr;
     bool _wifi_inited = false;
     bool _wifi_started = false;
@@ -411,7 +524,73 @@ private:
     size_t _last_bytes = 0;
     bool _last_ok = true;
     bool _starting = false;
-    volatile bool _dirty = false;
+    std::atomic<bool> _dirty{false};
+    std::mutex _stats_mutex;
+    TransferSessionGate _session_gate;
+    TransferDiagnostics _diagnostics;
+    unsigned _diagnostic_generation = 0;
+#if CONFIG_IDF_TARGET_ESP32S31
+    unsigned _protocol = 0, _power = 0;
+    int _requested_power = -1, _power_y = 0, _trial_line_h = 40;
+    int _link_stamp = -1;
+    int64_t _next_link_check = 0;
+    int _requested_protocol = -1, _protocol_button_y = 0;
+    bool _he_stbc = true, _ampdu = true;
+    int _requested_stbc = -1, _requested_ampdu = -1;
+    int _stbc_y = 0, _ampdu_y = 0;
+    uint32_t _last_speed[3][12]{};
+    bool _trial_done[3][12]{}, _trial_failed[3][12]{};
+    unsigned trial_flags() const { return (unsigned(_he_stbc) | (unsigned(_ampdu) << 1)) + 4*_power; }
+    int requested_tx_power() const { return TRANSFER_POWER_QDBM[_power]; }
+    std::string power_label() const {
+        return _power == 0 ? std::string(ui_locale::text(ui_locale::TextId::TransferPowerDefault))+" (5 dBm)" :
+            std::to_string(requested_tx_power()/4)+" dBm";
+    }
+    bool apply_power() {
+        const int request=requested_tx_power();
+        const auto set_result=esp_wifi_set_max_tx_power(int8_t(request));
+        int8_t actual=0;
+        const auto read_result=esp_wifi_get_max_tx_power(&actual);
+        ESP_LOGI(TAG,"TX power trial: requested_qdbm=%d set=%s read=%s actual_qdbm=%d",
+            request,esp_err_to_name(set_result),esp_err_to_name(read_result),int(actual));
+        if (set_result!=ESP_OK) {
+            _error_message=std::string(ui_locale::text(ui_locale::TextId::FailedToStart))+": "+esp_err_to_name(set_result);
+            return false;
+        }
+        return true;
+    }
+    void apply_stbc() {
+        // Official IDF debug API controls HE STBC capabilities. Do not claim
+        // that this verifies/disables HT STBC when the negotiated link is HT20.
+        esp_wifi_enable_rx_stbc(_he_stbc);
+        ESP_LOGI(TAG, "RX trial requested: HE_STBC=%d AMPDU_RX_TX=%d; HT STBC not verified",
+                 int(_he_stbc), int(_ampdu));
+    }
+    int64_t _upload_begin_us = 0;
+    std::string _notice;
+    int connection_stamp() const {
+        if (!_running) return -1;
+        if (_ap_mode) {
+            wifi_sta_list_t clients{};
+            return esp_wifi_ap_get_sta_list(&clients) == ESP_OK ? clients.num : -1;
+        }
+        wifi_ap_record_t ap{};
+        wifi_phy_mode_t phy{};
+        if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) return -1;
+        return esp_wifi_sta_get_negotiated_phymode(&phy) == ESP_OK ? 100+int(phy) : 100;
+    }
+    esp_err_t apply_protocol(wifi_interface_t interface) {
+        uint8_t mask = WIFI_PROTOCOL_11B | WIFI_PROTOCOL_11G;
+        if (_protocol >= 1) mask |= WIFI_PROTOCOL_11N;
+        if (_protocol >= 2) mask |= WIFI_PROTOCOL_11AX;
+        const esp_err_t result = esp_wifi_set_protocol(interface, mask);
+        ESP_LOGI(TAG, "protocol trial: interface=%s selected=%s mask=0x%02x result=%s",
+                 interface == WIFI_IF_AP ? "AP" : "STA", TRANSFER_PROTOCOL_NAMES[_protocol],
+                 unsigned(mask), esp_err_to_name(result));
+        if (result != ESP_OK) _error_message = std::string(ui_locale::text(ui_locale::TextId::FailedToStart))+": "+esp_err_to_name(result);
+        return result;
+    }
+#endif
     std::string _error_message;
 
     bool init_net()
@@ -475,9 +654,9 @@ private:
         }
 
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+#if !CONFIG_IDF_TARGET_ESP32S31
         cfg.static_rx_buf_num = 8;
         cfg.dynamic_rx_buf_num = 32;
-#if !CONFIG_IDF_TARGET_ESP32S31
         // P4 hosted transport keeps its existing overrides. Native S31 uses
         // WIFI_INIT_CONFIG_DEFAULT's TX policy (static with this PSRAM build).
         cfg.tx_buf_type = 1;
@@ -486,9 +665,23 @@ private:
         cfg.cache_tx_buf_num = 16;
 #endif
         cfg.csi_enable = 0;
+#if CONFIG_IDF_TARGET_ESP32S31
+        cfg.ampdu_rx_enable = _ampdu;
+        cfg.ampdu_tx_enable = _ampdu;
+#else
         cfg.ampdu_rx_enable = 1;
         cfg.ampdu_tx_enable = 1;
+#endif
+#if !CONFIG_IDF_TARGET_ESP32S31
         cfg.rx_ba_win = 6;
+#else
+        // Use the same sdkconfig RX profile as normal native Wi-Fi. Do not
+        // silently replace the S31 throughput trial with the P4 overrides.
+        ESP_LOGI(TAG, "RX profile: static=%u dynamic=%u ba=%u tcp_window=%u tcp_mailbox=%u tcpip_mailbox=%u",
+                 unsigned(cfg.static_rx_buf_num), unsigned(cfg.dynamic_rx_buf_num), unsigned(cfg.rx_ba_win),
+                 unsigned(CONFIG_LWIP_TCP_WND_DEFAULT), unsigned(CONFIG_LWIP_TCP_RECVMBOX_SIZE),
+                 unsigned(CONFIG_LWIP_TCPIP_RECVMBOX_SIZE));
+#endif
         ESP_LOGI(TAG,
                  "heap before wifi free=%u internal=%u largest=%u",
                  (unsigned)esp_get_free_heap_size(),
@@ -500,6 +693,18 @@ private:
             return false;
         }
         _wifi_inited = true;
+#if CONFIG_IDF_TARGET_ESP32S31
+        err=esp_wifi_set_storage(WIFI_STORAGE_RAM);
+        if (err!=ESP_OK) {
+            _error_message=std::string(ui_locale::text(ui_locale::TextId::FailedToStart))+": "+esp_err_to_name(err);
+            return false;
+        }
+        apply_stbc();
+        ESP_LOGI(TAG, "heap after wifi internal=%u largest=%u psram=%u",
+                 unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                 unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+                 unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+#endif
 
         char router_ssid[WIFI_SETTING_SSID_MAX_LEN + 1] = {};
         char router_pass[WIFI_SETTING_PASSWORD_MAX_LEN + 1] = {};
@@ -545,6 +750,14 @@ private:
             return false;
         }
 
+#if CONFIG_IDF_TARGET_ESP32S31
+        err = apply_protocol(WIFI_IF_AP);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "S31 Wi-Fi AP protocol failed: %s", esp_err_to_name(err));
+            return false;
+        }
+        ESP_LOGI(TAG, "S31 Wi-Fi AP allowed protocols: %s", TRANSFER_PROTOCOL_NAMES[_protocol]);
+#endif
         wifi_config_t ap_cfg = {};
         std::strncpy((char *)ap_cfg.ap.ssid, _network_name.c_str(), sizeof(ap_cfg.ap.ssid));
         std::strncpy((char *)ap_cfg.ap.password, AP_PASSWORD, sizeof(ap_cfg.ap.password));
@@ -564,6 +777,10 @@ private:
             return false;
         }
         _wifi_started = true;
+#if CONFIG_IDF_TARGET_ESP32S31
+        if (!apply_power()) return false;
+        apply_stbc();
+#endif
         ESP_LOGI(TAG, "AP started ssid=%s password=%s url=http://%s/", _network_name.c_str(), AP_PASSWORD, _ip);
         return true;
     }
@@ -580,6 +797,14 @@ private:
             return false;
         }
 
+#if CONFIG_IDF_TARGET_ESP32S31
+        err = apply_protocol(WIFI_IF_STA);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "S31 Wi-Fi STA protocol failed: %s", esp_err_to_name(err));
+            return false;
+        }
+        ESP_LOGI(TAG, "S31 Wi-Fi STA allowed protocols: %s", TRANSFER_PROTOCOL_NAMES[_protocol]);
+#endif
         wifi_config_t sta_cfg = {};
         std::memcpy(sta_cfg.sta.ssid, ssid.data(),
                     std::min(ssid.size(), sizeof(sta_cfg.sta.ssid)));
@@ -596,6 +821,10 @@ private:
             return false;
         }
         _wifi_started = true;
+#if CONFIG_IDF_TARGET_ESP32S31
+        if (!apply_power()) return false;
+        apply_stbc();
+#endif
 #if CONFIG_IDF_TARGET_ESP32S31
         // This activity owns and later deinitializes its Wi-Fi driver. Avoid
         // native STA modem-sleep pauses during bulk uploads; P4 hosted behavior
@@ -671,16 +900,34 @@ private:
         download_uri.user_ctx = this;
         httpd_register_uri_handler(_server, &download_uri);
 
+#if CONFIG_IDF_TARGET_ESP32S31
+        httpd_uri_t diagnostics_uri{};
+        diagnostics_uri.uri = "/api/diagnostics";
+        diagnostics_uri.method = HTTP_GET;
+        diagnostics_uri.handler = handle_diagnostics;
+        diagnostics_uri.user_ctx = this;
+        httpd_register_uri_handler(_server, &diagnostics_uri);
+#endif
         ESP_LOGI(TAG, "http server started url=http://%s/", _ip);
+        _tcp_receive_test.start();
         return true;
     }
 
-    void stop()
+    void stop(bool restore_wifi = true)
     {
+        _session_gate.stop_accepting();
+        _tcp_receive_test.stop();
         if (_server) {
             httpd_stop(_server);
             _server = nullptr;
         }
+#if CONFIG_IDF_TARGET_ESP32S31
+        if (_wifi_inited) esp_wifi_enable_rx_stbc(true);
+        if (_wifi_started) {
+            const auto restore_power=esp_wifi_set_max_tx_power(S31_WIFI_DEFAULT_TX_POWER_QDBM);
+            if (restore_power!=ESP_OK) ESP_LOGW(TAG,"TX power default restore: %s",esp_err_to_name(restore_power));
+        }
+#endif
         if (_wifi_started) {
             esp_wifi_stop();
             _wifi_started = false;
@@ -702,7 +949,8 @@ private:
         }
         // AP-mode transfer temporarily owns the C6. Restore the persistent
         // station connection after its server and radio have been released.
-        esp_err_t restore_ret = wifi_setting_start_always_on();
+        _running = false;
+        esp_err_t restore_ret = restore_wifi ? wifi_setting_start_always_on() : ESP_OK;
         if (restore_ret != ESP_OK) {
             ESP_LOGW(TAG, "restore always-on Wi-Fi failed: %s", esp_err_to_name(restore_ret));
         }
@@ -710,6 +958,7 @@ private:
 
     void draw()
     {
+        std::lock_guard<std::mutex> lock(_stats_mutex);
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_quality);
         M5.Display.fillScreen(TFT_WHITE);
@@ -719,12 +968,108 @@ private:
         int x = 24;
         int y = 12;
         int line_h = system_font::line_height() + 4;
+        int text_pixels = system_font::pixel_size();
         auto draw_line = [&](const std::string &text) {
-            system_font::draw_left(M5.Display, system_font::ellipsize(text, M5.Display.width() - x * 2), x, y);
+#if CONFIG_IDF_TARGET_ESP32S31
+            // Preserve the system size unless the diagnostic controls would
+            // overlap the footer. Measure using the actual content font.
+            std::string shown=text;
+            while (!shown.empty() && system_font::measure(shown,text_pixels)>M5.Display.width()-x*2) {
+                size_t at=shown.size()-1;
+                while (at && (static_cast<unsigned char>(shown[at])&0xc0)==0x80) --at;
+                shown.resize(at);
+            }
+            system_font::draw_left_sized(M5.Display, shown, x, y, text_pixels);
+#else
+            system_font::draw_left_sized(M5.Display,system_font::ellipsize(text,M5.Display.width()-x*2),x,y,text_pixels);
+#endif
             y += line_h;
         };
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::WifiTransfer), M5.Display.width() / 2, y);
         y += line_h + 10;
+
+#if CONFIG_IDF_TARGET_ESP32S31
+        using ui_locale::TextId;
+        const int available = M5.Display.height()-system_font::line_height()-4-y;
+        while (text_pixels>16 && 14*system_font::line_height(text_pixels)+116>available) --text_pixels;
+        line_h=system_font::line_height(text_pixels)+4;
+        _trial_line_h=line_h;
+        auto center_content = [&](const std::string& text,int cx,int top) {
+            system_font::draw_left_sized(M5.Display,text,cx-system_font::measure(text,text_pixels)/2,top,text_pixels);
+        };
+        _protocol_button_y = y;
+        const int button_w = (M5.Display.width()-64)/3;
+        const int button_h = line_h+20;
+        for (unsigned i=0; i<3; ++i) {
+            const int bx=24+int(i)*(button_w+8);
+            if (i == _protocol) M5.Display.fillRoundRect(bx, y+8, 5, button_h-16, 2, TFT_BLACK);
+            center_content(TRANSFER_PROTOCOL_NAMES[i], bx+button_w/2, y+12);
+            M5.Display.drawFastHLine(bx, y+button_h-1, button_w, TFT_BLACK);
+        }
+        y += button_h+8;
+        auto draw_toggle = [&](const char* label, bool on, int& hit_y) {
+            hit_y = y;
+            system_font::draw_left_sized(M5.Display, label, x+12, y+4, text_pixels);
+            const std::string state = std::string(ui_locale::text(on ? TextId::On : TextId::Off))+" >";
+            system_font::draw_right_sized(M5.Display, state, M5.Display.width()-x, y+4, text_pixels);
+            M5.Display.drawFastHLine(x, y+line_h+3, M5.Display.width()-2*x, TFT_BLACK);
+            y += line_h+8;
+        };
+        draw_toggle(ui_locale::text(TextId::TransferHeStbc), _he_stbc, _stbc_y);
+        draw_toggle(ui_locale::text(TextId::TransferAmpdu), _ampdu, _ampdu_y);
+        _power_y=y;
+        system_font::draw_left_sized(M5.Display,ui_locale::text(TextId::TransferPowerLimit),x+12,y+4,text_pixels);
+        system_font::draw_right_sized(M5.Display,power_label()+" >",M5.Display.width()-x,y+4,text_pixels);
+        M5.Display.drawFastHLine(x,y+line_h+3,M5.Display.width()-2*x,TFT_BLACK);
+        y+=line_h+8;
+        draw_line(_notice.empty() ? ui_locale::text(TextId::TransferProtocolReconnect) : _notice);
+        if (_starting) {
+            draw_line(ui_locale::text(TextId::StartingWifi));
+        } else if (_running) {
+            draw_line(ui_locale::text(_ap_mode ? TextId::ModeApHotspot : TextId::ModeRouterWifi));
+            draw_line(_network_name);
+            if (_ap_mode) draw_line(ui_locale::text(TextId::ApPassword));
+            draw_line(std::string("http://")+_ip);
+            if (_ap_mode) {
+                wifi_sta_list_t stations{};
+                if (esp_wifi_ap_get_sta_list(&stations) == ESP_OK) {
+                    char state[80];
+                    std::snprintf(state, sizeof(state), ui_locale::text(TextId::TransferClientsFormat), unsigned(stations.num));
+                    draw_line(state);
+                }
+            } else {
+                wifi_phy_mode_t phy{};
+                wifi_ap_record_t ap{};
+                const bool connected = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+                const esp_err_t mode_result = esp_wifi_sta_get_negotiated_phymode(&phy);
+                const char* mode = mode_result != ESP_OK ? "--" :
+                    phy == WIFI_PHY_MODE_11B ? "11b" : phy == WIFI_PHY_MODE_11G ? "11g" :
+                    phy == WIFI_PHY_MODE_HT20 ? "HT20" : phy == WIFI_PHY_MODE_HT40 ? "HT40" :
+                    phy == WIFI_PHY_MODE_HE20 ? "HE20" : "--";
+                char state[96];
+                std::snprintf(state, sizeof(state), "%s  %d dBm  CH%u", mode,
+                    connected ? ap.rssi : 0, connected ? unsigned(ap.primary) : 0);
+                draw_line(connected ? state : ui_locale::text(TextId::TransferDisconnected));
+            }
+            y += 8;
+            draw_line(ui_locale::text(TextId::TransferSpeedResults));
+            for (unsigned i=0; i<3; ++i) {
+                const std::string result = _trial_done[i][trial_flags()] ? std::to_string(_last_speed[i][trial_flags()])+" KiB/s" :
+                    _trial_failed[i][trial_flags()] ? ui_locale::text(TextId::UploadError) : "--";
+                draw_line(std::string(TRANSFER_PROTOCOL_NAMES[i])+" : "+result);
+            }
+            if (y+line_h < M5.Display.height()-system_font::line_height()-4)
+                draw_line(_diagnostics.generation() ? _diagnostics.summary() : ui_locale::text(TextId::TransferDiagnosticsHint));
+        } else {
+            draw_line(_error_message.empty() ? ui_locale::text(TextId::FailedToStart) : _error_message);
+            draw_line(ui_locale::text(TextId::TransferProtocolRetry));
+        }
+        system_font::draw_left(M5.Display, ui_locale::text(TextId::BackOkStop),
+            x, M5.Display.height()-system_font::line_height()-4);
+        M5.Display.display();
+        M5.Display.endWrite();
+        return;
+#endif
 
         if (_starting) {
             draw_line(ui_locale::text(ui_locale::TextId::StartingWifi));
@@ -776,13 +1121,39 @@ private:
         M5.Display.endWrite();
     }
 
+    static esp_err_t handle_diagnostics(httpd_req_t* req) {
+        auto* self=static_cast<WifiTransferActivity*>(req->user_ctx);
+        TransferSessionGate::Request operation(self->_session_gate);
+        if (!operation) return restarting_response(req);
+        httpd_resp_set_type(req, "application/json; charset=utf-8");
+        httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+        std::string download;
+        if (query_value(req, "download", &download) && download == "1")
+            httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"s31-wifi-diagnostic.json\"");
+        const auto report=self->_diagnostics.json();
+        return httpd_resp_send(req,report.c_str(),report.size());
+    }
+
+    static esp_err_t restarting_response(httpd_req_t* req) {
+        httpd_resp_set_status(req, "503 Service Unavailable");
+        httpd_resp_set_type(req, "text/plain; charset=utf-8");
+        httpd_resp_set_hdr(req, "Connection", "close");
+        return httpd_resp_sendstr(req, ui_locale::text(ui_locale::TextId::TransferProtocolChanging));
+    }
+
     static esp_err_t handle_index(httpd_req_t *req)
     {
+        auto* gate_owner = static_cast<WifiTransferActivity*>(req->user_ctx);
+        TransferSessionGate::Request operation(gate_owner->_session_gate);
+        if (!operation) return restarting_response(req);
         httpd_resp_set_type(req, "text/html; charset=utf-8");
         using ui_locale::TextId;
         struct WebText { const char *key; TextId id; };
         static constexpr WebText labels[] = {
             {"WifiTransfer", TextId::WifiTransfer},
+            {"TransferDiagnostics", TextId::TransferDiagnostics},
+            {"TransferDiagnosticsSave", TextId::TransferDiagnosticsSave},
+            {"TransferDiagnosticsHint", TextId::TransferDiagnosticsHint},
             {"WebSmartUpload", TextId::WebSmartUpload},
             {"WebFileManager", TextId::WebFileManager},
             {"WebSortHint", TextId::WebSortHint},
@@ -815,6 +1186,15 @@ private:
         }
         translations += "}";
         std::string page = FILE_MANAGER_HTML;
+        const size_t diagnostics_marker = page.find("__TRANSFER_DIAGNOSTICS__");
+        if (diagnostics_marker != std::string::npos)
+            page.replace(diagnostics_marker, std::strlen("__TRANSFER_DIAGNOSTICS__"),
+#if CONFIG_IDF_TARGET_ESP32S31
+                "true"
+#else
+                "false"
+#endif
+            );
         constexpr char marker[] = "__UI_LOCALE__";
         const size_t position = page.find(marker);
         if (position != std::string::npos) page.replace(position, sizeof(marker) - 1, translations);
@@ -834,6 +1214,9 @@ private:
 
     static esp_err_t handle_list(httpd_req_t *req)
     {
+        auto* gate_owner = static_cast<WifiTransferActivity*>(req->user_ctx);
+        TransferSessionGate::Request operation(gate_owner->_session_gate);
+        if (!operation) return restarting_response(req);
         std::string requested, web_path, sd_path;
         query_value(req, "path", &requested);
         if (!normalize_web_path(requested, &web_path, &sd_path)) {
@@ -872,6 +1255,9 @@ private:
 
     static esp_err_t handle_action(httpd_req_t *req)
     {
+        auto* gate_owner = static_cast<WifiTransferActivity*>(req->user_ctx);
+        TransferSessionGate::Request operation(gate_owner->_session_gate);
+        if (!operation) return restarting_response(req);
         std::string op, requested, name, web_path, sd_path;
         if (!query_value(req, "op", &op) || !query_value(req, "path", &requested) ||
             !normalize_web_path(requested, &web_path, &sd_path)) {
@@ -913,6 +1299,9 @@ private:
 
     static esp_err_t handle_download(httpd_req_t *req)
     {
+        auto* gate_owner = static_cast<WifiTransferActivity*>(req->user_ctx);
+        TransferSessionGate::Request operation(gate_owner->_session_gate);
+        if (!operation) return restarting_response(req);
         std::string requested, web_path, sd_path;
         if (!query_value(req, "path", &requested) ||
             !normalize_web_path(requested, &web_path, &sd_path) || web_path == "/") {
@@ -937,20 +1326,44 @@ private:
         httpd_resp_set_hdr(req, "Content-Disposition", disposition.c_str());
         esp_err_t result = ESP_OK;
         size_t capacity = heap_caps_get_allocated_size(buffer);
+#if CONFIG_IDF_TARGET_ESP32S31
+        TransferDiagnostics::Run diagnostic(gate_owner->_diagnostics,download_name,"download",TRANSFER_PROTOCOL_NAMES[gate_owner->_protocol],gate_owner->_he_stbc,gate_owner->_ampdu,gate_owner->_ap_mode,gate_owner->requested_tx_power());
+#endif
         while (true) {
+            const int64_t read_begin=esp_timer_get_time();
             size_t count = std::fread(buffer, 1, capacity, fp);
-            if (count > 0 && httpd_resp_send_chunk(req, buffer, count) != ESP_OK) { result = ESP_FAIL; break; }
-            if (count < capacity) break;
+#if CONFIG_IDF_TARGET_ESP32S31
+            diagnostic.storage(esp_timer_get_time()-read_begin);
+#endif
+            if (count > 0) {
+                const int64_t send_begin=esp_timer_get_time();
+                result=httpd_resp_send_chunk(req,buffer,count);
+#if CONFIG_IDF_TARGET_ESP32S31
+                diagnostic.network(esp_timer_get_time()-send_begin,result==ESP_OK?count:0);
+#endif
+                if (result!=ESP_OK) break;
+            }
+            if (count < capacity) { if (std::ferror(fp)) result=ESP_FAIL; break; }
         }
         heap_caps_free(buffer);
         std::fclose(fp);
         if (result != ESP_OK) return result;
-        return httpd_resp_send_chunk(req, nullptr, 0);
+        result=httpd_resp_send_chunk(req, nullptr, 0);
+#if CONFIG_IDF_TARGET_ESP32S31
+        diagnostic.finish(result==ESP_OK);
+#endif
+        return result;
     }
 
     static esp_err_t handle_upload(httpd_req_t *req)
     {
+        auto* gate_owner = static_cast<WifiTransferActivity*>(req->user_ctx);
+        TransferSessionGate::Request operation(gate_owner->_session_gate);
+        if (!operation) return restarting_response(req);
         WifiTransferActivity *self = (WifiTransferActivity *)req->user_ctx;
+#if CONFIG_IDF_TARGET_ESP32S31
+        if (self) self->_upload_begin_us = 0;
+#endif
         std::string name = "upload.bin";
         query_value(req, "name", &name);
 
@@ -1070,6 +1483,12 @@ private:
         size_t written = 0;
         size_t next_log = UPLOAD_LOG_INTERVAL_BYTES;
         int64_t t0 = esp_timer_get_time();
+#if CONFIG_IDF_TARGET_ESP32S31
+        if (self) self->_upload_begin_us = t0;
+#endif
+#if CONFIG_IDF_TARGET_ESP32S31
+        TransferDiagnostics::Run diagnostic(self->_diagnostics,name,"upload",TRANSFER_PROTOCOL_NAMES[self->_protocol],self->_he_stbc,self->_ampdu,self->_ap_mode,self->requested_tx_power());
+#endif
         log_transfer_link("upload-begin");
         int64_t last_log_time = t0;
         size_t last_log_written = 0;
@@ -1091,6 +1510,9 @@ private:
             recv_us += recv_elapsed;
             max_recv_us = std::max(max_recv_us, recv_elapsed);
             recv_calls++;
+#if CONFIG_IDF_TARGET_ESP32S31
+            diagnostic.network(recv_elapsed,got>0?size_t(got):0,got==HTTPD_SOCK_ERR_TIMEOUT);
+#endif
             if (got == HTTPD_SOCK_ERR_TIMEOUT) {
                 recv_timeouts++;
                 const int64_t idle_us = esp_timer_get_time() - last_data_time;
@@ -1130,6 +1552,9 @@ private:
             write_us += write_elapsed;
             max_write_us = std::max(max_write_us, write_elapsed);
             write_calls++;
+#if CONFIG_IDF_TARGET_ESP32S31
+            diagnostic.storage(write_elapsed);
+#endif
             if (n != (size_t)got) {
                 heap_caps_free(buf);
                 std::fclose(fp);
@@ -1166,6 +1591,9 @@ private:
         int64_t close_t0 = esp_timer_get_time();
         int close_result = std::fclose(fp);
         int64_t close_us = esp_timer_get_time() - close_t0;
+#if CONFIG_IDF_TARGET_ESP32S31
+        diagnostic.flush(close_us);
+#endif
         if (file_buf) free(file_buf);
         if (close_result != 0) {
             ESP_LOGE(TAG, "upload final flush failed path=%s errno=%d (%s)", path.c_str(), errno, strerror(errno));
@@ -1198,6 +1626,9 @@ private:
         }
         if (had_previous) unlink(backup_path.c_str());
 
+#if CONFIG_IDF_TARGET_ESP32S31
+        diagnostic.finish(true);
+#endif
         char msg[256];
         std::snprintf(msg, sizeof(msg), ui_locale::text(ui_locale::TextId::UploadSavedFormat), final_path.c_str(), (unsigned)written);
         httpd_resp_set_type(req, "text/plain; charset=utf-8");

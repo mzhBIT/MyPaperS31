@@ -56,8 +56,16 @@ bool S31Power::begin() {
     last_attempt_ = lgfx::millis();
     uint16_t mv = 0;
     const bool ok = gauge_.beginReadOnly(mv);
-    if (ok) ESP_LOGI("S31_BATTERY", "BQ27220 @0x55 read-only ready: voltage=%u mV", mv);
-    else ESP_LOGW("S31_BATTERY", "BQ27220 unavailable; battery remains unknown, retry on status read");
+    if (ok) {
+        ESP_LOGI("S31_BATTERY", "BQ27220 @0x55 read-only ready: voltage=%u mV", mv);
+        // Populate level/current before the first header is drawn. Probing
+        // voltage alone leaves level_=-1 until the one-second idle poll.
+        last_attempt_ = lgfx::millis() - sample_interval_;
+        update();
+    } else {
+        sample_interval_ = 30000;
+        ESP_LOGW("S31_BATTERY", "BQ27220 unavailable; battery remains unknown, retry on status read");
+    }
     return ok;
 }
 void S31Power::update() {

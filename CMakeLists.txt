@@ -34,7 +34,26 @@ if(MYPAPER_BOARD STREQUAL "MyPaperS31")
                        "${CMAKE_CURRENT_LIST_DIR}/components/M5GFX"
                        "${CMAKE_CURRENT_LIST_DIR}/components/M5Unified"
                        "${CMAKE_CURRENT_LIST_DIR}/components/freetype"
+                       "${CMAKE_CURRENT_LIST_DIR}/third_party/s31/esp_tinyusb"
+                       "${CMAKE_CURRENT_LIST_DIR}/third_party/s31/tinyusb"
                        "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__libjpeg-turbo"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__esp_audio_codec"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__esp_audio_effects"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__gmf_fft"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__gmf_core"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__gmf_audio"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__gmf_io"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__esp_audio_simple_player"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__esp_hls_stream"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__esp_extractor"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__media_lib_sal"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__gmf_core"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__gmf_audio"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__gmf_io"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__esp_audio_simple_player"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__esp_hls_stream"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__esp_extractor"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__media_lib_sal"
                        "$ENV{IDF_PATH}/components")
     set(COMPONENTS application)
 elseif(MYPAPER_BOARD STREQUAL "MyPaperP4")
@@ -61,6 +80,30 @@ if(MYPAPER_BOARD STREQUAL "MyPaperP4")
 endif()
 
 project(${MYPAPER_BOARD})
+
+if(MYPAPER_BOARD STREQUAL "MyPaperS31")
+    # S31 deliberately disables Component Manager. Supply the dependencies
+    # normally exported by these packages' idf_component.yml manifests.
+    target_link_libraries(__idf_espressif__gmf_audio PUBLIC
+        idf::espressif__gmf_core idf::espressif__esp_audio_codec idf::espressif__esp_audio_effects)
+    target_link_libraries(__idf_espressif__gmf_io PUBLIC idf::espressif__gmf_core)
+    target_link_libraries(__idf_espressif__esp_audio_simple_player PUBLIC
+        idf::espressif__gmf_audio idf::espressif__gmf_io)
+    target_link_libraries(__idf_espressif__esp_hls_stream PUBLIC
+        idf::espressif__esp_extractor idf::espressif__gmf_io idf::espressif__media_lib_sal)
+endif()
+
+if(MYPAPER_BOARD STREQUAL "MyPaperS31")
+    # S31 deliberately disables Component Manager. Supply the dependencies
+    # normally exported by these packages' idf_component.yml manifests.
+    target_link_libraries(__idf_espressif__gmf_audio PUBLIC
+        idf::espressif__gmf_core idf::espressif__esp_audio_codec idf::espressif__esp_audio_effects)
+    target_link_libraries(__idf_espressif__gmf_io PUBLIC idf::espressif__gmf_core)
+    target_link_libraries(__idf_espressif__esp_audio_simple_player PUBLIC
+        idf::espressif__gmf_audio idf::espressif__gmf_io)
+    target_link_libraries(__idf_espressif__esp_hls_stream PUBLIC
+        idf::espressif__esp_extractor idf::espressif__gmf_io idf::espressif__media_lib_sal)
+endif()
 
 # The registry package refers to its IDF target by the unnamespaced package
 # name, while Component Manager registers it with the vendor prefix.

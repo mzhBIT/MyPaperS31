@@ -354,6 +354,7 @@ struct BubbleLayout {
 
 class SmsActivity final : public Activity {
 public:
+    bool can_standby() const override { return !_busy; }
     SmsActivity()
     {
         _queue = xQueueCreate(2, sizeof(WorkResult *));

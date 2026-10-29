@@ -485,6 +485,7 @@ class HomeActivity : public Activity {
     int m_clock_offset = 0;
     bool m_clock_24_hour = true;
     bool m_wifi_enabled = false;
+    bool m_battery_available = false;
 
 public:
     void on_create() override {
@@ -521,18 +522,22 @@ public:
     }
 
     void loop() override {
+        if (M5.Display.displayBusy() || touch_input_needs_fast_poll()) return;
         const std::time_t now = std::time(nullptr);
         const int64_t minute = time_basis_system_clock_valid() ? now / 60 : -1;
         const int offset = time_basis_get_offset_minutes();
         const bool hour24 = time_basis_use_24_hour();
         const bool wifi_enabled = wifi_setting_is_enabled();
+        const bool battery_available = battery_status::available();
         if (minute == m_clock_minute && offset == m_clock_offset &&
-            hour24 == m_clock_24_hour && wifi_enabled == m_wifi_enabled) return;
+            hour24 == m_clock_24_hour && wifi_enabled == m_wifi_enabled &&
+            battery_available == m_battery_available) return;
         if (M5.Display.displayBusy()) return;
         m_clock_minute = minute;
         m_clock_offset = offset;
         m_clock_24_hour = hour24;
         m_wifi_enabled = wifi_enabled;
+        m_battery_available = battery_available;
         M5.Display.startWrite();
         M5.Display.setDither(false);
         M5.Display.setEpdMode(epd_mode_t::epd_text);
@@ -586,6 +591,11 @@ public:
         return false;
     }
 
+    bool on_navigation_key(int direction) override {
+        if (direction < 0 && g_page > 0) switch_page(g_page-1);
+        else if (direction > 0 && g_page+1 < HOME_PAGE_CNT) switch_page(g_page+1);
+        return true;
+    }
     bool on_key(int key) override {
         int &focus = g_focus[g_page];
         if (key == APP_KEY_UP && focus > 0) {
@@ -624,6 +634,7 @@ private:
         m_clock_offset = time_basis_get_offset_minutes();
         m_clock_24_hour = time_basis_use_24_hour();
         m_wifi_enabled = wifi_setting_is_enabled();
+        m_battery_available = battery_status::available();
     }
     static int menu_count(int page) {
         int count = 0;

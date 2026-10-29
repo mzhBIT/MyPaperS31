@@ -54,8 +54,22 @@ bool Bus_EPD_S31::init() {
   if (!i2c::init(1, 0, 1).has_value()) return false;
   // Preserve unrelated outputs: P05 supplies the screen, P12 resets touch.
   uint8_t cfg0, cfg1;
-  if (!readReg(IO_ADDR, 6, cfg0) || !readReg(IO_ADDR, 7, cfg1)
-      || !updateIo(0, 0x27, 0x20) || !updateIo(1, 0x04, 0)
+  bool config_ready = false;
+  // Read-only startup handshake: allow a brief rail/bus settling interval.
+  // Never continue with guessed direction bits or repeat a partial rail setup.
+  for (unsigned attempt = 1; attempt <= 3; ++attempt) {
+    if (readReg(IO_ADDR, 6, cfg0) && readReg(IO_ADDR, 7, cfg1)) {
+      config_ready = true;
+      if (attempt > 1) ESP_LOGW(TAG, "TCA config read recovered: attempt=%u", attempt);
+      break;
+    }
+    if (attempt < 3) delay(10);
+  }
+  if (!config_ready) {
+    ESP_LOGE(TAG, "TCA startup handshake failed after 3 attempts; panel init aborted");
+    return false;
+  }
+  if (!updateIo(0, 0x27, 0x20) || !updateIo(1, 0x04, 0)
       || !writeReg(IO_ADDR, 6, (cfg0 & ~0x27) | 0x80)
       || !writeReg(IO_ADDR, 7, cfg1 & ~0x04)) return false;
   delay(10);

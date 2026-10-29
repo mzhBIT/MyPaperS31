@@ -31,6 +31,7 @@ struct ReadingSession::State {
     std::atomic<int64_t> ready_since{0};
 };
 std::mutex &reading_transaction_mutex() { return transaction_mutex; }
+bool reading_sessions_idle() { return active_workers.load() == 0; }
 
 namespace {
 // Called only with the transaction lock. Unknown reports and offline seconds

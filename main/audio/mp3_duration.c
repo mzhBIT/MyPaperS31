@@ -112,7 +112,23 @@ static bool parse(reader_t *r, mp3_duration_info_t *info) {
     if (r->end >= 128 && read_at(r, r->end - 128, h, 3) && !memcmp(h, "TAG", 3)) r->end -= 128;
     if (r->end >= 32 && read_at(r, r->end - 32, h, 32) && !memcmp(h, "APETAGEX", 8)) {
         const uint32_t n = le32(h + 12);
-        if (n >= 32 && n <= (uint64_t)(r->end - pos)) r->end -= n;
+        if (n >= 32 && n <= (uint64_t)(r->end - pos)) {
+            // APE tag size includes items + footer, but EXCLUDES the optional
+            // 32-byte header. Leaving it behind makes a complete MP3 fail its
+            // final frame validation (common with foobar2000-tagged files).
+            long start = r->end - (long)n;
+            if (le32(h + 20) & 0x80000000u) {
+                unsigned char header[32];
+                if (start - pos < 32 || !read_at(r, start - 32, header, sizeof(header)) ||
+                    memcmp(header, "APETAGEX", 8) || le32(header + 8) != le32(h + 8) ||
+                    le32(header + 12) != n || !(le32(header + 20) & 0x20000000u)) {
+                    info->failure = "invalid-ape-header";
+                    return false;
+                }
+                start -= 32;
+            }
+            r->end = start;
+        }
     }
     const long search_end = r->end - pos > 1048576 ? pos + 1048576 : r->end;
     frame_t first = {0}, next;

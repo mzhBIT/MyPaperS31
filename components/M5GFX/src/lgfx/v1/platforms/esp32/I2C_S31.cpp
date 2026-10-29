@@ -2,6 +2,7 @@
 #if defined(CONFIG_IDF_TARGET_ESP32S31)
 #include "../common.hpp"
 #include <driver/i2c_master.h>
+#include <esp_log.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
@@ -57,17 +58,35 @@ cpp::result<void, error_t> transactionWriteRead(int n, int addr,
     const uint8_t* w, uint8_t wn, uint8_t* r, size_t rn, uint32_t freq) {
   if (n < 0 || n >= SOC_I2C_NUM || !ports[n].bus) return checked(ESP_ERR_INVALID_STATE);
   auto& p = ports[n];
-  if (xSemaphoreTake(p.lock, pdMS_TO_TICKS(100)) != pdTRUE) return checked(ESP_ERR_TIMEOUT);
+  if (xSemaphoreTake(p.lock, pdMS_TO_TICKS(100)) != pdTRUE) {
+    if (addr == 0x20) ESP_LOGW("I2C_S31", "port=%d addr=20 bus lock timeout (100 ms)", n);
+    return checked(ESP_ERR_TIMEOUT);
+  }
   i2c_device_config_t c = {};
   c.dev_addr_length = I2C_ADDR_BIT_LEN_7; c.device_address = addr; c.scl_speed_hz = freq;
   i2c_master_dev_handle_t dev = nullptr;
   auto e = i2c_master_bus_add_device(p.bus, &c, &dev);
+  const char* stage = "add-device";
   if (e == ESP_OK) {
+    stage = "transfer";
     if (wn && rn) e = i2c_master_transmit_receive(dev, w, wn, r, rn, 100);
     else if (wn) e = i2c_master_transmit(dev, w, wn, 100);
     else if (rn) e = i2c_master_receive(dev, r, rn, 100);
     else e = ESP_ERR_INVALID_ARG;
     i2c_master_bus_rm_device(dev);
+  }
+  if (e != ESP_OK && addr == 0x20) {
+    // TCA is required by display/power/keys. Log the real IDF status rather
+    // than only the generic LGFX connection_lost; avoid flooding key polling.
+    static TickType_t last_error = 0;
+    static bool reported = false;
+    const TickType_t now = xTaskGetTickCount();
+    if (!reported || TickType_t(now-last_error) >= pdMS_TO_TICKS(1000)) {
+      ESP_LOGW("I2C_S31", "port=%d addr=20 reg=%02x stage=%s write=%u read=%u error=%s (0x%x)",
+               n, wn && w ? w[0] : 0xff, stage, unsigned(wn), unsigned(rn),
+               esp_err_to_name(e), unsigned(e));
+      last_error = now; reported = true;
+    }
   }
   xSemaphoreGive(p.lock); return checked(e);
 }

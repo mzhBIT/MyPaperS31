@@ -10,6 +10,8 @@ public:
     void on_create() override;
     void loop() override;
     bool allow_system_back() const override { return false; }
+    bool allow_system_home() const override { return false; }
+    bool can_standby() const override { return false; }
 
     /// Check whether calibration is due and launch if needed.
     /// Returns true if calibration was launched (or already done).

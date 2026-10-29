@@ -9,6 +9,7 @@ enum AppKey {
     APP_KEY_OK,
     APP_KEY_BACK,
     APP_KEY_EXTRA,
+    APP_KEY_READER_MENU,
 };
 
 class Activity {
@@ -17,8 +18,20 @@ public:
     virtual void on_create() = 0;
     virtual void on_show() {}
     virtual void on_hide() {}
+    // Modal overlays do not hide/re-enter the activity underneath them.
+    virtual void on_overlay_dismiss(bool /*restore*/) { on_hide(); }
     virtual void loop() {}
     virtual bool on_touch(const TouchEvent &/*event*/) { return false; }
     virtual bool allow_system_back() const { return true; }
+    virtual bool allow_system_home() const { return true; }
     virtual bool on_key(int /*gesture*/) { return false; }
+    // Optional board-key semantics. Do not guess page navigation from an
+    // arbitrary app's UP/DOWN focus keys or send BOOT to an unrelated action.
+    virtual bool on_navigation_key(int /*direction*/) { return false; }
+    virtual bool on_reader_menu_key() { return false; }
+    virtual bool on_cover_home_key() { return false; }
+    // Background-I/O barrier for manual light sleep; called on the UI thread.
+    virtual bool can_standby() const { return true; }
+    virtual void on_standby_enter() { on_hide(); }
+    virtual void on_standby_resume() {}
 };

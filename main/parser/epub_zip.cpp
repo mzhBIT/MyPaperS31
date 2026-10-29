@@ -159,7 +159,7 @@ bool EpubZip::open(const char *path)
 void EpubZip::close()
 {
     _path.clear();
-    _entries.clear();
+    metadata_memory::release(_entries);
 }
 
 bool EpubZip::has_entry(const std::string &name) const
@@ -186,7 +186,7 @@ bool EpubZip::extract_unique_suffix_to_file(const std::string &name,
     std::string wanted_lower = wanted;
     std::transform(wanted_lower.begin(), wanted_lower.end(), wanted_lower.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    const std::string *matched = nullptr;
+    const metadata_memory::String *matched = nullptr;
     for (const auto &[entry_name, entry] : _entries) {
         (void)entry;
         std::string candidate = entry_name;
@@ -234,7 +234,9 @@ bool EpubZip::load_central_directory(FILE *fp)
     if (eocd < 0) return false;
 
     const uint8_t *p = tail.data() + eocd;
+    metadata_memory::Budget budget;
     uint16_t entry_count = rd16(p + 10);
+    if (!metadata_memory::Budget::reserve_allowed(entry_count,sizeof(Entry)+sizeof(metadata_memory::String)+32)) return false;
     uint32_t central_size = rd32(p + 12);
     uint32_t central_offset = rd32(p + 16);
     // Classic single-disk ZIP only. Do not interpret ZIP64 sentinel offsets.
@@ -264,7 +266,10 @@ bool EpubZip::load_central_directory(FILE *fp)
             if (name_len > 0 && std::fread(&name[0], 1, name_len, fp) != name_len) return false;
             if (std::fseek(fp, (long)extra_len + comment_len, SEEK_CUR) != 0) return false;
             name = normalize_path(name);
-            if (!name.empty() && name.back() != '/') _entries[name] = entry;
+            if (!name.empty() && name.back() != '/') {
+                if (!budget.add(_entries.size(),sizeof(Entry)+sizeof(metadata_memory::String),{name.size()})) return false;
+                _entries[name] = entry;
+            }
         }
         return true;
     }
@@ -295,6 +300,7 @@ bool EpubZip::load_central_directory(FILE *fp)
 
         name = normalize_path(name);
         if (!name.empty() && name.back() != '/') {
+            if (!budget.add(_entries.size(),sizeof(Entry)+sizeof(metadata_memory::String),{name.size()})) return false;
             _entries[name] = entry;
         }
     }
@@ -351,6 +357,8 @@ bool EpubZip::load_index_cache(const char *source_path)
         file_size != (uint64_t)source_stat.st_size || mtime != (uint64_t)source_stat.st_mtime) return false;
 
     EntryMap entries;
+    metadata_memory::Budget budget;
+    if (!metadata_memory::Budget::reserve_allowed(entry_count,sizeof(Entry)+sizeof(metadata_memory::String)+32)) return false;
     entries.reserve(entry_count);
     for (uint32_t i = 0; i < entry_count; ++i) {
         if (pos + 2 > data.size()) return false;
@@ -365,6 +373,7 @@ bool EpubZip::load_index_cache(const char *source_path)
         entry.compressed_size = rd32(data.data() + pos); pos += 4;
         entry.uncompressed_size = rd32(data.data() + pos); pos += 4;
         entry.local_header_offset = rd32(data.data() + pos); pos += 4;
+        if (!budget.add(entries.size(),sizeof(Entry)+sizeof(metadata_memory::String),{name.size()})) return false;
         entries.emplace(std::move(name), entry);
     }
     if (pos != data.size()) return false;
@@ -637,6 +646,8 @@ bool EpubZip::read_entry_to_memory(const std::string &name,
             offset += ok ? chunk : 0;
             if (ok) cooperative_yield_if_due(&last_yield_us);
         }
+    } else if (ok) {
+        ok = false;
     }
     std::fclose(fp);
     if (!ok) return false;

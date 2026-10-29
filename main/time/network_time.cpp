@@ -98,3 +98,11 @@ extern "C" void network_time_on_connected(void)
         ESP_LOGW(TAG, "boot sync task allocation failed");
     }
 }
+
+extern "C" bool network_time_busy(void) { return s_sync_busy.load(); }
+
+extern "C" bool network_time_try_pause(void) {
+    bool expected = false;
+    return s_sync_busy.compare_exchange_strong(expected, true);
+}
+extern "C" void network_time_resume(void) { s_sync_busy.store(false); }

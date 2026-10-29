@@ -1,4 +1,5 @@
 #include "wifi_setting.h"
+#include "S31WifiPolicy.h"
 #include "time/network_time.h"
 
 #include <stdbool.h>
@@ -61,6 +62,12 @@ static esp_netif_t *s_sta_netif;
 static EventGroupHandle_t s_wifi_event_group;
 static esp_event_handler_instance_t s_wifi_event_handler_instance;
 static esp_event_handler_instance_t s_ip_event_handler_instance;
+
+#if CONFIG_IDF_TARGET_ESP32S31
+static bool s_native_stop_pending;
+static esp_err_t wifi_setting_wait_native_stop(void);
+static esp_err_t wifi_setting_suspend_native(void);
+#endif
 
 static void wifi_setting_log_heap(const char *stage)
 {
@@ -184,11 +191,10 @@ static void wifi_setting_wait_for_always_on_task(void)
 
 static void wifi_setting_always_on_worker(void *arg)
 {
-    (void)arg;
     // Let the creator publish the task handle before accessing shared state.
     vTaskDelay(pdMS_TO_TICKS(100));
     if (s_network_mode == WIFI_SETTING_NETWORK_WIFI &&
-        s_power_mode == WIFI_SETTING_POWER_ALWAYS_ON) {
+        (s_power_mode == WIFI_SETTING_POWER_ALWAYS_ON || arg != NULL)) {
         esp_err_t ret = wifi_setting_connect_saved(WIFI_SETTING_ALWAYS_ON_TIMEOUT_MS);
         if (ret != ESP_OK) {
             ESP_LOGW(TAG, "Always-on Wi-Fi connect failed: %s", esp_err_to_name(ret));
@@ -213,6 +219,16 @@ esp_err_t wifi_setting_start_always_on(void)
     }
     BaseType_t created = xTaskCreate(wifi_setting_always_on_worker, "wifi_always_on",
                                      4096, NULL, 4, (TaskHandle_t *)&s_always_on_task);
+    return created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
+}
+
+bool wifi_setting_background_busy(void) { return s_always_on_task != NULL; }
+esp_err_t wifi_setting_resume_saved_async(void)
+{
+    if (s_always_on_task != NULL || wifi_setting_is_connected()) return ESP_OK;
+    if (s_network_mode != WIFI_SETTING_NETWORK_WIFI) return ESP_ERR_NOT_SUPPORTED;
+    BaseType_t created = xTaskCreate(wifi_setting_always_on_worker, "wifi_resume",
+                                     4096, (void*)1, 4, (TaskHandle_t *)&s_always_on_task);
     return created == pdPASS ? ESP_OK : ESP_ERR_NO_MEM;
 }
 
@@ -241,7 +257,11 @@ esp_err_t wifi_setting_set_power_mode(wifi_setting_power_mode_t mode)
         return ESP_OK;
     }
     wifi_setting_wait_for_always_on_task();
+#if CONFIG_IDF_TARGET_ESP32S31
+    return wifi_setting_suspend_native();
+#else
     return wifi_setting_deinit(true);
+#endif
 }
 
 esp_err_t wifi_setting_release(void)
@@ -250,8 +270,61 @@ esp_err_t wifi_setting_release(void)
         s_power_mode == WIFI_SETTING_POWER_ALWAYS_ON) {
         return ESP_OK;
     }
+#if CONFIG_IDF_TARGET_ESP32S31
+    return wifi_setting_suspend_native();
+#else
     return wifi_setting_deinit(true);
+#endif
 }
+
+#if CONFIG_IDF_TARGET_ESP32S31
+static esp_err_t wifi_setting_wait_native_stop(void)
+{
+    if (!s_native_stop_pending) return ESP_OK;
+    const EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+        WIFI_SETTING_STOPPED_BIT, pdFALSE, pdTRUE,
+        pdMS_TO_TICKS(WIFI_SETTING_STATE_TIMEOUT_MS));
+    if (!(bits & WIFI_SETTING_STOPPED_BIT)) {
+        ESP_LOGE(TAG, "S31 radio suspend: STA stop event timed out");
+        return ESP_ERR_TIMEOUT;
+    }
+    s_native_stop_pending = false;
+    s_wifi_started = false;
+    return ESP_OK;
+}
+
+// Match the reference board's PauseForLp/ResumeFromLp lifecycle. Native S31
+// power saving stops the radio, retaining driver/netif/default RX handlers.
+// Explicit wifi_setting_deinit remains available for transport handoff and
+// standby; those callers really do need to destroy the driver/netif.
+static esp_err_t wifi_setting_suspend_native(void)
+{
+    wifi_setting_wait_for_always_on_task();
+    ESP_RETURN_ON_ERROR(wifi_setting_wait_native_stop(), TAG, "Previous Wi-Fi stop still pending");
+    s_stopping = true; // Suppress reconnects from stop-generated events.
+    s_connected = false;
+    s_connected_ssid[0] = '\0';
+    s_retry_num = 0;
+    if (s_wifi_event_group != NULL) {
+        xEventGroupClearBits(s_wifi_event_group, WIFI_SETTING_CONNECTED_BIT |
+                            WIFI_SETTING_FAIL_BIT | WIFI_SETTING_STARTED_BIT |
+                            WIFI_SETTING_STOPPED_BIT);
+    }
+    if (s_wifi_started) {
+        const esp_err_t ret = esp_wifi_stop();
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "S31 radio suspend failed: %s", esp_err_to_name(ret));
+            s_stopping = false;
+            return ret;
+        }
+        s_native_stop_pending = true;
+        ESP_RETURN_ON_ERROR(wifi_setting_wait_native_stop(), TAG, "Wi-Fi stop still pending");
+    }
+    s_c6_powered_on = false; // Native-board bookkeeping; there is no C6 rail.
+    ESP_LOGI(TAG, "S31 Wi-Fi suspended: radio off; driver/netif retained");
+    return ESP_OK;
+}
+#endif
 
 wifi_setting_network_mode_t wifi_setting_get_network_mode(void)
 {
@@ -392,10 +465,19 @@ esp_err_t wifi_setting_c6_power_off(void)
 
 esp_err_t wifi_setting_init(void)
 {
+#if CONFIG_IDF_TARGET_ESP32S31
+    // Never advertise/restart STA before its previous default stop handler
+    // completed, including after an earlier release timed out.
+    ESP_RETURN_ON_ERROR(wifi_setting_wait_native_stop(), TAG, "Wi-Fi stop still pending");
+#endif
     wifi_setting_log_heap("before-init");
     s_stopping = false;
     if (s_wifi_started) {
+#if CONFIG_IDF_TARGET_ESP32S31
+        return esp_wifi_set_max_tx_power(S31_WIFI_DEFAULT_TX_POWER_QDBM);
+#else
         return ESP_OK;
+#endif
     }
 
     ESP_RETURN_ON_ERROR(wifi_setting_c6_power_on(), TAG, "Failed to power on C6");
@@ -417,6 +499,10 @@ esp_err_t wifi_setting_init(void)
         wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
 #if CONFIG_IDF_TARGET_ESP32S31
         wifi_setting_log_heap("driver-init-begin");
+        ESP_LOGI(TAG, "RX profile: static=%u dynamic=%u ba=%u tcp_window=%u tcp_mailbox=%u tcpip_mailbox=%u",
+                 (unsigned)cfg.static_rx_buf_num, (unsigned)cfg.dynamic_rx_buf_num, (unsigned)cfg.rx_ba_win,
+                 (unsigned)CONFIG_LWIP_TCP_WND_DEFAULT, (unsigned)CONFIG_LWIP_TCP_RECVMBOX_SIZE,
+                 (unsigned)CONFIG_LWIP_TCPIP_RECVMBOX_SIZE);
 #endif
         ESP_RETURN_ON_ERROR(esp_wifi_init(&cfg), TAG, "Failed to initialize Wi-Fi");
 #if CONFIG_IDF_TARGET_ESP32S31
@@ -427,12 +513,22 @@ esp_err_t wifi_setting_init(void)
 
     ESP_RETURN_ON_ERROR(esp_wifi_set_storage(WIFI_STORAGE_RAM), TAG, "Failed to set Wi-Fi storage");
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "Failed to set Wi-Fi STA mode");
+#if CONFIG_IDF_TARGET_ESP32S31
+    ESP_RETURN_ON_ERROR(esp_wifi_set_protocol(WIFI_IF_STA, S31_WIFI_DEFAULT_PROTOCOL),
+                        TAG, "Failed to set S31 Wi-Fi protocol");
+    ESP_LOGI(TAG, "S31 Wi-Fi STA protocol: 802.11b/g/n/ax");
+#endif
     if (s_wifi_event_group != NULL) {
         xEventGroupClearBits(s_wifi_event_group,
                              WIFI_SETTING_STARTED_BIT | WIFI_SETTING_STOPPED_BIT);
     }
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "Failed to start Wi-Fi");
     s_wifi_started = true;
+#if CONFIG_IDF_TARGET_ESP32S31
+    ESP_RETURN_ON_ERROR(esp_wifi_set_max_tx_power(S31_WIFI_DEFAULT_TX_POWER_QDBM),
+                        TAG, "Failed to set S31 Wi-Fi 5 dBm limit");
+    ESP_LOGI(TAG, "S31 Wi-Fi radio started with reusable driver/netif");
+#endif
 
     if (s_wifi_event_group != NULL) {
         EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
@@ -687,6 +783,9 @@ esp_err_t wifi_setting_connect_saved(int timeout_ms)
 esp_err_t wifi_setting_deinit(bool power_down_c6)
 {
     wifi_setting_wait_for_always_on_task();
+#if CONFIG_IDF_TARGET_ESP32S31
+    ESP_RETURN_ON_ERROR(wifi_setting_wait_native_stop(), TAG, "Wi-Fi stop still pending");
+#endif
     wifi_setting_log_heap("before-deinit");
     esp_err_t first_error = ESP_OK;
     s_stopping = true;

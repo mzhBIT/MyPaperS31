@@ -1,7 +1,8 @@
 // Reading dashboard geometry adapted from read-pico-reader app_dashboard.c.
 // Copyright 2026 mindreset. SPDX-License-Identifier: Apache-2.0
 #include "activities/ReadingHomeActivity.h"
-#include "ui/BatteryStatus.h"
+#include "ui/ShelfStatusBar.h"
+#include "ui/ReadingNavigation.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "activities/BookshelfActivity.h"
@@ -12,10 +13,8 @@
 #include "parser/epub_parser.h"
 #include "ui/ReadingHomeLayout.h"
 #include "ui/BookshelfFontFit.h"
-#include "ui/pico_shelf_icons.h"
 #include "ui/SystemFont.h"
 #include "ui/UiLocale.h"
-#include "wifi/wifi_setting.h"
 #include "time/time_basis.h"
 #include <M5Unified.h>
 #include <algorithm>
@@ -67,29 +66,6 @@ void right(const std::string &s,int x,int cy,int px,int width) {
 void centered(const std::string &s,int x,int cy,int px,int width,int bg=255) {
     px=fit_px(s,px,width);
     text(s,x-system_font::measure(s,px)/2,system_font::centered_y(s,cy,px),px,bg);
-}
-void icon(const uint8_t *mask, int cx, int cy, int size, int ink = 0, int bg = 255) {
-    // Original 72px 4bpp coverage masks, sampled at pixel centers.
-    const int step=(72<<16)/size, half=step/2-(1<<15);
-    for (int y = 0; y < size; ++y) {
-        lgfx::rgb565_t row[72];
-        for (int x = 0; x < size; ++x) {
-            int sx=x*step+half, sy=y*step+half;
-            int ix=sx>>16, iy=sy>>16;
-            auto alpha = [&](int px, int py) {
-                px = std::max(0, std::min(71, px)); py = std::max(0, std::min(71, py));
-                int pos = py * 72 + px;
-                return (pos & 1) ? mask[pos / 2] & 15 : mask[pos / 2] >> 4;
-            };
-            int fx=sx&65535, fy=sy&65535;
-            int upper=(alpha(ix,iy)*(65536-fx)+alpha(ix+1,iy)*fx)>>16;
-            int lower=(alpha(ix,iy+1)*(65536-fx)+alpha(ix+1,iy+1)*fx)>>16;
-            int a=(upper*(65536-fy)+lower*fy)>>16;
-            int blended=(((bg>>4)<<4)*(15-a)+ink*a+7)/15;
-            row[x]=gray((blended>>4)*17);
-        }
-        M5.Display.pushImage(cx-size/2, cy-size/2+y, size, 1, row);
-    }
 }
 
 class ReadingHomeActivity final : public Activity {
@@ -156,32 +132,11 @@ class ReadingHomeActivity final : public Activity {
         }
     }
     void status() {
-        char value[24]="--:--";
-        if(time_basis_system_clock_valid()) time_basis_format_clock(std::time(nullptr),value,sizeof(value));
-        clock_=value; status_ms_=lgfx::millis();
-        text(clock_,36,system_font::centered_y(clock_,40,28),28);
-        const bool wifi=wifi_setting_is_enabled();
-        const int wifi_x=578;
-        icon(pico_shelf_icons::wifi,wifi_x,40,28,wifi?0:144);
-        if(!wifi) M5.Display.drawLine(wifi_x-12,28,wifi_x+12,52,gray(96));
-        M5.Display.drawRoundRect(606,29,40,22,6,TFT_BLACK);
-        M5.Display.fillRect(648,36,5,8,TFT_BLACK);
-        battery_status::draw_fill(610,33,32,14);
+        clock_=shelf_status_bar::draw();
+        status_ms_=lgfx::millis();
     }
     void nav() {
-        M5.Display.fillRect(0,layout::nav_top,684,120,TFT_WHITE);
-        M5.Display.drawFastHLine(0,layout::nav_top,684,gray(160));
-        M5.Display.fillRect(57,1097,56,5,TFT_BLACK);
-        const uint8_t *icons[]={pico_shelf_icons::house,pico_shelf_icons::library_big,
-            pico_shelf_icons::folder_open,pico_shelf_icons::sliders_horizontal};
-        const char *labels[]={tr(TextId::FileNavHome),tr(TextId::Bookshelf),tr(TextId::ReadingHomeFileManager),tr(TextId::Settings)};
-        for(int i=0;i<4;++i) {
-            const int cx=(2*i+1)*684/8;
-            icon(icons[i],cx,1141,44,0,255);
-            const int pixels=fit_px(labels[i],ui_px(17),159);
-            const int cy=std::max(1180,1169+(system_font::ink_height(labels[i],pixels)+1)/2);
-            centered(labels[i],cx,cy,pixels,159,255);
-        }
+        reading_navigation::draw(reading_navigation::Tab::Home);
     }
     void resume_area() {
         left(tr(TextId::ReadingHomeRecent),36,237,ui_px(29),380);
@@ -290,18 +245,18 @@ public:
         if(clock_==clock && uint32_t(lgfx::millis()-status_ms_)<60000) return;
         const auto previous=M5.Display.getEpdMode();
         M5.Display.startWrite(); M5.Display.setEpdMode(epd_mode_t::epd_text);
-        M5.Display.fillRect(0,0,684,72,TFT_WHITE); status();
-        M5.Display.display(0,0,684,72); M5.Display.endWrite();
+        M5.Display.fillRect(0,0,M5.Display.width(),shelf_status_bar::height,TFT_WHITE); status();
+        M5.Display.display(0,0,M5.Display.width(),shelf_status_bar::height); M5.Display.endWrite();
         M5.Display.setEpdMode(previous);
     }
     bool on_touch(const TouchEvent &event) override {
         if(event.type==TouchEventType::Back) { ActivityManager::instance().pop_to_root(); return true; }
         if(event.type!=TouchEventType::Tap) return false;
-        if(event.y>=layout::nav_top) {
-            const int tab=std::clamp(event.x*4/684,0,3);
-            if(tab==1) launch_bookshelf();
-            else if(tab==2) launch_file_browser("/sdcard",true);
-            else if(tab==3) launch_settings();
+        const int tab=reading_navigation_layout::tab_at(event.x,event.y);
+        if(tab>=0) {
+            if(tab==1) switch_to_bookshelf();
+            else if(tab==2) switch_to_reading_files();
+            else if(tab==3) switch_to_reading_settings();
             return true;
         }
         if(layout::resume.contains(event.x,event.y)) { open_book(); return true; }

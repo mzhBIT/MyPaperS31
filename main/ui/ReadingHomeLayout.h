@@ -1,5 +1,6 @@
 #pragma once
 #include "ui/BookshelfLayout.h"
+#include "ui/ReadingNavigationLayout.h"
 #include <algorithm>
 #include <cstdint>
 
@@ -9,7 +10,7 @@ using Rect=bookshelf_layout::Rect;
 constexpr Rect resume{36,216,612,403};
 constexpr Rect cover{36,292,172,250};
 constexpr Rect chart{36,698,612,334};
-constexpr int nav_top=1096;
+constexpr int nav_top=reading_navigation_layout::top;
 constexpr int title_pixels=40; // Original resume title bypasses system scaling.
 inline int progress_y(int detail_height) { return std::max(470,449+(detail_height+1)/2+8); }
 inline int continue_y(int detail_height,int action_height) {

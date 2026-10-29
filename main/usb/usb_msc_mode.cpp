@@ -20,6 +20,17 @@
 #include <tinyusb_default_config.h>
 #include <tinyusb_msc.h>
 
+#if CONFIG_IDF_TARGET_ESP32S31
+#include "boards/MyPaperS31/UsbSwitch.h"
+#define MYPAPER_USB_MANUFACTURER "MyPaperS31"
+#define MYPAPER_USB_PRODUCT "MyPaperS31 SD Card"
+#define MYPAPER_USB_SERIAL_FALLBACK "MYPAPERS31"
+#else
+#define MYPAPER_USB_MANUFACTURER "MyPaperP4"
+#define MYPAPER_USB_PRODUCT "MyPaperP4 SD Card"
+#define MYPAPER_USB_SERIAL_FALLBACK "MYPAPERP4"
+#endif
+
 namespace {
 
 const char *TAG = "USB_MSC";
@@ -144,7 +155,7 @@ void make_serial(char *out, size_t out_size)
 {
     uint8_t mac[6] = {};
     if (esp_read_mac(mac, ESP_MAC_BASE) != ESP_OK) {
-        std::snprintf(out, out_size, "MYPAPERP4");
+        std::snprintf(out, out_size, MYPAPER_USB_SERIAL_FALLBACK);
         return;
     }
     std::snprintf(out, out_size, "%02X%02X%02X%02X%02X%02X",
@@ -174,14 +185,20 @@ esp_err_t start_msc()
     static const char language[] = {0x09, 0x04, 0x00};
     static const char *strings[] = {
         language,
-        "MyPaperP4",
-        "MyPaperP4 SD Card",
+        MYPAPER_USB_MANUFACTURER,
+        MYPAPER_USB_PRODUCT,
         serial,
         "SD Card",
     };
     make_serial(serial, sizeof(serial));
 
+#if CONFIG_IDF_TARGET_ESP32S31
+    // S31 has a single HS UTMI port shared with USB Serial/JTAG; the ANA_SW
+    // routing below makes that PHY visible on the USB-C connector.
+    tinyusb_config_t config = TINYUSB_CONFIG_HIGH_SPEED(device_event, NULL);
+#else
     tinyusb_config_t config = TINYUSB_DEFAULT_CONFIG(device_event);
+#endif
     // Manual mode: the board is separately powered and VBUS is deliberately
     // isolated. Starting/stopping this dedicated mode substitutes for automatic
     // VBUS monitoring.
@@ -192,8 +209,18 @@ esp_err_t start_msc()
     config.task = TINYUSB_TASK_CUSTOM(4096, 5, 0);
     config.descriptor.string = strings;
     config.descriptor.string_count = sizeof(strings) / sizeof(strings[0]);
+#if CONFIG_IDF_TARGET_ESP32S31
+    // Route the shared USB-C connector to the HS UTMI PHY only now, after the
+    // MSC storage is ready. Until this point USB Serial/JTAG keeps working and
+    // the user can read boot diagnostics.
+    mypaper::board::s31::usb_analog_switch_set(true);
+#endif
     ret = tinyusb_driver_install(&config);
     if (ret != ESP_OK) {
+#if CONFIG_IDF_TARGET_ESP32S31
+        // Give the connector back to USB Serial/JTAG so the failure is visible.
+        mypaper::board::s31::usb_analog_switch_set(false);
+#endif
         tinyusb_msc_delete_storage(s_storage);
         s_storage = nullptr;
         tinyusb_msc_uninstall_driver();
@@ -259,6 +286,11 @@ extern "C" esp_err_t usb_msc_mode_run(void)
                              esp_err_to_name(flush_ret));
                 }
                 usb_transfer_boot_set(false);
+#if CONFIG_IDF_TARGET_ESP32S31
+                // Return the connector to the normal USB Serial/JTAG path before
+                // the reboot so a PC does not keep seeing the MSC device.
+                mypaper::board::s31::usb_analog_switch_set(false);
+#endif
                 vTaskDelay(pdMS_TO_TICKS(100));
                 esp_restart();
             }

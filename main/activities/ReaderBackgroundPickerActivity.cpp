@@ -8,6 +8,7 @@
 #include "ui/UiLocale.h"
 #include "ui/reader_background.h"
 #include "ui/reader_book_cover.h"
+#include "ui/standby_wallpaper.h"
 
 #include <M5Unified.h>
 
@@ -42,18 +43,19 @@ bool is_image(const char *name)
 
 class ReaderBackgroundPickerActivity final : public Activity {
 public:
-    explicit ReaderBackgroundPickerActivity(bool book_cover = false, ReaderProfile profile = ReaderProfile::Shared)
-        : m_profile(profile), m_book_cover(book_cover)
+    explicit ReaderBackgroundPickerActivity(bool book_cover = false, ReaderProfile profile = ReaderProfile::Shared,
+                                            bool standby = false)
+        : m_profile(profile), m_book_cover(book_cover), m_standby(standby)
     {
     }
 
     void on_create() override
     {
         std::string initial = ROOT;
-        const bool enabled = m_book_cover ? reader_book_cover_enabled(m_profile)
+        const bool enabled = m_standby ? standby_wallpaper_enabled() : m_book_cover ? reader_book_cover_enabled(m_profile)
                                           : reader_background_enabled(m_profile);
         if (enabled) {
-            initial = m_book_cover ? reader_book_cover_path(m_profile)
+            initial = m_standby ? standby_wallpaper_path() : m_book_cover ? reader_book_cover_path(m_profile)
                                    : reader_background_path(m_profile);
             size_t slash = initial.find_last_of('/');
             initial = slash == std::string::npos || slash == 0
@@ -117,6 +119,7 @@ public:
 private:
     ReaderProfile m_profile = ReaderProfile::Shared;
     bool m_book_cover = false;
+    bool m_standby = false;
     std::string m_path = ROOT;
     std::vector<Entry> m_entries;
     int m_focus = 0;
@@ -187,7 +190,7 @@ private:
     {
         m_notice.clear();
         if (index == 0) {
-            const bool cleared = m_book_cover ? reader_book_cover_clear(m_profile)
+            const bool cleared = m_standby ? standby_wallpaper_clear() : m_book_cover ? reader_book_cover_clear(m_profile)
                                               : reader_background_clear(m_profile);
             if (cleared) ActivityManager::instance().pop();
             else {
@@ -204,7 +207,9 @@ private:
             redraw();
             return;
         }
-        const bool selected = m_book_cover
+        const bool selected = m_standby
+            ? standby_wallpaper_set(full.c_str(), M5.Display.width(), M5.Display.height(), &m_notice) == ReaderBackgroundResult::Ok
+            : m_book_cover
             ? reader_book_cover_set(full.c_str(), &m_notice, m_profile)
             : reader_background_set(full.c_str(), M5.Display.width(), M5.Display.height(),
                                     &m_notice, m_profile) == ReaderBackgroundResult::Ok;
@@ -227,7 +232,7 @@ private:
         M5.Display.fillScreen(TFT_WHITE);
         system_font::draw_left(M5.Display, "<", 16, header_layout::text_y(), TFT_BLACK);
         system_font::draw_center(M5.Display,
-                                 ui_locale::text(m_book_cover ? ui_locale::TextId::LockScreenBookCover
+                                 ui_locale::text(m_standby ? ui_locale::TextId::StandbyWallpaper : m_book_cover ? ui_locale::TextId::LockScreenBookCover
                                                               : ui_locale::TextId::ReadingBackground),
                                  width / 2, header_layout::text_y(), TFT_BLACK);
         header_layout::draw_separator(M5.Display);
@@ -242,7 +247,7 @@ private:
             list_focus::draw(M5.Display, PAD, y, ROW_H, selected);
             M5.Display.drawFastHLine(PAD, y + ROW_H - 2, width - PAD * 2, TFT_BLACK);
             std::string label;
-            if (index == 0) label = ui_locale::text(m_book_cover ? ui_locale::TextId::Off
+            if (index == 0) label = ui_locale::text(m_standby ? ui_locale::TextId::StandbyKeepScreen : m_book_cover ? ui_locale::TextId::Off
                                                                   : ui_locale::TextId::OffWhiteBackground);
             else {
                 const Entry &entry = m_entries[(size_t)index - 1];
@@ -277,4 +282,9 @@ void launch_reader_background_picker(ReaderProfile profile)
 void launch_reader_book_cover_picker(ReaderProfile profile)
 {
     ActivityManager::instance().push(new ReaderBackgroundPickerActivity(true, profile));
+}
+
+void launch_standby_wallpaper_picker()
+{
+    ActivityManager::instance().push(new ReaderBackgroundPickerActivity(false, ReaderProfile::Shared, true));
 }

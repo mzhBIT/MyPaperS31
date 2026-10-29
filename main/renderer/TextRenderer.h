@@ -19,6 +19,10 @@ struct ReaderTextStyle {
     int advance_cache_limit = 768;
     int glyph_pool_bytes = 768 * 1024;
     int font_stream_windows = 64;
+    bool share_font_stream = false; // UI sizes may share one SD file/cache.
+    int glyph_pool_initial_bytes = 0; // Zero keeps the reader's fixed pool.
+    bool (*allow_glyph_pool_growth)(void *, size_t) = nullptr;
+    void *glyph_pool_owner = nullptr;
 };
 
 struct TextRenderStats {
@@ -37,6 +41,9 @@ public:
     TextRenderer &operator=(const TextRenderer &) = delete;
     bool begin(const ReaderTextStyle &style = ReaderTextStyle());
     void end() { resetFont(); }
+    // Drop SD font-file windows while retaining the face and rendered glyphs.
+    // Windows are recreated on the next font read.
+    void releaseFontStreamCache();
     bool hasGlyph(uint32_t codepoint) const;
     // UI surfaces may use a non-white background; readers retain white.
     void setTextBackground(uint16_t color) { _text_background = color; }
@@ -161,6 +168,7 @@ private:
     void preloadCommonGlyphs();
     void resetFont();
     bool compactGlyphCache(size_t needed_bytes);
+    bool ensureGlyphPool(size_t needed_bytes);
     bool beginBinFont();
     bool readBinDataAt(unsigned long offset, void *buffer, size_t size) const;
     bool loadBinFontEntry(uint32_t codepoint, BinFontEntry *out) const;

@@ -10,6 +10,7 @@
 #include <cstring>
 #include <utility>
 #include <limits>
+#include <mutex>
 #include <cerrno>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -52,9 +53,14 @@ struct FontCacheWindow {
 struct FontStreamContext {
     std::string path;
     int fd = -1;
+    unsigned references = 1;
+    bool shared = false;
+    uint64_t modification_time = 0;
     FontCacheWindow windows[FONT_STREAM_WINDOW_COUNT];
     size_t window_capacity = FONT_STREAM_WINDOW_BYTES;
     int allocated_windows = 0;
+    int requested_windows = FONT_STREAM_WINDOW_COUNT;
+    bool cache_released = false;
     bool windows_dma_compatible = false;
     bool windows_in_psram = false;
     size_t window_dma_alignment = 0;
@@ -71,6 +77,11 @@ struct FontStreamContext {
     unsigned long physical_read_bytes = 0;
     int64_t physical_read_us = 0;
 };
+
+// A FreeType stream/face remains private to each renderer. Only the file and
+// raw TTF windows are shared. Serialize seek/read and lifetime transitions.
+static std::recursive_mutex font_stream_mutex;
+static std::vector<FontStreamContext *> shared_font_streams;
 
 static uint8_t *allocate_font_stream_window(size_t size,
                                             bool *dma_compatible,
@@ -271,8 +282,26 @@ static FontCacheWindow *pick_font_cache_window(FontStreamContext *ctx)
     return oldest && oldest->data ? oldest : nullptr;
 }
 
+static void restore_font_stream_cache(FontStreamContext *ctx)
+{
+    if (!ctx || !ctx->cache_released) return;
+    ctx->cache_released = false;
+    for (int i = 0; i < ctx->requested_windows; ++i) {
+        bool dma = false, psram = false;
+        size_t alignment = 0;
+        auto &window = ctx->windows[i];
+        window.data = allocate_font_stream_window(ctx->window_capacity, &dma, &psram, &alignment);
+        if (!window.data) break; // Direct-read fallback remains available.
+        ctx->windows_dma_compatible = i == 0 ? dma : ctx->windows_dma_compatible && dma;
+        ctx->windows_in_psram = i == 0 ? psram : ctx->windows_in_psram && psram;
+        ctx->window_dma_alignment = std::max(ctx->window_dma_alignment, alignment);
+        ++ctx->allocated_windows;
+    }
+}
+
 static unsigned long font_stream_io(FT_Stream stream, unsigned long offset, unsigned char *buffer, unsigned long count)
 {
+    std::lock_guard<std::recursive_mutex> lock(font_stream_mutex);
     FontStreamContext *ctx = stream ? (FontStreamContext *)stream->descriptor.pointer : nullptr;
     if (!ctx) return 0;
     ctx->stream_calls++;
@@ -280,6 +309,7 @@ static unsigned long font_stream_io(FT_Stream stream, unsigned long offset, unsi
     if (!buffer) return 0;
     if (offset >= ctx->file_size) return 0;
     if (offset + count > ctx->file_size) count = ctx->file_size - offset;
+    restore_font_stream_cache(ctx);
 
     for (int i = 0; i < FONT_STREAM_WINDOW_COUNT; ++i) {
         FontCacheWindow *win = &ctx->windows[i];
@@ -335,8 +365,9 @@ static void font_stream_close(FT_Stream /*stream*/)
 {
 }
 
-static bool create_font_stream(const char *path, void **out_stream, void **out_ctx, int window_count)
+static bool create_font_stream(const char *path, void **out_stream, void **out_ctx, int window_count, bool shared)
 {
+    std::lock_guard<std::recursive_mutex> lock(font_stream_mutex);
     *out_stream = nullptr;
     *out_ctx = nullptr;
     if (!path || !path[0]) return false;
@@ -354,6 +385,21 @@ static bool create_font_stream(const char *path, void **out_stream, void **out_c
     }
 
     FT_Stream stream = (FT_Stream)heap_caps_calloc(1, sizeof(FT_StreamRec), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!stream) return false;
+    if (shared) {
+        for (auto *existing : shared_font_streams) {
+            if (existing->path != path || existing->file_size != (unsigned long)st.st_size ||
+                existing->modification_time != uint64_t(st.st_mtime)) continue;
+            ++existing->references;
+            stream->size = existing->file_size;
+            stream->descriptor.pointer = existing;
+            stream->read = font_stream_io;
+            stream->close = font_stream_close;
+            *out_stream = stream;
+            *out_ctx = existing;
+            return true;
+        }
+    }
     FontStreamContext *ctx = new FontStreamContext();
     if (!stream || !ctx) {
         if (stream) heap_caps_free(stream);
@@ -362,6 +408,9 @@ static bool create_font_stream(const char *path, void **out_stream, void **out_c
     }
 
     ctx->path = path;
+    ctx->shared = shared;
+    ctx->modification_time = uint64_t(st.st_mtime);
+    ctx->requested_windows = std::clamp(window_count, FONT_STREAM_MIN_WINDOWS, FONT_STREAM_WINDOW_COUNT);
     ctx->file_size = (unsigned long)st.st_size;
     ctx->fd = open(path, O_RDONLY);
     if (ctx->fd < 0) {
@@ -414,13 +463,35 @@ static bool create_font_stream(const char *path, void **out_stream, void **out_c
 
     *out_stream = stream;
     *out_ctx = ctx;
+    if (shared) shared_font_streams.push_back(ctx);
     return true;
+}
+
+void TextRenderer::releaseFontStreamCache()
+{
+    std::lock_guard<std::recursive_mutex> lock(font_stream_mutex);
+    auto *ctx = static_cast<FontStreamContext *>(_font_stream_ctx);
+    if (!ctx) return; // Embedded and binary fonts have no file windows.
+    const unsigned bytes = font_stream_cache_bytes(ctx);
+    for (auto &window : ctx->windows) {
+        if (window.data) heap_caps_free(window.data);
+        window = FontCacheWindow{};
+    }
+    ctx->allocated_windows = 0;
+    ctx->windows_dma_compatible = ctx->windows_in_psram = false;
+    ctx->window_dma_alignment = 0;
+    ctx->tick = 1;
+    ctx->cache_released = true;
+    if (bytes) ESP_LOGI(TAG, "font stream cache released: bytes=%u; glyph cache retained", bytes);
 }
 
 static void destroy_font_stream(void *stream_ptr, void *ctx_ptr)
 {
-    if (ctx_ptr) {
-        FontStreamContext *ctx = (FontStreamContext *)ctx_ptr;
+    std::lock_guard<std::recursive_mutex> lock(font_stream_mutex);
+    FontStreamContext *ctx = static_cast<FontStreamContext *>(ctx_ptr);
+    if (ctx && --ctx->references == 0) {
+        if (ctx->shared)
+            shared_font_streams.erase(std::remove(shared_font_streams.begin(), shared_font_streams.end(), ctx), shared_font_streams.end());
         if (ctx->fd >= 0) close(ctx->fd);
         for (int i = 0; i < FONT_STREAM_WINDOW_COUNT; ++i) {
             if (ctx->windows[i].data) heap_caps_free(ctx->windows[i].data);
@@ -467,6 +538,10 @@ bool TextRenderer::begin(const ReaderTextStyle &style)
                    _style.line_spacing != style.line_spacing ||
                    _style.letter_spacing != style.letter_spacing ||
                    _style.glyph_pool_bytes != style.glyph_pool_bytes ||
+                   _style.glyph_pool_initial_bytes != style.glyph_pool_initial_bytes ||
+                   _style.allow_glyph_pool_growth != style.allow_glyph_pool_growth ||
+                   _style.glyph_pool_owner != style.glyph_pool_owner ||
+                   _style.share_font_stream != style.share_font_stream ||
                    _style.font_stream_windows != style.font_stream_windows;
     if (!changed && (_ft_ready || _bin_ready)) return true;
 
@@ -509,7 +584,7 @@ bool TextRenderer::begin(const ReaderTextStyle &style)
 
     const bool embedded = embedded_font::matches(_style.font_path);
     if (!embedded && !create_font_stream(_style.font_path, &_font_stream, &_font_stream_ctx,
-                                         _style.font_stream_windows)) {
+                                         _style.font_stream_windows, _style.share_font_stream)) {
         resetFont();
         return false;
     }
@@ -543,7 +618,8 @@ bool TextRenderer::begin(const ReaderTextStyle &style)
     _line_height = std::max(_style.font_size, height) + _style.line_spacing;
     _advance_cache.reserve(std::max(64, _style.advance_cache_limit));
     _glyph_cache.reserve(std::max(32, _style.glyph_cache_limit));
-    _glyph_pool_capacity = (size_t)std::max(4096, _style.glyph_pool_bytes);
+    _glyph_pool_capacity = (size_t)std::max(4096, _style.glyph_pool_initial_bytes > 0
+        ? std::min(_style.glyph_pool_initial_bytes, _style.glyph_pool_bytes) : _style.glyph_pool_bytes);
     _glyph_pool = (uint8_t *)heap_caps_malloc(_glyph_pool_capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
     if (!_glyph_pool) {
         ESP_LOGW(TAG, "PSRAM glyph pool alloc failed, trying internal RAM: %u bytes", (unsigned)_glyph_pool_capacity);
@@ -729,13 +805,14 @@ void TextRenderer::resetFont()
     _font_stream_ctx = nullptr;
     _ft_ready = false;
     _ft_initialized = false;
-    _advance_cache.clear();
-    _glyph_cache.clear();
-    _missing_codepoints.clear();
-    _page_missing_codepoints.clear();
-    _prepared_page_codepoints.clear();
-    _advance_lookup.clear();
-    _glyph_lookup.clear();
+    // A font reset/bank eviction returns metadata capacity as well as pixels.
+    decltype(_advance_cache)().swap(_advance_cache);
+    decltype(_glyph_cache)().swap(_glyph_cache);
+    decltype(_missing_codepoints)().swap(_missing_codepoints);
+    decltype(_page_missing_codepoints)().swap(_page_missing_codepoints);
+    decltype(_prepared_page_codepoints)().swap(_prepared_page_codepoints);
+    decltype(_advance_lookup)().swap(_advance_lookup);
+    decltype(_glyph_lookup)().swap(_glyph_lookup);
     if (_glyph_pool) {
         heap_caps_free(_glyph_pool);
         _glyph_pool = nullptr;
@@ -1165,7 +1242,7 @@ bool TextRenderer::loadBinGlyph(uint32_t codepoint, Glyph &out)
         return false;
     }
 
-    if (!_glyph_pool || _glyph_pool_used + out.data_size > _glyph_pool_capacity) {
+    if (!ensureGlyphPool(out.data_size)) {
         ESP_LOGD(TAG, "bin glyph pool full cp=U+%04lx need=%u used=%u cap=%u",
                  (unsigned long)codepoint,
                  (unsigned)out.data_size,
@@ -1425,7 +1502,7 @@ bool TextRenderer::loadGlyph(uint32_t codepoint, Glyph &out)
         return false;
     }
 
-    if (!_glyph_pool || _glyph_pool_used + out.data_size > _glyph_pool_capacity) {
+    if (!ensureGlyphPool(out.data_size)) {
         ESP_LOGW(TAG, "glyph pool full cp=U+%04lx need=%u used=%u cap=%u bpp=%d",
                  (unsigned long)codepoint,
                  (unsigned)out.data_size,
@@ -1667,6 +1744,24 @@ void TextRenderer::clearGlyphCache()
     _glyph_lookup.assign(next_power_of_two((size_t)glyph_limit * 2), LookupSlot());
     _glyph_pool_used = 0;
     _glyph_pool_full = false;
+}
+
+bool TextRenderer::ensureGlyphPool(size_t needed_bytes)
+{
+    if (_glyph_pool && needed_bytes <= _glyph_pool_capacity - _glyph_pool_used) return true;
+    if (!_glyph_pool || _style.glyph_pool_initial_bytes <= 0) return false;
+    const size_t limit = size_t(std::max(4096, _style.glyph_pool_bytes));
+    if (needed_bytes > limit || _glyph_pool_used > limit-needed_bytes) return false;
+    const size_t target = std::min(limit, std::max(_glyph_pool_used+needed_bytes, _glyph_pool_capacity*2));
+    if (_style.allow_glyph_pool_growth &&
+        !_style.allow_glyph_pool_growth(_style.glyph_pool_owner, target-_glyph_pool_capacity)) return false;
+    // Offsets, rather than pointers, are stored in Glyph, so moving the pool
+    // preserves every cached glyph. Readers retain their existing fixed pools.
+    auto *grown = static_cast<uint8_t*>(heap_caps_realloc(_glyph_pool, target, MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT));
+    if (!grown) return false;
+    _glyph_pool = grown;
+    _glyph_pool_capacity = target;
+    return true;
 }
 
 bool TextRenderer::compactGlyphCache(size_t needed_bytes)

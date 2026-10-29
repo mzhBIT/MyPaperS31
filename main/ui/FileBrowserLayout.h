@@ -1,4 +1,5 @@
 #pragma once
+#include "ui/ReadingNavigationLayout.h"
 
 // Portrait geometry adapted from read-pico-reader app_files.c.
 // Copyright 2026 mindreset. SPDX-License-Identifier: Apache-2.0
@@ -9,7 +10,7 @@ struct Rect {
         return px >= x && px < x+w && py >= y && py < y+h;
     }
 };
-constexpr int nav_top = 1096, row_height = 91;
+constexpr int nav_top = reading_navigation_layout::top, row_height = 91;
 constexpr Rect storage{36,171,612,112};
 constexpr Rect transfer_add{592,90,56,56};
 constexpr Rect transfer_menu{368,158,280,332};

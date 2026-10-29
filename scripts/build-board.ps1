@@ -6,7 +6,7 @@ param(
     [ValidateSet('Current', 'Debug', 'Release')]
     [string]$Profile = 'Current',
     [string]$Port,
-    [int]$Baud = 460800
+    [int]$Baud = 921600
 )
 $ErrorActionPreference = 'Stop'
 $projectRoot = Split-Path -Parent $PSScriptRoot

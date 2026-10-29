@@ -2,6 +2,7 @@
 #include "parser/gbk_decode.h"
 #include "reader_font.h"
 #include "reader_style.h"
+#include "ui/StatusClock.h"
 #include "renderer/TextRenderer.h"
 #include "renderer/TextLayout.h"
 #include "storage/app_paths.h"
@@ -180,7 +181,7 @@ static int lines_per_page()
     ReaderStyle style = reader_style_get();
     int lh = reader_text_renderer().lineHeight();
     if (lh <= 0) lh = 48;
-    int header_h = style.hide_header ? 0 : 50;
+    int header_h = style.hide_header ? 0 : status_clock::header_height;
     int usable_h = M5.Display.height() - header_h - style.margin_top - style.margin_bottom;
     int n = usable_h / lh;
     return n > 1 ? n : 1;
@@ -228,7 +229,7 @@ uint32_t TxtBook::layout_signature() const
              lines_per_page(),
              style.first_line_indent,
              style.paragraph_spacing,
-             style.hide_header ? 0 : 50,
+             style.hide_header ? 0 : status_clock::header_height,
              _enc,
              (unsigned long)_file_size);
     sig += buf;
@@ -356,11 +357,11 @@ TxtPage TxtBook::read_page(uint32_t offset)
     ReaderStyle style = reader_style_get();
     const int max_w = page.vertical
         ? std::max(100, (int)M5.Display.height() -
-            (style.hide_header ? 0 : 50) - style.margin_top - style.margin_bottom)
+            (style.hide_header ? 0 : status_clock::header_height) - style.margin_top - style.margin_bottom)
         : std::max(100, display_width());
     int line_h = reader_text_renderer().lineHeight();
     if (line_h <= 0) line_h = 48;
-    const int header_h = style.hide_header ? 0 : 50;
+    const int header_h = style.hide_header ? 0 : status_clock::header_height;
     const int max_height = std::max(line_h, page.vertical
         ? (int)M5.Display.width() - style.margin_left - style.margin_right
         : (int)M5.Display.height() - header_h - style.margin_top - style.margin_bottom);

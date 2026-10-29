@@ -7,6 +7,7 @@ namespace weread {
 // Serialize progress transactions (not reader rendering). UI reconciliation
 // uses try_lock, so it cannot steal a live checkpoint before its report POST.
 std::mutex &reading_transaction_mutex();
+bool reading_sessions_idle();
 
 class ReadingSession {
 public:

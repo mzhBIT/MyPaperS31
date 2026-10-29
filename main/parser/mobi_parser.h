@@ -1,4 +1,5 @@
 #pragma once
+#include "memory/MetadataAllocator.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -7,17 +8,17 @@
 #include <vector>
 
 struct MobiSectionItem {
-    std::string id;
-    std::string href;
-    std::string media_type = "text/html";
+    metadata_memory::String id;
+    metadata_memory::String href;
+    metadata_memory::String media_type = "text/html";
     uint32_t uncompressed_size = 0;
     uint64_t start = 0;
     uint64_t end = 0;
 };
 
 struct MobiTocItem {
-    std::string title;
-    std::string href;
+    metadata_memory::String title;
+    metadata_memory::String href;
     int spine_index = -1;
     int depth = 0;
 };
@@ -50,6 +51,7 @@ public:
     bool extract_resource_to_file(const std::string &href, const std::string &out_path) const;
 
 private:
+    metadata_memory::Budget _metadata_budget;
     struct HuffState;
     struct Record {
         uint32_t offset = 0;
@@ -72,17 +74,17 @@ private:
         uint64_t skeleton_start = 0;
         uint32_t skeleton_length = 0;
         uint32_t assembled_length = 0;
-        std::vector<Kf8Fragment> fragments;
+        metadata_memory::Vector<Kf8Fragment> fragments;
     };
 
     std::string _path;
     FILE *_file = nullptr;
     std::string _cover_href;
     std::string _last_error;
-    std::vector<Record> _records;
-    std::vector<TextRecord> _text_records;
-    std::vector<MobiSectionItem> _sections;
-    std::vector<MobiTocItem> _toc;
+    metadata_memory::Vector<Record> _records;
+    metadata_memory::Vector<TextRecord> _text_records;
+    metadata_memory::Vector<MobiSectionItem> _sections;
+    metadata_memory::Vector<MobiTocItem> _toc;
     uint16_t _compression = 0;
     uint16_t _encryption = 0;
     uint16_t _text_record_count = 0;
@@ -98,7 +100,7 @@ private:
     uint32_t _huff_record_index = 0xffffffffu;
     uint32_t _huff_record_count = 0;
     uint64_t _decoded_text_length = 0;
-    std::vector<Kf8Part> _kf8_parts;
+    metadata_memory::Vector<Kf8Part> _kf8_parts;
     std::shared_ptr<HuffState> _huff;
 
     bool parse_container();

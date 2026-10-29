@@ -24,7 +24,7 @@
     "--compile-commands-dir=e:\\opensource\\epdiy-main\\MyPaperP4/build-s31"
   ],
   "idf.flashType": "UART",
-  "idf.flashBaudRate": "460800",
+  "idf.flashBaudRate": "921600",
   "idf.port": "COM5",
   "python-envs.defaultEnvManager": "ms-python.python:conda",
   "python-envs.defaultPackageManager": "ms-python.python:conda",

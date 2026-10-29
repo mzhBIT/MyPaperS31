@@ -3,6 +3,13 @@
 #include <sdkconfig.h>
 
 namespace battery_status {
+inline bool available() {
+#if CONFIG_IDF_TARGET_ESP32S31
+    return M5.Power.getBatteryLevel() >= 0;
+#else
+    return false;
+#endif
+}
 // Fill only the existing icon interior; no percentage text or independent
 // refresh/timer. P4 keeps its original placeholder until a gauge is adapted.
 inline void draw_fill(int x, int y, int width, int height) {

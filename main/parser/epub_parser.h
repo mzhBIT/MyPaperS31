@@ -1,4 +1,5 @@
 #pragma once
+#include "memory/MetadataAllocator.h"
 
 #include "parser/epub_zip.h"
 
@@ -8,22 +9,22 @@
 #include <vector>
 
 struct EpubManifestItem {
-    std::string id;
-    std::string href;
-    std::string media_type;
-    std::string properties;
+    metadata_memory::String id;
+    metadata_memory::String href;
+    metadata_memory::String media_type;
+    metadata_memory::String properties;
 };
 
 struct EpubSpineItem {
-    std::string id;
-    std::string href;
-    std::string media_type;
+    metadata_memory::String id;
+    metadata_memory::String href;
+    metadata_memory::String media_type;
     uint32_t uncompressed_size = 0;
 };
 
 struct EpubTocItem {
-    std::string title;
-    std::string href;
+    metadata_memory::String title;
+    metadata_memory::String href;
     int spine_index = -1;
     int depth = 0;
 };
@@ -34,6 +35,9 @@ public:
 
     bool open(const char *path);
     void close();
+    const std::string &last_error() const { return _last_error; }
+    void take_navigation(metadata_memory::Vector<EpubSpineItem>& spine,
+                         metadata_memory::Vector<EpubTocItem>& toc);
     int spine_count() const { return (int)_spine.size(); }
     const EpubSpineItem &spine_item(int index) const { return _spine[(size_t)index]; }
     const std::string &opf_path() const { return _opf_path; }
@@ -53,6 +57,8 @@ public:
     bool extract_item_to_file(const std::string &href, const std::string &out_path);
 
 private:
+    std::string _last_error;
+    metadata_memory::Budget _metadata_budget;
     std::string _path;
     std::string _opf_path;
     std::string _opf_base;
@@ -60,10 +66,10 @@ private:
     std::string _nav_path;
     std::string _cover_image_href;
     EpubZip _zip;
-    std::unordered_map<std::string, EpubManifestItem> _manifest_by_id;
-    std::unordered_map<std::string, int> _spine_index_by_href;
-    std::vector<EpubSpineItem> _spine;
-    std::vector<EpubTocItem> _toc;
+    metadata_memory::Map<EpubManifestItem> _manifest_by_id;
+    metadata_memory::Map<int> _spine_index_by_href;
+    metadata_memory::Vector<EpubSpineItem> _spine;
+    metadata_memory::Vector<EpubTocItem> _toc;
 
     bool parse_container(const std::string &xml);
     bool parse_opf(const std::string &xml);

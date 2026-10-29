@@ -41,6 +41,8 @@ sdkconfig
 
 # Local investigation output and source-file backups
 /tmp/
+/.codex-build-cache/
+/.claude/
 /main/*_tmp.*
 
 # ESP-IDF dependencies

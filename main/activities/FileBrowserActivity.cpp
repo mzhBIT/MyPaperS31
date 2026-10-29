@@ -25,10 +25,12 @@
 #include "audio/audio_file_formats.h"
 #include "reader_font.h"
 #include "ui/SystemFont.h"
+#include "ui/ReadingNavigation.h"
 #include "ui/HeaderLayout.h"
 #include "ui/UiLocale.h"
 #include "ui/TextInputOverlay.h"
 #include "ui/reader_background.h"
+#include "ui/standby_wallpaper.h"
 #include "ui/reader_book_cover.h"
 #include <M5Unified.h>
 #include <string>
@@ -188,19 +190,7 @@ static void draw_status() {
     shelf_status_bar::draw();
 }
 static void draw_nav() {
-    M5.Display.fillRect(0,fl::nav_top,684,120,TFT_WHITE);
-    M5.Display.drawFastHLine(0,fl::nav_top,684,gray(160));
-    M5.Display.fillRect(399,1097,56,5,TFT_BLACK);
-    const uint8_t *icons[]={pico_shelf_icons::house,pico_shelf_icons::library_big,
-        pico_shelf_icons::folder_open,pico_shelf_icons::sliders_horizontal};
-    const char *labels[]={ui_locale::text(ui_locale::TextId::FileNavHome),
-        ui_locale::text(ui_locale::TextId::Bookshelf),ui_locale::text(ui_locale::TextId::Files),
-        ui_locale::text(ui_locale::TextId::Settings)};
-    for(int i=0;i<4;++i) {
-        int cx=(2*i+1)*684/8;
-        icon(icons[i],cx,1141,44,0,255);
-        center(labels[i],cx,1180,ui_px(17),159,255);
-    }
+    reading_navigation::draw(reading_navigation::Tab::Files);
 }
 static void draw_back() {
     icon(pico_shelf_icons::chevron_left,58,114,38);
@@ -506,7 +496,14 @@ public:
                !g_entries[g_focus].is_dir && is_image_file(g_entries[g_focus].name.c_str());
     }
 
-    int action_count() const { return action_has_background() ? 4 : 3; }
+    bool action_has_standby() const {
+#if CONFIG_IDF_TARGET_ESP32S31
+        return action_has_background();
+#else
+        return false;
+#endif
+    }
+    int action_count() const { return action_has_background() ? (action_has_standby() ? 5 : 4) : 3; }
 
     using SheetRect = fl::Rect;
     SheetRect action_sheet() const { return fl::sheet; }
@@ -552,7 +549,11 @@ public:
         const char *normal[]={ui_locale::text(ui_locale::TextId::Rename),
             ui_locale::text(ui_locale::TextId::Delete),ui_locale::text(ui_locale::TextId::Cancel)};
         const char *image[]={ui_locale::text(ui_locale::TextId::Rename),
-            ui_locale::text(ui_locale::TextId::Background),ui_locale::text(ui_locale::TextId::Delete),
+            ui_locale::text(ui_locale::TextId::Background),
+#if CONFIG_IDF_TARGET_ESP32S31
+            ui_locale::text(ui_locale::TextId::StandbyWallpaper),
+#endif
+            ui_locale::text(ui_locale::TextId::Delete),
             ui_locale::text(ui_locale::TextId::Cancel)};
         auto labels=action_has_background()?image:normal;
         for(int i=0;i<action_count();++i) {
@@ -668,7 +669,11 @@ public:
                      selected_path().c_str(), (int)result);
             redraw_all();
         }
-        else if (choice == (background_action ? 2 : 1)) {
+        else if (background_action && action_has_standby() && choice == 2) {
+            standby_wallpaper_set(selected_path().c_str(), M5.Display.width(), M5.Display.height(), &m_notice);
+            redraw_all();
+        }
+        else if (choice == (background_action ? (action_has_standby() ? 3 : 2) : 1)) {
             if (g_focus >= 0 && g_focus < (int)g_entries.size() && g_entries[g_focus].is_dir) {
                 m_notice = ui_locale::text(ui_locale::TextId::FolderDeleteUnsupported);
                 redraw_all();
@@ -803,12 +808,12 @@ public:
         }
         if (event.type == TouchEventType::Tap) {
             g_keyboard_focus = false;
-            if(event.y>=fl::nav_top) {
-                int tab=std::min(3,std::max(0,event.x*4/684));
+            const int tab=reading_navigation_layout::tab_at(event.x,event.y);
+            if(tab>=0) {
                 if(tab==0) {
                     launch_reading_home();
-                } else if(tab==1) launch_bookshelf();
-                else if(tab==3) launch_settings();
+                } else if(tab==1) switch_to_bookshelf();
+                else if(tab==3) switch_to_reading_settings();
                 return true;
             }
             if(home_view()) {
@@ -836,6 +841,7 @@ public:
         return false;
     }
 
+    bool on_navigation_key(int direction) override { return on_key(direction < 0 ? APP_KEY_UP : APP_KEY_DOWN); }
     bool on_key(int key) override {
         g_keyboard_focus = true;
         if (m_text_input.visible()) return m_text_input.handle_key(key);
@@ -952,4 +958,11 @@ void launch_file_browser(const char *start_path, bool initial_hd) {
     g_path = g_root;
     load_dir(g_path);
     ActivityManager::instance().push(new FileBrowserActivity(initial_hd));
+}
+
+void switch_to_reading_files() {
+    g_root = "/sdcard";
+    g_path = g_root;
+    load_dir(g_path);
+    ActivityManager::instance().show_above_root(new FileBrowserActivity(true));
 }

@@ -69,6 +69,11 @@ menuconfig 的 `MyPaperS31 touch mapping` 提供 mounting transform 和原始 X/
   每 MiB 进度、超时/失败时的字节数和网络/写卡耗时，连续无数据约 30 秒中止，
   不再无限重试接收超时。链路日志的 ps=0 表示省电关闭；phy 是协商模式而非实时速率。
   S31 Wi-Fi 上传跳过 SDK 当前未启用的 f_expand 连续预分配，使用原流式分配回退。
+- S31 接收吞吐试验：静态RX=16、动态RX=64、RX BA窗口=32，TCP接收窗口=65535字节，
+  TCP接收邮箱和TCP/IP邮箱均为64。普通联网与传输应用都使用这组sdkconfig参数；
+  传输应用不再将S31覆盖为P4的8/32/6。P4保留原有运行时设置。
+  保持TCP/IP优先级18、不绑核、100Hz tick及现有IRAM设置；启动日志打印实际RX参数和
+  Wi-Fi初始化前后堆余量。已有 `build-s31/sdkconfig` 同步更新，不能只改defaults后假定生效。
 - JPEG 编码配置改用零初始化再赋值，兼容 IDF 6.1 新增字段；不改变 P4 已指定参数。
 - 默认 main 栈 32KiB，保留 FreeType 光栅池的栈预算；开启长文件名与 UTF-8 FAT API。
 - S31 普通 malloc/new 的内部 RAM 优先阈值为 0，包含小字符串/HTML 节点在内
@@ -92,14 +97,123 @@ ESP_ERR_NOT_SUPPORTED，日志前缀 `S31_HW`，不假装播放、发短信或�
 
 | 功能 | 当前状态 |
 |---|---|
-| BH1098G / USB 耳机音频 | 音乐、电台界面已接入，实际播放和录音不可用 |
+| BH1098G 扬声器音频 | 已接入本地音乐播放（MP3/FLAC/WAV/M4A/AAC/OGG/Opus），见下节；尚未实机验证 |
+| 电台流 / 录音 / USB 耳机 | 未实现；`audio_radio_play()`、`audio_radio_record_wav()` 返回 NOT_SUPPORTED，USB 输出模式保留给后续实现 |
 | ML307 / 4G / 电话 / 短信 | Activity 已接入，AT/USB/RNDIS 未在 S31 适配 |
-| USB MSC / raw SD 导出 | 返回不支持，不写重启到 MSC 的标志，不抢占 SD |
+| USB MSC / raw SD 导出 | 已实现重启隔离式虚拟 U 盘（TinyUSB 2.4.0 HS UTMI + ANA_SW GPIO36），详见 `S31_USB_MASS_STORAGE_DESIGN.md`；尚未实机验证 |
 | 冷暖前光 | 已接入 GPIO6 冷光 / GPIO7 暖光，高电平有效 20kHz、10bit PWM；需实机确认 |
-| PCF8563 / 电池计 / 充电 / 振动 / 实体键 | 后续板级任务，不冒用 P4 接线 |
+| PCF8563 / 电池计 | 已接入，见下文 RTC 与 BQ27220 说明 |
+| 实体键 / 盖板触摸键 | 已接入采样、UI 操作、电源短按待机及长按关机；音量键保留不执行 |
+| 充电控制 / 振动 | 后续板级任务，不冒用 P4 接线 |
 
-因此，这一版可测试完整界面、本地阅读及原生 Wi-Fi 网络应用，但不能声称音频、
-USB、基带等硬件功能均已可用。它们需要按 S31 接线单独适配，不应靠测试 P4 驱动碰运气。
+S31 / IDF 6.1 使用 Picolibc。M5GFX 的 `DataWrapper.hpp` 必须自行包含 `stdio.h`，
+并在 FILE 特化条件中识别 `__PICOLIBC__`；不能只依赖 Newlib 的 `_FSTDIO` 等宏。
+否则默认文件封装会落到空实现：`open()` 返回成功而 `read()` 固定返回0，导致
+普通 `fread` 能探测图片尺寸，但 `drawPngFile` 报头部读取不足，BMP/JPG文件路径也受影响。
+`tools/test_lgfx_file_wrapper.cpp` 应使用两块板的实际 SDK 编译参数检查，避免仅用裸编译器
+（默认 Newlib）误判通过；文件 `seek()` 以 `fseek(...) == 0` 为成功。
+
+因此，这一版可测试完整界面、本地阅读、本地音乐外放、原生 Wi-Fi 网络应用和
+重启隔离式 USB 虚拟 U 盘；基带/充电等硬件功能仍需按 S31 接线单独适配，
+不应靠测试 P4 驱动碰运气。扬声器播放尚未实机验证，见下节。
+
+USB 虚拟 U 盘沿用现有 Transfer 页面与文案，未改动任何 UI；S31 后续也要接入
+USB 耳机，因此“USB 耳机将断开”等提示保持原样。
+
+### S31 扬声器音频（BH1098G）
+
+`main/audio/audio_radio_s31.cpp` 是 S31 专用后端，S31 构建显式剔除 P4 的
+`audio_radio.c`，但对上层保持 `audio_radio.h` 接口不变，音乐界面无需改动：
+
+- 硬件路径：BH1098G 兼 DAC，I2S 采用 32bit 槽宽、立体声、左对齐，16bit PCM 放在
+  高 16 位。PA_EN 为 PCA9535 P0.4，BT/PA 电源为 P1.4；PA 关闭状态下先上电，
+  进入模式 1 后再配置 I2S，停止时先关 PA 并延时 120ms 排空。
+- 控制：UART1 115200（GPIO39 TX / GPIO38 RX），上电等待 1200ms 让模组启动后发
+  `AT+RX=2`（无回应则重发一次），700ms 后发 `AT+MODE=1`（模式 1 = 播放/对讲），
+  响应打印为 `BT RX`。
+- I2S 主从自动判定：参考工程假定 BH1098G 提供 WS/BCLK、ESP 作从机，但实机日志
+  显示模组并未给出可用时钟（持续 `I2S write timeout`）。后端在模组进入模式 1 后，
+  用内部弱上/下拉实测 BCLK(42)/WS(43) 的驱动方向：两条线都呈高阻时由 ESP 作
+  **主机**输出 16kHz 时钟；只要任一条被模组驱动就保持从机，避免双主机争用。
+  日志分别为 `I2S BCLK GPIO42 high-Z/driven by BH1098G` 与
+  `ESP is I2S master at 16000 Hz`。
+- 从机模式下的采样率：用 I2S RX 统计输入字节数并吸附到 8k/11.025k/12k/16k/
+  22.05k/24k/32k/44.1k/48k 之一（误差超过 5% 或测不到时钟时回退 16kHz），再用
+  `esp_ae_rate_cvt` 把音源重采样到该值。启动日志：
+  `BH1098G master rate measured=... snapped=...`。主机模式下采样率固定 16kHz，
+  不再测量。
+- 解码：本地文件用 `esp_audio_simple_dec`（MP3/AAC/WAV/FLAC/OGG/Opus/M4A），
+  经 `esp_ae_bit_cvt` / `esp_ae_ch_cvt` / `esp_ae_rate_cvt` 统一成 16bit 立体声，
+  再扩成 32bit 槽写入 I2S；音量按 `(vol/100)^2` 衰减，NVS 键与 P4 相同
+  （`audio_out/mode`、`spk_volume`，默认音量 30）。
+- 仍不支持：网络电台流（`audio_radio_play`）、录音（`audio_radio_record_wav`）、
+  USB 输出模式，均返回 `ESP_ERR_NOT_SUPPORTED`，保证 UI 继续显示 USB 耳机不可用。
+- 依赖：新增托管组件 `espressif__esp_audio_codec`、`espressif__esp_audio_effects`、
+  `espressif__gmf_fft`。gmf_fft 是 audio-effects 预编译库的链接依赖，在
+  `set(COMPONENTS application)` 下必须显式写进 application 的 `REQUIRES`。
+- 构建结果：`MyPaperS31.bin` 0x4946f0 字节，8MiB 应用分区剩余约 43%。
+
+实机验证时先看 `AUDIO_S31` 的 BCLK/WS 方向日志：显示 high-Z 即 ESP 作主机；
+显示 driven 则仍作从机，再看 `BT RX` 是否有模组回应、速率日志是否接近 16000。
+若完全无声，检查 P0.4/P1.4 是否被其他 PCA9535 使用者（前光、按键）以非读-改-写
+方式覆盖，并用示波器确认 BCLK(42)/WS(43)/DOUT(44) 是否有波形。
+
+### S31 机械键与盖板键
+
+本次只接入现有应用能力，不把未实现的功能映射成无关动作：
+
+| 按键 | 短按 | 长按 |
+|---|---|---|
+| BOOT / GPIO61 | TXT、重排阅读器（含EPUB/MOBI/漫画/DOCX/微信正文）和RSS正文切换阅读设置 | 500ms识别但不执行AI动作，松手不补短按 |
+| 音量+ / TCA P10（索引8） | 保留音量+事件，暂不改变音量（音量用音乐/电台界面的按钮调节） | 500ms识别，最大音量功能暂不执行 |
+| 音量- / TCA P11（索引9） | 保留音量-事件，暂不改变音量 | 500ms识别，静音功能暂不执行 |
+| 电源 / TCA P17（索引15） | 切换待机壁纸后 light sleep，再按唤醒 | 长按3秒，保存阅读记录后输出P13硬件关机脉冲 |
+
+待机壁纸在系统设置中选择，也可在文件管理的图片长按菜单中设置；选择“无”时保留当前画面。
+壁纸使用独立的 `standby_bg` NVS 配置及 `/sdcard/.reader/standby_wallpaper.g4` 缓存，
+不改变阅读背景。支持 JPG/PNG/BMP，按屏幕裁切缩放，设置后释放临时图像缓存。
+
+短按电源先等待显示和后台操作完成，再暂停按键采样及阅读计时、关闭 Wi-Fi 和前光，进入
+保留 RAM 的 light sleep。传输服务运行、网络请求或校准进行中会推迟待机；15 秒仍未就绪则取消。
+使用 TCA9555 的 GPIO2 中断唤醒并检查 P17，仅电源键唤醒界面，忽略其他共享中断。
+有壁纸时保存原页面并在唤醒后用 Quality 恢复；无壁纸时不额外刷新。
+前光关闭不修改 NVS 亮度，唤醒后恢复原亮度和色温，Wi-Fi 按原连接状态恢复。
+SD 在待机时保持供电及挂载，避免破坏已打开的书籍和字体文件；待机不使用深睡眠，
+实际待机电流、壁纸刷新及电源唤醒需在 S31 实机验证。
+
+长按电源3秒触发硬件关机，松开后不再补发短按待机。先等待安全的显示/后台边界，
+关闭网络、前光，关闭应用并执行现有析构保存流程（阅读位置和时长）；微信读书的
+最终记录交给后台离线存盘，最多等10秒，仍未结束则取消断电并返回主页。
+保存完成后，沿用原项目P13高/低各100ms、15次一组的脉冲；最多3组，每组间隔200ms。
+日志仅显式刷新 `stdout` / `stderr`，不调用 `fflush(nullptr)`：当前Picolibc实现会
+直接访问空FILE指针偏移0x14并触发Load access fault。阅读记录使用各自保存/关闭流程落盘。
+只修改P13的输出锁存位和方向位，不覆盖同端口的触摸复位、蓝牙供电等引脚。
+正常情况下设备在脉冲期间断电；若外部USB供电/硬件原因使其仍运行，或I2C操作失败，
+停止重试、恢复前光和网络并返回主页，在 `S31_STANDBY` 日志中报告失败。
+| 盖板Home | 正文优先返回/关闭阅读浮层；其他页面回系统主页 | 500ms返回系统主页（受忙状态/校准页保护） |
+| 盖板Previous | 阅读上一页；首页上一屏；书架/文件/RSS列表上一项；其他页面按原有返回逻辑处理 | 500ms开始、350ms间隔连翻/导航；通用返回最多一次 |
+| 盖板Next | 阅读下一页；首页下一屏；书架/文件/RSS列表下一项；无对应功能的页面不操作 | 与Previous相同，屏幕忙时不积压连翻 |
+
+按原项目屏外FT坐标识别：Y=1600±30，Home X=100±30、Previous X=200±30、
+Next X=300±30。在同一次FT采样中先识别盖板键，再调用现有屏内坐标转换；不更改
+FT校准、镜像或旋转。盖板接触不会进入屏内触摸队列；跨键/滑入屏内取消本次接触。
+Home长按、翻页长按结束后不再补短按。BOOT短按单独使用阅读设置入口，不复用
+重排阅读器原来用于目录的EXTRA键，避免打开错误标签页。
+
+机械键采用单独3072字节栈、优先级2、CPU0的采样任务，每20ms读TCA两个输入端口，
+30ms消抖。BOOT低有效，启动时已按住的键吞到松开；TCA设置只将P10/P11/P17改为
+输入；采样任务不写P13，不改变P12触摸复位、P14供电、P16 RTC及端口0的电源控制。
+复用现有LGFX I2C锁，不安装第二个I2C驱动、不占用与RTC/加速度计共用的GPIO2中断。
+读失败保留按下状态，不合成“松开/短按”；恢复后继续采样。
+
+事件进入16项FreeRTOS队列，仅主线程调用Activity；屏幕忙时等待，盖板连翻最多
+一个待处理事件。切换Activity递增generation，丢弃旧页面事件和当前长按；过期1.5s
+事件不回放到新界面。阅读退出仍走原Activity析构和进度/时长保存，不调用重启、深睡
+或硬断电。P4不编译S31按键驱动，原P4触摸路径不变。
+
+纯状态机测试见 `tools/test_board_keys.cpp`（消抖、长按不补短按、跨键取消、屏外坐标、
+连翻节流、millis回绕）；需实机验证键位和页面操作。没有新增UI提示字符串，字体子集
+覆盖检查仍需执行。
 
 ### S31 冷暖前光
 
@@ -267,3 +381,7 @@ S31_SD: mounted /sdcard ...
 - ELF 已检查包含主页、书架、文件管理、TXT/EPUB、地图、计算器、股票、
   DeepSeek、微信读书、RSS、音乐、电台、短信、电话、传输的入口。
 - 未执行烧录或账号网络操作，实机结果待用户验证。
+
+### Continuous frontlight controls
+
+Brightness and colour temperature use continuous 0..1000 controls. The existing physical brightness cap remains 50% PWM; brightness is saved once after releasing the slider, rather than writing NVS on every movement. The global control centre shares these settings and displays battery percentage and available PSRAM. See CONTROL_CENTER.md.

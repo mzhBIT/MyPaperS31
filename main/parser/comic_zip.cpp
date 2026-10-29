@@ -55,6 +55,7 @@ bool natural_less(const std::string &a, const std::string &b)
 
 bool ComicZip::open(const char *path)
 {
+    metadata_memory::Budget budget;
     close();
     if (!path || !zip_.open(path)) { error_ = "Could not open ZIP comic (ZIP64 is unsupported)"; return false; }
     auto names = zip_.entry_names();
@@ -78,6 +79,7 @@ bool ComicZip::open(const char *path)
         // Aliases preserve ZIP names containing #, ?, &, non-UTF8 bytes etc.
         // Only the original name is passed to ZIP reads, never to XHTML URLs.
         const std::string image = "comic-image-" + index + image_extension(name);
+        if (!budget.add(pages_.size(),sizeof(ComicPage)+64,{name.size(),image.size(),48})) { error_="Comic navigation exceeds metadata memory limit"; return false; }
         pages_.push_back({"comic-page-" + index + ".html", image, name});
         resources_[image] = name;
     }
@@ -86,7 +88,7 @@ bool ComicZip::open(const char *path)
     return true;
 }
 void ComicZip::close()
-{ zip_.close(); pages_.clear(); resources_.clear(); error_.clear(); }
+{ zip_.close(); metadata_memory::release(pages_); metadata_memory::release(resources_); error_.clear(); }
 bool ComicZip::read_page(const std::string &href, std::string *out) const
 {
     if (!out) return false;

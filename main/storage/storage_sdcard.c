@@ -12,6 +12,7 @@
 #include "esp_vfs_fat.h"
 #include "driver/sdmmc_host.h"
 #include "sd_protocol_defs.h"
+#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/queue.h"
@@ -22,12 +23,38 @@
 #include "sd_pwr_ctrl_by_on_chip_ldo.h"
 #endif
 
+// One storage implementation serves both boards. Only the SD wiring differs.
+#if CONFIG_IDF_TARGET_ESP32S31
+#include "driver/gpio.h"
+#include "boards/MyPaperS31/StoragePins.h"
+#define STORAGE_SDCARD_PIN_CLK MYPAPER_S31_SD_CLK
+#define STORAGE_SDCARD_PIN_CMD MYPAPER_S31_SD_CMD
+#define STORAGE_SDCARD_PIN_D0  MYPAPER_S31_SD_D0
+#define STORAGE_SDCARD_PIN_D1  MYPAPER_S31_SD_D1
+#define STORAGE_SDCARD_PIN_D2  MYPAPER_S31_SD_D2
+#define STORAGE_SDCARD_PIN_D3  MYPAPER_S31_SD_D3
+// Standby holds the SD pins through deep sleep; the driver must own them again
+// before configuring the slot.
+static void storage_sdcard_release_pin_holds(void)
+{
+    const int pins[] = {
+        STORAGE_SDCARD_PIN_CLK, STORAGE_SDCARD_PIN_CMD,
+        STORAGE_SDCARD_PIN_D0, STORAGE_SDCARD_PIN_D1,
+        STORAGE_SDCARD_PIN_D2, STORAGE_SDCARD_PIN_D3,
+    };
+    for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); ++i) {
+        gpio_hold_dis((gpio_num_t) pins[i]);
+    }
+}
+#else
 #define STORAGE_SDCARD_PIN_CLK 43
 #define STORAGE_SDCARD_PIN_CMD 44
 #define STORAGE_SDCARD_PIN_D0  39
 #define STORAGE_SDCARD_PIN_D1  40
 #define STORAGE_SDCARD_PIN_D2  41
 #define STORAGE_SDCARD_PIN_D3  42
+static inline void storage_sdcard_release_pin_holds(void) {}
+#endif
 #define STORAGE_SDCARD_MAX_PATH_LEN 256
 #define STORAGE_USB_WRITE_CACHE_BYTES (32 * 1024)
 #define STORAGE_USB_WRITE_IDLE_FLUSH_US 10000
@@ -355,7 +382,7 @@ static void storage_sdcard_deinit_power(void)
 #endif
 }
 
-static void storage_sdcard_log_root_files(void)
+static void __attribute__((unused)) storage_sdcard_log_root_files(void)
 {
     DIR *dir = opendir(STORAGE_SDCARD_MOUNT_POINT);
     if (dir == NULL) {
@@ -418,6 +445,8 @@ esp_err_t storage_sdcard_mount(void)
         return ESP_OK;
     }
 
+    storage_sdcard_release_pin_holds();
+
     esp_vfs_fat_sdmmc_mount_config_t mount_config = {
         .format_if_mount_failed = false,
         // Twelve UI banks: at most 24 SD primary/fallback font handles.
@@ -453,6 +482,8 @@ esp_err_t storage_sdcard_init_usb_medium(void)
     if (s_card != NULL) {
         return s_usb_medium_initialized ? ESP_OK : ESP_ERR_INVALID_STATE;
     }
+
+    storage_sdcard_release_pin_holds();
 
     sdmmc_slot_config_t slot_config;
     storage_sdcard_configure_bus(&s_usb_host, &slot_config);

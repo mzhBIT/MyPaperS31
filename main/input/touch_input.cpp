@@ -4,6 +4,9 @@
 #include <esp_log.h>
 #include <algorithm>
 #include <cstdlib>
+#if CONFIG_IDF_TARGET_ESP32S31
+#include "boards/MyPaperS31/KeysS31.h"
+#endif
 
 namespace {
 
@@ -32,8 +35,10 @@ size_t s_tail = 0;
 BackSwipeEdge s_back_edge = BackSwipeEdge::LeftEdgeRightSwipe;
 
 bool s_pressed = false;
+bool s_suppress_until_release = false;
 bool s_long_press_sent = false;
 bool s_swipe_sent = false;
+bool s_contact_claimed = false;
 int s_start_x = 0;
 int s_start_y = 0;
 int s_last_x = 0;
@@ -216,6 +221,7 @@ bool push_hardware_gesture(uint32_t now, bool pressed, const lgfx::touch_point_t
 
 void touch_input_init()
 {
+    s_contact_claimed = false;
     s_head = 0;
     s_tail = 0;
     s_pressed = false;
@@ -228,15 +234,43 @@ void touch_input_init()
     s_peak_y = 0;
 }
 
+void touch_input_cancel_until_release()
+{
+    touch_input_init();
+    s_suppress_until_release = true;
+}
+
 void touch_input_update()
 {
     uint32_t now = lgfx::millis();
 
-    lgfx::touch_point_t point;
+    lgfx::touch_point_t point{};
+#if CONFIG_IDF_TARGET_ESP32S31
+    // Cover keys are reported as RAW Y~1600, outside the screen. Identify
+    // them before affine/rotation conversion and never read FT twice.
+    int count = M5.Display.getTouchRaw(&point, 1);
+    if (s_suppress_until_release) {
+        mypaper::board::s31::keys::cover_sample(count > 0, point.x, point.y, now);
+        if (!count) s_suppress_until_release = false;
+        return;
+    }
+    if (mypaper::board::s31::keys::cover_sample(count > 0, point.x, point.y, now)) {
+        s_head = s_tail; // Bezel contacts must not replay a queued screen tap.
+        s_pressed = s_long_press_sent = s_swipe_sent = false;
+        s_peak_x = s_peak_y = 0;
+        return;
+    }
+    M5.Display.convertRawXY(&point, count);
+#else
     int count = M5.Display.getTouch(&point, 1);
+    if (s_suppress_until_release) {
+        if (!count) s_suppress_until_release = false;
+        return;
+    }
+#endif
     bool pressed = count > 0;
 
-    bool hardware_gesture = push_hardware_gesture(now, pressed, point);
+    bool hardware_gesture = !s_contact_claimed && push_hardware_gesture(now, pressed, point);
     if (hardware_gesture) {
         s_pressed = false;
         s_long_press_sent = false;
@@ -245,6 +279,7 @@ void touch_input_update()
     }
 
     if (pressed && !s_pressed) {
+        s_contact_claimed = false;
         ++s_contact_sequence;
         s_pressed = true;
         s_long_press_sent = false;
@@ -263,6 +298,7 @@ void touch_input_update()
         s_last_x = point.x;
         s_last_y = point.y;
         update_peak_point(s_last_x, s_last_y);
+        if (s_contact_claimed) return;
         int dx = s_last_x - s_start_x;
         int dy = s_last_y - s_start_y;
         uint32_t duration = now - s_start_ms;
@@ -307,7 +343,7 @@ void touch_input_update()
         int peak_dx = s_peak_x - s_start_x;
         int peak_dy = s_peak_y - s_start_y;
         int move = std::max(abs_i(peak_dx), abs_i(peak_dy));
-        if (s_swipe_sent) {
+        if (s_swipe_sent || s_contact_claimed) {
             // Swipe was already emitted while the finger was still down.
         } else if (!s_long_press_sent &&
             event.duration_ms <= TAP_MAX_DURATION_MS &&
@@ -338,6 +374,7 @@ void touch_input_update()
         s_pressed = false;
         s_long_press_sent = false;
         s_swipe_sent = false;
+        s_contact_claimed = false;
         s_peak_x = 0;
         s_peak_y = 0;
     }
@@ -353,6 +390,9 @@ bool touch_input_pop(TouchEvent *event)
 
 bool touch_input_needs_fast_poll()
 {
+#if CONFIG_IDF_TARGET_ESP32S31
+    if (mypaper::board::s31::keys::cover_active()) return true;
+#endif
     return s_pressed || s_head != s_tail;
 }
 
@@ -372,3 +412,5 @@ BackSwipeEdge touch_input_get_back_swipe_edge()
 {
     return s_back_edge;
 }
+
+void touch_input_claim_contact() { if (s_pressed) s_contact_claimed = true; }

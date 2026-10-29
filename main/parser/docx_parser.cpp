@@ -362,8 +362,10 @@ bool DocxBook::open(const char *path)
     }
     const size_t xml_bytes = xml.size();
     std::string().swap(xml); // Do not retain main XML alongside all XHTML sections.
+    metadata_memory::Budget budget;
     for (auto &p : content) {
         if (sections_.empty() || (p.heading && !sections_.back().html.empty()) || sections_.back().html.size() >= SECTION_TARGET) {
+            if (!budget.add(sections_.size(),sizeof(DocxSection),{base.size()+48,p.title.size()})) { error_="DOCX navigation exceeds metadata memory limit"; return false; }
             sections_.push_back({base + "docx-section-" + std::to_string(sections_.size()) + ".html",
                                  p.title.empty() ? title_ : p.title, "", std::max(0, p.heading - 1)});
         }
@@ -380,7 +382,7 @@ bool DocxBook::open(const char *path)
 void DocxBook::close()
 {
     zip_.close(); title_.clear(); error_.clear();
-    sections_.clear(); notes_html_.clear(); notes_href_.clear();
+    metadata_memory::release(sections_); notes_html_.clear(); notes_href_.clear();
 }
 bool DocxBook::read_section(const std::string &href, std::string *out) const
 {

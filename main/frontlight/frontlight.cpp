@@ -19,7 +19,9 @@
 #define FRONTLIGHT_NVS_KEY "level"
 
 static const char *TAG = "FRONTLIGHT";
-static int s_level = 5;
+static int s_brightness = 500;
+static bool s_suspended = false;
+static int s_enabled = -1;
 static bool s_initialized = false;
 
 static int clamp_level(int level)
@@ -47,6 +49,7 @@ static bool pca_write(uint8_t reg, uint8_t value)
 
 static bool set_enable(bool enabled)
 {
+    if (s_enabled == int(enabled)) return true;
     uint8_t config = 0;
     uint8_t output = 0;
     if (!pca_read(FRONTLIGHT_PCA_CONFIG_PORT1, &config) ||
@@ -65,14 +68,15 @@ static bool set_enable(bool enabled)
         ESP_LOGE(TAG, "PCA9535 set IO1_2 failed");
         return false;
     }
+    s_enabled = int(enabled);
     return true;
 }
 
-static void save_level(int level)
+void frontlight_save_brightness(void)
 {
     nvs_handle_t handle = 0;
     if (nvs_open(FRONTLIGHT_NVS_NAMESPACE, NVS_READWRITE, &handle) != ESP_OK) return;
-    const esp_err_t result = nvs_set_u8(handle, FRONTLIGHT_NVS_KEY, (uint8_t)level);
+    const esp_err_t result = nvs_set_u16(handle, "brightness", (uint16_t)s_brightness);
     if (result == ESP_OK) nvs_commit(handle);
     nvs_close(handle);
 }
@@ -109,44 +113,44 @@ void frontlight_init(void)
     nvs_handle_t handle = 0;
     if (nvs_open(FRONTLIGHT_NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
         nvs_get_u8(handle, FRONTLIGHT_NVS_KEY, &stored);
+        s_brightness = clamp_level(stored) * 100;
+        uint16_t fine = s_brightness;
+        if (nvs_get_u16(handle, "brightness", &fine) == ESP_OK && fine <= 1000) s_brightness = fine;
         nvs_close(handle);
     }
     s_initialized = true;
-    frontlight_set_level(clamp_level(stored));
-    ESP_LOGI(TAG, "initialized level=%d (%d%%)", s_level, frontlight_get_percent());
+    frontlight_set_suspended(false);
+    ESP_LOGI(TAG, "initialized level=%d (%d%%)", frontlight_get_level(), frontlight_get_percent());
 }
 
 int frontlight_get_level(void)
 {
-    return s_level;
+    return (s_brightness + 50) / 100;
 }
 
 int frontlight_get_color_temperature(void) { return -1; }
+int frontlight_get_color_temperature_fine(void) { return -1; }
+void frontlight_preview_color_temperature(int) {}
+void frontlight_save_settings(void) { frontlight_save_brightness(); }
+void frontlight_set_suspended(bool suspended) {
+    s_suspended = suspended;
+    if (!s_initialized) return;
+    const uint32_t duty = suspended ? 0 : (uint32_t)((s_brightness * 1023 + 1000) / 2000);
+    ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
+    ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
+    set_enable(!suspended && s_brightness > 0);
+}
 void frontlight_set_color_temperature(int) {}
 
-int frontlight_get_percent(void)
-{
-    // Ten user steps deliberately span only the quiet 0..50% hardware PWM
-    // range: each adjustment is 5% and avoids an overly bright low setting.
-    return s_level * 5;
+int frontlight_get_percent(void) { return s_brightness / 20; }
+int frontlight_get_brightness(void) { return s_brightness; }
+void frontlight_preview_brightness(int value) {
+    value = value < 0 ? 0 : value > 1000 ? 1000 : value;
+    if (!s_initialized || value == s_brightness) return;
+    s_brightness = value;
+    frontlight_set_suspended(s_suspended);
 }
-
-void frontlight_set_level(int level)
-{
-    level = clamp_level(level);
-    if (!s_initialized) return;
-    const uint32_t duty = (uint32_t)((level * 1023 + 10) / 20);
-    if (level == 0) {
-        ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, 0);
-        ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-        set_enable(false);
-    } else {
-        set_enable(true);
-        ledc_set_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0, duty);
-        ledc_update_duty(LEDC_LOW_SPEED_MODE, LEDC_CHANNEL_0);
-    }
-    s_level = level;
-    save_level(level);
-    ESP_LOGI(TAG, "level=%d brightness=%d%% duty=%lu enable=%d", level,
-             frontlight_get_percent(), (unsigned long)duty, level ? 1 : 0);
+void frontlight_set_level(int level) {
+    frontlight_preview_brightness(clamp_level(level) * 100);
+    frontlight_save_brightness();
 }

@@ -314,6 +314,7 @@ bool MobiBook::open(const char *path)
         return false;
     }
     bool metadata_cached = load_metadata_cache();
+    if (!metadata_cached) _metadata_budget={};
     if (!metadata_cached && !build_text_index()) {
         if (_last_error.empty()) _last_error = "Could not decode MOBI text";
         std::string error = _last_error;
@@ -366,7 +367,9 @@ bool MobiBook::load_metadata_cache()
     // Version 1 is the original contiguous KF7 cache. Keep accepting it so a
     // firmware upgrade does not force large existing MOBI books to re-index.
     if (ok) ok = cache_format == (_is_kf8 ? 1u : 0u) && (version >= 2 || !_is_kf8);
-    std::vector<TextRecord> text_records;
+    metadata_memory::Budget budget;
+    metadata_memory::Vector<TextRecord> text_records;
+    if (ok) ok=metadata_memory::Budget::reserve_allowed(text_count,sizeof(TextRecord));
     if (ok) {
         text_records.reserve(text_count);
         for (uint32_t i = 0; i < text_count; ++i) {
@@ -379,9 +382,9 @@ bool MobiBook::load_metadata_cache()
             text_records.push_back(item);
         }
     }
-    if (ok) ok = read_value(&section_count) && section_count > 0 && section_count <= 100000;
-    std::vector<MobiSectionItem> sections;
-    std::vector<MobiTocItem> toc;
+    if (ok) ok = read_value(&section_count) && section_count > 0 && metadata_memory::Budget::reserve_allowed(section_count,sizeof(MobiSectionItem)+sizeof(MobiTocItem));
+    metadata_memory::Vector<MobiSectionItem> sections;
+    metadata_memory::Vector<MobiTocItem> toc;
     if (ok) {
         sections.reserve(section_count);
         toc.reserve(section_count);
@@ -405,6 +408,7 @@ bool MobiBook::load_metadata_cache()
             section.end = end;
             section.uncompressed_size = static_cast<uint32_t>(
                 std::min<uint64_t>(0xffffffffu, end - start));
+            if (!budget.add(sections.size(),sizeof(section)+sizeof(MobiTocItem),{section.id.size(),section.href.size(),label.size()})) {ok=false;break;}
             sections.push_back(section);
             MobiTocItem entry;
             entry.title = label.empty() ? "Section " + std::to_string(i + 1) : std::move(label);
@@ -413,7 +417,7 @@ bool MobiBook::load_metadata_cache()
             toc.push_back(std::move(entry));
         }
     }
-    std::vector<Kf8Part> kf8_parts;
+    metadata_memory::Vector<Kf8Part> kf8_parts;
     if (ok && _is_kf8) {
         kf8_parts.reserve(section_count);
         for (uint32_t i = 0; i < section_count; ++i) {
@@ -428,6 +432,8 @@ bool MobiBook::load_metadata_cache()
                 break;
             }
             uint64_t current_length = part.skeleton_length;
+            if (!metadata_memory::Budget::reserve_allowed(fragment_count,sizeof(Kf8Fragment)) ||
+                !budget.add(i,sizeof(Kf8Part)+fragment_count*sizeof(Kf8Fragment),{})) { ok=false; break; }
             part.fragments.reserve(fragment_count);
             for (uint32_t n = 0; n < fragment_count; ++n) {
                 Kf8Fragment fragment;
@@ -524,10 +530,11 @@ void MobiBook::close()
     author.clear();
     _path.clear();
     _cover_href.clear();
-    _records.clear();
-    _text_records.clear();
-    _sections.clear();
-    _toc.clear();
+    _metadata_budget={};
+    metadata_memory::release(_records);
+    metadata_memory::release(_text_records);
+    metadata_memory::release(_sections);
+    metadata_memory::release(_toc);
     _compression = 0;
     _encryption = 0;
     _text_record_count = 0;
@@ -543,7 +550,7 @@ void MobiBook::close()
     _huff_record_index = 0xffffffffu;
     _huff_record_count = 0;
     _decoded_text_length = 0;
-    _kf8_parts.clear();
+    metadata_memory::release(_kf8_parts);
     _huff.reset();
 }
 
@@ -598,6 +605,7 @@ bool MobiBook::parse_container()
             return false;
         }
     }
+    if (!metadata_memory::Budget::reserve_allowed(count,sizeof(Record))) { _last_error="MOBI record index exceeds metadata memory limit"; return false; }
     _records.resize(count);
     for (uint16_t i = 0; i < count; ++i) {
         uint32_t end = i + 1 < count ? offsets[i + 1] : static_cast<uint32_t>(file_size);
@@ -1000,6 +1008,7 @@ bool MobiBook::build_kf8_index()
     _kf8_parts.clear();
     _sections.clear();
     _toc.clear();
+    if (!metadata_memory::Budget::reserve_allowed(skeletons.size(),sizeof(Kf8Part)+sizeof(MobiSectionItem))) { _last_error="KF8 index exceeds metadata memory limit"; return false; }
     _kf8_parts.reserve(skeletons.size());
     _sections.reserve(skeletons.size());
     size_t fragment_cursor = 0;
@@ -1025,6 +1034,7 @@ bool MobiBook::build_kf8_index()
         part.skeleton_length = skeleton_length;
         uint64_t fragment_data = skeleton_start + skeleton_length;
         uint64_t assembled_length = skeleton_length;
+        if (!metadata_memory::Budget::reserve_allowed(fragment_count,sizeof(Kf8Fragment))) { _last_error="KF8 fragment index exceeds metadata memory limit"; return false; }
         part.fragments.reserve(fragment_count);
         for (uint32_t n = 0; n < fragment_count; ++n, ++fragment_cursor) {
             const IndexEntry &fragment = fragments[fragment_cursor];
@@ -1067,6 +1077,7 @@ bool MobiBook::build_kf8_index()
         section.end = assembled_position + assembled_length;
         section.uncompressed_size = static_cast<uint32_t>(assembled_length);
         assembled_position = section.end;
+        if (!_metadata_budget.add(_sections.size(),sizeof(section),{section.id.size(),section.href.size(),section.media_type.size()})) { _last_error="MOBI navigation exceeds metadata memory limit"; return false; }
         _sections.push_back(std::move(section));
     }
     if (_kf8_parts.empty()) {
@@ -1082,6 +1093,7 @@ bool MobiBook::build_kf8_index()
         item.title = "Section " + std::to_string(i + 1);
         item.href = _sections[i].href;
         item.spine_index = static_cast<int>(i);
+        if (!_metadata_budget.add(_toc.size(),sizeof(item),{item.title.size(),item.href.size()})) { _last_error="MOBI navigation exceeds metadata memory limit"; return false; }
         _toc.push_back(std::move(item));
     }
     ESP_LOGI(TAG, "KF8 reconstructed sections=%u fragments=%u raw=%llu assembled=%llu",
@@ -1167,6 +1179,7 @@ bool MobiBook::build_text_index()
         section.end = boundaries[i + 1];
         section.uncompressed_size = static_cast<uint32_t>(
             std::min<uint64_t>(0xffffffffu, section.end - section.start));
+        if (!_metadata_budget.add(_sections.size(),sizeof(section),{section.id.size(),section.href.size(),section.media_type.size()})) { _last_error="MOBI navigation exceeds metadata memory limit"; return false; }
         _sections.push_back(std::move(section));
     }
 
@@ -1183,6 +1196,7 @@ bool MobiBook::build_text_index()
         item.title = std::move(label);
         item.href = _sections[i].href;
         item.spine_index = static_cast<int>(i);
+        if (!_metadata_budget.add(_toc.size(),sizeof(item),{item.title.size(),item.href.size()})) { _last_error="MOBI navigation exceeds metadata memory limit"; return false; }
         _toc.push_back(std::move(item));
     }
     return !_sections.empty();

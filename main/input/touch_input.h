@@ -46,6 +46,7 @@ struct TouchContact {
 TouchContact touch_input_contact();
 
 void touch_input_init();
+void touch_input_cancel_until_release();
 void touch_input_update();
 bool touch_input_pop(TouchEvent *event);
 // Main-thread only: poll more promptly while tracking a gesture or dispatching
@@ -54,3 +55,6 @@ bool touch_input_needs_fast_poll();
 
 void touch_input_set_back_swipe_edge(BackSwipeEdge edge);
 BackSwipeEdge touch_input_get_back_swipe_edge();
+
+// Capture the current contact for a slider; retain coordinates but suppress gestures until release.
+void touch_input_claim_contact();

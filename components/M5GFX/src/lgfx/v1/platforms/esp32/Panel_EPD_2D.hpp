@@ -50,6 +50,7 @@ namespace lgfx
     void waveformTemperature(int celsius) { _temperature_c = celsius; }
     int waveformTemperature(void) const { return _temperature_c; }
     bool measureVCOM(uint32_t* vcom_mV, uint32_t timeout_ms = 500);
+    bool copyPhysicalGrayscale4(uint8_t* destination, size_t capacity);
     bool preparePhysicalGrayscale4Stats(const uint8_t* frame, uint16_t width,
                                         uint16_t height, uint8_t rotation,
                                         epd_mode_t mode) override;

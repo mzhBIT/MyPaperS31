@@ -34,6 +34,13 @@ static const char *TAG = "RADIO";
 // FreeRTOS time slice keeps UI responsive while USB's priority-20 service task
 // remains unconditionally above both.
 static constexpr UBaseType_t RADIO_UI_TASK_PRIORITY = 10;
+#if CONFIG_IDF_TARGET_ESP32S31
+// audio_radio_init reads saved output settings from NVS. On S31, even a
+// Flash read may disable the cache, so this caller must have an internal stack.
+static constexpr uint32_t RADIO_PLAY_STACK_CAPS = MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT;
+#else
+static constexpr uint32_t RADIO_PLAY_STACK_CAPS = MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT;
+#endif
 
 static constexpr int DESIGN_W = 684;
 static constexpr int DESIGN_H = 1216;
@@ -115,11 +122,12 @@ static void radio_play_worker(void *arg)
              esp_err_to_name(result.result));
     (void)xQueueSend(job->result_queue, &result, portMAX_DELAY);
     delete job;
-    vTaskDelete(nullptr);
+    vTaskDeleteWithCaps(nullptr);
 }
 
 class RadioActivity final : public Activity {
 public:
+    bool can_standby() const override { return _play_task == nullptr; }
     ~RadioActivity() override
     {
         if (_play_task != nullptr) {
@@ -462,7 +470,7 @@ private:
         if (job == nullptr ||
             xTaskCreatePinnedToCoreWithCaps(radio_play_worker, "radio_play", 8 * 1024,
                                             job, 11, &_play_task, 0,
-                                            MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT) != pdPASS) {
+                                            RADIO_PLAY_STACK_CAPS) != pdPASS) {
             delete job;
             _play_task = nullptr;
             _status = ui_locale::text(ui_locale::TextId::RadioWorkerUnavailable);

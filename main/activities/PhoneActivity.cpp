@@ -191,6 +191,7 @@ std::vector<CallRecord> load_call_records()
 
 class PhoneActivity final : public Activity {
 public:
+    bool can_standby() const override { return !_busy && !_was_connected && !_call_incoming; }
     explicit PhoneActivity(bool incoming_hint) : _incoming_hint(incoming_hint)
     {
         _queue = xQueueCreate(1, sizeof(Result));
@@ -223,6 +224,7 @@ public:
         draw();
     }
     void on_hide() override { s_phone_current = false; }
+    void on_standby_resume() override { s_phone_current = true; _next_query_us = 0; }
     void notify_ring()
     {
         _next_query_us = 0;

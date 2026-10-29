@@ -168,6 +168,7 @@ public:
     }
 
     bool allow_system_back() const override { return false; }
+    bool can_standby() const override { return !_request; }
 
     void on_show() override
     {

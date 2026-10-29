@@ -1762,6 +1762,14 @@ namespace lgfx
     return true;
   }
 
+  bool Panel_EPD_2D::copyPhysicalGrayscale4(uint8_t* destination, size_t capacity)
+  {
+    const size_t bytes = size_t(_cfg.memory_width) * _cfg.memory_height / 2;
+    if (!destination || !_buf || capacity < bytes || displayBusy()) return false;
+    memcpy(destination, _buf, bytes);
+    return true;
+  }
+
   bool Panel_EPD_2D::writePhysicalGrayscale4(const uint8_t* physical_frame,
                                             uint16_t physical_width,
                                             uint16_t physical_height,
@@ -2348,6 +2356,17 @@ namespace lgfx
 #else
             false;
 #endif
+        // DU/A2 use the same arbitrary 16x16 transition mapping. Reuse the
+        // internal 64 KiB pair LUT, but keep their full precompute policy;
+        // selecting this renderer must not enable the GC16 ring pipeline.
+        const bool binary_pair_renderer =
+#if MYPAPER_EPD_2D_GC16_PAIR_LUT
+            (selected.type == WAVEFORM_MODE_DU || selected.type == WAVEFORM_MODE_A2)
+         && me->_gc16_pair_lut_2d != nullptr
+         && panel_w == memory_w && scan_rows == panel_h;
+#else
+            false;
+#endif
         const int gc16_pipeline_prime = selected.type == WAVEFORM_MODE_HD
             ? MYPAPER_EPD_2D_HD_PIPELINE_PRIME
             : MYPAPER_EPD_2D_GC16_PIPELINE_PRIME;
@@ -2718,6 +2737,7 @@ namespace lgfx
           }
         }
 #endif
+        int64_t preparation_yield_at = esp_timer_get_time();
         for (int cached = rendered_prime_count; cached < initial_render_count; ++cached) {
           drive_frame_timing_t* detail = cached < GC16_PIPELINE_MAX_PHASES
               ? &frame_timings[cached] : nullptr;
@@ -2736,7 +2756,7 @@ namespace lgfx
                 transition, selected.type, phase, phase_count, update.changed_pixels_only);
             render_transition = transition;
           }
-          if (gc16_pair_renderer) {
+          if (gc16_pair_renderer || binary_pair_renderer) {
             const int64_t lut_begin = esp_timer_get_time();
             build_gc16_pair_lut(
                 me->_gc16_pair_lut_2d, render_transition);
@@ -2804,6 +2824,14 @@ namespace lgfx
           if (du4_pipeline_active) {
             __atomic_store_n(&du4_pipeline.ready[cached], true,
                              __ATOMIC_RELEASE);
+          }
+          // Only full precomputation is allowed to sleep. The panel is still
+          // off here; never add waits between physical scan phases or in a
+          // producer racing the scanner. taskYIELD alone cannot run IDLE1.
+          if (!gc16_pipeline_active && !du4_pipeline_active &&
+              esp_timer_get_time() - preparation_yield_at >= 50000) {
+            vTaskDelay(1);
+            preparation_yield_at = esp_timer_get_time();
           }
         }
         const uint32_t precompute_us = static_cast<uint32_t>(
@@ -2896,6 +2924,8 @@ namespace lgfx
                    gc16_pair_renderer
                        ? (selected.type == WAVEFORM_MODE_HD
                            ? "hd-gl16-pair-lut" : "gc16-pair-lut")
+                     : binary_pair_renderer
+                       ? (selected.type == WAVEFORM_MODE_DU ? "du-pair-lut" : "a2-pair-lut")
                      : selected.type == WAVEFORM_MODE_DU4
                      && me->_du4_pair_lut_2d != nullptr
                        ? "du4-pair-lut" : "generic",

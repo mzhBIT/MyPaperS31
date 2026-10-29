@@ -1,5 +1,7 @@
 #include "ui/reader_background.h"
+#include "ui/standby_wallpaper.h"
 #include "ui/UiLocale.h"
+#include "renderer/TurboJpegDecoder.h"
 
 #include "storage/app_paths.h"
 
@@ -55,6 +57,7 @@ std::string background_ext;
 int background_width = 0;
 int background_height = 0;
 bool background_progressive = false;
+bool require_full_resolution = true;
 uint8_t *background_cache = nullptr;
 size_t background_cache_size = 0;
 int background_cache_width = 0;
@@ -219,6 +222,8 @@ bool draw_source(lgfx::LGFXBase &gfx, const std::string &path,
                   ? gfx.drawBmpFile(path.c_str(), x, y,
                                     draw_width, draw_height, 0, 0, scale, scale)
                   : false;
+    if (!ok && !require_full_resolution && ext == ".jpg")
+        ok = turbo_jpeg::draw_file(gfx, path.c_str(), x, y, draw_width, draw_height);
     gfx.clearClipRect();
     if (!ok) gfx.fillScreen(TFT_WHITE);
     return ok;
@@ -452,7 +457,7 @@ ReaderBackgroundResult reader_background_set(const char *path,
     int image_short = std::min(width, height);
     int screen_long = std::max(screen_width, screen_height);
     int screen_short = std::min(screen_width, screen_height);
-    if (image_long < screen_long || image_short < screen_short) {
+    if (require_full_resolution && (image_long < screen_long || image_short < screen_short)) {
         if (message) {
             char text[112];
             std::snprintf(text, sizeof(text), "%s %d x %d (%d x %d)",
@@ -539,7 +544,13 @@ bool reader_background_draw(lgfx::LGFXBase &gfx, int width, int height)
     return true;
 }
 
-Settings(bool rss = false) {
+Settings(bool rss = false, bool standby = false) {
+    if (standby) {
+        NVS_NAMESPACE = "standby_bg";
+        CACHE_PATH = "/sdcard/.reader/standby_wallpaper.g4";
+        CACHE_TEMP_PATH = "/sdcard/.reader/standby_wallpaper.g4.tmp";
+        require_full_resolution = false;
+    }
     if (rss) {
         NVS_NAMESPACE = "rss_reader_bg";
         CACHE_PATH = "/sdcard/.reader/rss_background.g4";
@@ -549,6 +560,7 @@ Settings(bool rss = false) {
 };
 Settings shared_settings;
 Settings rss_settings(true);
+Settings standby_settings(false, true);
 bool rss_seeded = false;
 void seed_rss_settings()
 {
@@ -585,10 +597,12 @@ bool reader_background_matches(const char *path) { return shared_settings.reader
 void reader_background_file_renamed(const char *old_path, const char *new_path) {
     shared_settings.reader_background_file_renamed(old_path, new_path);
     rss_settings.reader_background_file_renamed(old_path, new_path);
+    standby_settings.reader_background_file_renamed(old_path, new_path);
 }
 void reader_background_file_deleted(const char *path) {
     shared_settings.reader_background_file_deleted(path);
     rss_settings.reader_background_file_deleted(path);
+    standby_settings.reader_background_file_deleted(path);
 }
 ReaderBackgroundResult reader_background_set(const char *path, int width, int height, std::string *message, ReaderProfile profile) {
     return settings(profile).reader_background_set(path, width, height, message);
@@ -596,3 +610,23 @@ ReaderBackgroundResult reader_background_set(const char *path, int width, int he
 bool reader_background_draw(lgfx::LGFXBase &gfx, int width, int height, ReaderProfile profile) {
     return settings(profile).reader_background_draw(gfx, width, height);
 }
+
+bool standby_wallpaper_enabled() { return standby_settings.reader_background_enabled(); }
+const char* standby_wallpaper_path() { return standby_settings.reader_background_path(); }
+bool standby_wallpaper_clear() { return standby_settings.reader_background_clear(); }
+ReaderBackgroundResult standby_wallpaper_set(const char* path, int width, int height, std::string* message) {
+    auto result = standby_settings.reader_background_set(path, width, height, message);
+    standby_settings.release_cache();
+    if (result == ReaderBackgroundResult::Ok && message)
+        *message = ui_locale::text(ui_locale::TextId::StandbyWallpaperSet);
+    return result;
+}
+bool standby_wallpaper_prepare(int width, int height) {
+    standby_settings.ensure_initialized();
+    return !standby_settings.background_path.empty() && standby_settings.ensure_cache(width, height);
+}
+bool standby_wallpaper_draw(lgfx::LGFXBase& gfx, int width, int height) {
+    return standby_wallpaper_prepare(width, height)
+        && standby_settings.reader_background_draw(gfx, width, height);
+}
+void standby_wallpaper_release() { standby_settings.release_cache(); }

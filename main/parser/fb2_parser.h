@@ -1,4 +1,5 @@
 #pragma once
+#include "memory/MetadataAllocator.h"
 
 #include <cstdint>
 #include <string>
@@ -6,9 +7,9 @@
 #include <vector>
 
 struct Fb2SectionItem {
-    std::string id;
-    std::string href;
-    std::string title;
+    metadata_memory::String id;
+    metadata_memory::String href;
+    metadata_memory::String title;
     uint64_t start = 0;
     uint64_t end = 0;
     bool in_spine = true;
@@ -38,9 +39,9 @@ public:
 
 private:
     struct BinaryItem {
-        std::string id;
-        std::string href;
-        std::string media_type;
+        metadata_memory::String id;
+        metadata_memory::String href;
+        metadata_memory::String media_type;
         uint64_t start = 0;
         uint64_t end = 0;
     };
@@ -48,11 +49,11 @@ private:
     std::string _path;
     std::string _cover_href;
     std::string _last_error;
-    std::vector<Fb2SectionItem> _sections;
-    std::vector<size_t> _spine_indices;
-    std::vector<BinaryItem> _binaries;
-    std::unordered_map<std::string, std::string> _anchor_hrefs;
-    std::unordered_map<std::string, std::string> _binary_hrefs;
+    metadata_memory::Vector<Fb2SectionItem> _sections;
+    metadata_memory::Vector<size_t> _spine_indices;
+    metadata_memory::Vector<BinaryItem> _binaries;
+    metadata_memory::Map<metadata_memory::String> _anchor_hrefs;
+    metadata_memory::Map<metadata_memory::String> _binary_hrefs;
 
     bool read_range(uint64_t start, uint64_t end, std::string *out) const;
     bool decode_resource(const std::string &href, std::vector<uint8_t> *out,

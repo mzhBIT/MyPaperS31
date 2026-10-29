@@ -24,8 +24,13 @@
 #include "reader_font.h"
 #include "reader_style.h"
 #include "ui/UiLocale.h"
+#include "ui/ControlCenter.h"
 #include "wifi/wifi_setting.h"
 #include "boards/Board.h"
+#if CONFIG_IDF_TARGET_ESP32S31
+#include "boards/MyPaperS31/KeysS31.h"
+#include "boards/MyPaperS31/StandbyS31.h"
+#endif
 
 extern void launch_home();
 
@@ -170,6 +175,10 @@ extern "C" void app_main(void)
 
     touch_input_init();
     launch_home();
+#if CONFIG_IDF_TARGET_ESP32S31
+    mypaper::board::s31::keys::sync_context(ActivityManager::instance().generation());
+    mypaper::board::s31::keys::init();
+#endif
 
     // In Always On mode connect without blocking touch/UI startup. The
     // on-demand default still leaves the C6 powered off until an app needs it.
@@ -179,10 +188,17 @@ extern "C" void app_main(void)
     }
 
     while (true) {
+#if CONFIG_IDF_TARGET_ESP32S31
+        if (mypaper::board::s31::standby::service()) continue;
+#endif
         bool dispatched_touch = false;
+#if CONFIG_IDF_TARGET_ESP32S31
+        mypaper::board::s31::keys::sync_context(ActivityManager::instance().generation());
+#endif
         touch_input_update();
 
         if (ml307_voice_take_ring_hint()) {
+            ActivityManager::instance().dismiss_overlay(true);
             if (phone_activity_is_current()) phone_activity_notify_ring();
             else launch_phone(true);
         }
@@ -197,6 +213,8 @@ extern "C" void app_main(void)
                     act = am.current();
                     if (!act) break;
 
+                    if (control_center_handle_touch(event)) break;
+
                     if (event.type == TouchEventType::Back) {
                         if (act->on_touch(event)) break;
                         if (act->allow_system_back() && am.can_pop()) {
@@ -209,14 +227,22 @@ extern "C" void app_main(void)
                     if (act->on_touch(event)) break;
                 }
 
+                control_center_service();
                 act = ActivityManager::instance().current();
                 if (!act) {
                     vTaskDelay(pdMS_TO_TICKS(10));
                     continue;
                 }
 
+#if CONFIG_IDF_TARGET_ESP32S31
+                if (!dispatched_touch) dispatched_touch = mypaper::board::s31::keys::dispatch_one();
+#endif
                 act = ActivityManager::instance().current();
+#if CONFIG_IDF_TARGET_ESP32S31
+                if (act && !ActivityManager::instance().is_blocked()) act->loop();
+#else
                 if (act) act->loop();
+#endif
             }
         }
 

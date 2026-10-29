@@ -4,6 +4,7 @@
 #include "activities/BookshelfActivity.h"
 #include "ui/BatteryStatus.h"
 #include "ui/ShelfStatusBar.h"
+#include "ui/ReadingNavigation.h"
 #include "activities/FileBrowserActivity.h"
 #include "activities/ReadingHomeActivity.h"
 #include "activities/Activity.h"
@@ -329,20 +330,9 @@ class BookshelfActivity final : public Activity {
         M5.Display.drawRoundRect(244,r.y+163,378,11,5,gray(80));
         if(slot<3) M5.Display.drawFastHLine(50,r.y+196,584,gray(96));
     }
-    void draw_clock(const std::string &clock) {
-        shelf_status_bar::draw_clock(clock);
-        last_clock=clock;
-    }
-    void draw_wifi(bool enabled) {
-        shelf_status_bar::draw_wifi(enabled);
-    }
     void status() {
-        char clock[24]="--:--";
-        if(time_basis_system_clock_valid()) time_basis_format_clock(std::time(nullptr),clock,sizeof(clock));
-        draw_clock(clock);
-        draw_wifi(wifi_setting_is_enabled());
+        last_clock=shelf_status_bar::draw();
         last_status_ms=lgfx::millis();
-        shelf_status_bar::draw_battery();
     }
     void header() {
         status();
@@ -363,18 +353,7 @@ class BookshelfActivity final : public Activity {
         centered(s,342,1065,pager_px);
         icon(pico_shelf_icons::chevron_left,226,1065,22,page()?0:144);
         icon(pico_shelf_icons::chevron_right,458,1065,22,page()+1<pages()?0:144);
-        M5.Display.drawFastHLine(0,1096,684,gray(192));
-        M5.Display.fillRect(228,1097,56,5,TFT_BLACK);
-        const uint8_t *icons[]={pico_shelf_icons::house,pico_shelf_icons::library_big,
-            pico_shelf_icons::folder_open,pico_shelf_icons::sliders_horizontal};
-        const char *labels[]={tr("Home","首页","首頁"),ui_locale::text(ui_locale::TextId::Bookshelf),
-            tr("Files","文件管理","檔案管理"),ui_locale::text(ui_locale::TextId::Settings)};
-        for(int i=0;i<4;++i) {
-            int cx=85+171*i;
-            icon(icons[i],cx,1141,44);
-            const int px=fit_px(labels[i],ui_px(17),159);
-            text(labels[i],cx-system_font::measure(labels[i],px)/2,1170,px);
-        }
+        reading_navigation::draw(reading_navigation::Tab::Bookshelf);
     }
     void style_dialog() {
         M5.Display.fillRoundRect(90,370,504,432,20,TFT_WHITE);
@@ -472,6 +451,7 @@ public:
         request_home_quality_refresh();
     }
     void on_hide() override { release_feedback(); }
+    void on_standby_enter() override {} // Keep cover feedback caches for the restored page.
     void on_create() override {
         const int64_t begin = esp_timer_get_time();
         nvs_handle_t h; uint8_t value=2;
@@ -512,9 +492,9 @@ public:
         const auto previous_mode=M5.Display.getEpdMode();
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_text);
-        M5.Display.fillRect(0,0,684,72,TFT_WHITE);
+        M5.Display.fillRect(0,0,M5.Display.width(),shelf_status_bar::height,TFT_WHITE);
         status();
-        M5.Display.display(0,0,684,72);
+        M5.Display.display(0,0,M5.Display.width(),shelf_status_bar::height);
         M5.Display.endWrite();
         M5.Display.setEpdMode(previous_mode);
     }
@@ -552,11 +532,11 @@ public:
         if(e.type==TouchEventType::SwipeRight || e.type==TouchEventType::SwipeDown) { turn(-1); return true; }
         if(e.type!=TouchEventType::Tap) return false;
         keyboard_focus=false;
-        if(e.y>=1096) {
-            int tab=std::max(0,std::min(3,e.x/171));
+        const int tab=reading_navigation_layout::tab_at(e.x,e.y);
+        if(tab>=0) {
             if(tab==0) launch_reading_home();
-            else if(tab==2) launch_file_browser("/sdcard", true);
-            else if(tab==3) launch_settings();
+            else if(tab==2) switch_to_reading_files();
+            else if(tab==3) switch_to_reading_settings();
             return true;
         }
         if(layout::manage.contains(e.x,e.y)) { show_styles(); return true; }
@@ -570,6 +550,7 @@ public:
             }
         return false;
     }
+    bool on_navigation_key(int direction) override { return on_key(direction < 0 ? APP_KEY_UP : APP_KEY_DOWN); }
     bool on_key(int key) override {
         if(key==APP_KEY_BACK) { TouchEvent e; e.type=TouchEventType::Back; return on_touch(e); }
         if(styles_open) return true;
@@ -586,3 +567,4 @@ public:
 };
 }
 void launch_bookshelf() { ActivityManager::instance().push(new BookshelfActivity()); }
+void switch_to_bookshelf() { ActivityManager::instance().show_above_root(new BookshelfActivity()); }

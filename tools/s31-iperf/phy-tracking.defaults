@@ -1,0 +1,3 @@
+# Single-variable comparison with the official experimental baseline.
+# Restore normal PHY PLL tracking; retain calibration mode and all other settings.
+# CONFIG_ESP_PHY_DISABLE_PLL_TRACK is not set

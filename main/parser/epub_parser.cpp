@@ -91,10 +91,10 @@ public:
         return true;
     }
 
-    bool string(std::string *value)
+    template<class Text> bool string(Text *value)
     {
         uint32_t length = 0;
-        if (!value || !u32(&length) || length > 1024 * 1024 || _pos + length > _data.size()) return false;
+        if (!value || !u32(&length) || length > 16384 || _pos + length > _data.size()) return false;
         value->assign((const char *)_data.data() + _pos, length);
         _pos += length;
         return true;
@@ -286,6 +286,7 @@ bool EpubBook::open(const char *path)
 {
     int64_t t0 = esp_timer_get_time();
     close();
+    _last_error.clear();
     log_book_heap("before-zip");
     if (!_zip.open(path)) return false;
     log_book_heap("after-zip");
@@ -319,12 +320,16 @@ bool EpubBook::open(const char *path)
     }
     _opf_base = dirname_of(_opf_path);
     if (!parse_opf(opf) || _spine.empty()) {
+        if (_metadata_budget.exceeded) _last_error="Book navigation exceeds metadata memory limit";
         ESP_LOGE(TAG, "opf parse failed: %s", _opf_path.c_str());
         close();
         return false;
     }
     log_book_heap("before-toc");
     load_toc();
+    if (_metadata_budget.exceeded) {
+        _last_error="Book navigation exceeds metadata memory limit"; close(); return false;
+    }
     log_book_heap("after-toc");
 
     if (title.empty()) title = _path;
@@ -344,10 +349,11 @@ void EpubBook::close()
     _ncx_path.clear();
     _nav_path.clear();
     _cover_image_href.clear();
-    _manifest_by_id.clear();
-    _spine_index_by_href.clear();
-    _spine.clear();
-    _toc.clear();
+    metadata_memory::release(_manifest_by_id);
+    metadata_memory::release(_spine_index_by_href);
+    metadata_memory::release(_spine);
+    metadata_memory::release(_toc);
+    _metadata_budget={};
     _zip.close();
 }
 
@@ -411,6 +417,7 @@ bool EpubBook::parse_opf(const std::string &xml)
             item.media_type = attr_value(attrs, "media-type");
             item.properties = attr_value(attrs, "properties");
             if (!item.id.empty() && !item.href.empty()) {
+                if (!_metadata_budget.add(_manifest_by_id.size(),sizeof(item),{item.id.size(),item.href.size(),item.media_type.size(),item.properties.size()})) return false;
                 _manifest_by_id[item.id] = item;
                 if (contains_word(item.properties, "nav")) _nav_path = item.href;
                 if (item.id == cover_item_id || contains_word(item.properties, "cover-image")) {
@@ -470,6 +477,7 @@ bool EpubBook::parse_opf(const std::string &xml)
         sp.media_type = mi.media_type;
         EpubZip::Entry entry;
         if (_zip.entry_info(sp.href, &entry)) sp.uncompressed_size = entry.uncompressed_size;
+        if (!_metadata_budget.add(_spine.size(),sizeof(sp),{sp.id.size(),sp.href.size(),sp.media_type.size()})) return false;
         _spine.push_back(sp);
     }
 
@@ -558,6 +566,7 @@ bool EpubBook::parse_ncx_toc(const std::string &xml, const std::string &toc_path
                     item.href = href;
                     item.spine_index = spine;
                     item.depth = depth;
+                    if (!_metadata_budget.add(_toc.size(),sizeof(item),{item.title.size(),item.href.size()})) return false;
                     _toc.push_back(item);
                 }
                 if (!tag_has_closing_slash(tag)) depth++;
@@ -646,6 +655,7 @@ bool EpubBook::parse_nav_toc(const std::string &xhtml, const std::string &toc_pa
                     item.href = href;
                     item.spine_index = spine;
                     item.depth = std::max(0, list_depth - 1);
+                    if (!_metadata_budget.add(_toc.size(),sizeof(item),{item.title.size(),item.href.size()})) return false;
                     _toc.push_back(item);
                 }
             }
@@ -763,18 +773,22 @@ bool EpubBook::load_metadata_cache(const char *source_path)
         !reader.string(&cached_nav_path) || !reader.string(&cached_cover_href) ||
         !reader.u32(&spine_count_value) || spine_count_value == 0 || spine_count_value > 100000) return false;
 
-    std::vector<EpubSpineItem> cached_spine;
+    metadata_memory::Budget budget;
+    if (!metadata_memory::Budget::reserve_allowed(spine_count_value,sizeof(EpubSpineItem))) return false;
+    metadata_memory::Vector<EpubSpineItem> cached_spine;
     cached_spine.reserve(spine_count_value);
     for (uint32_t i = 0; i < spine_count_value; ++i) {
         EpubSpineItem item;
         if (!reader.string(&item.id) || !reader.string(&item.href) ||
             !reader.string(&item.media_type) || !reader.u32(&item.uncompressed_size) ||
             item.href.empty()) return false;
+        if (!budget.add(cached_spine.size(),sizeof(item),{item.id.size(),item.href.size(),item.media_type.size()})) return false;
         cached_spine.push_back(std::move(item));
     }
 
     if (!reader.u32(&toc_count_value) || toc_count_value > 100000) return false;
-    std::vector<EpubTocItem> cached_toc;
+    if (!metadata_memory::Budget::reserve_allowed(toc_count_value,sizeof(EpubTocItem))) return false;
+    metadata_memory::Vector<EpubTocItem> cached_toc;
     cached_toc.reserve(toc_count_value);
     for (uint32_t i = 0; i < toc_count_value; ++i) {
         EpubTocItem item;
@@ -784,6 +798,7 @@ bool EpubBook::load_metadata_cache(const char *source_path)
             spine_index >= spine_count_value || depth > 1000) return false;
         item.spine_index = (int)spine_index;
         item.depth = (int)depth;
+        if (!budget.add(cached_toc.size(),sizeof(item),{item.title.size(),item.href.size()})) return false;
         cached_toc.push_back(std::move(item));
     }
     if (!reader.done()) return false;
@@ -794,6 +809,7 @@ bool EpubBook::load_metadata_cache(const char *source_path)
     _ncx_path = std::move(cached_ncx_path);
     _nav_path = std::move(cached_nav_path);
     _cover_image_href = std::move(cached_cover_href);
+    _metadata_budget=budget;
     _spine.swap(cached_spine);
     _toc.swap(cached_toc);
     rebuild_spine_index();
@@ -901,4 +917,12 @@ bool EpubBook::brief_metadata(const char *path,std::string *book_title,std::stri
         at=end+1;
     }
     return !book_title->empty() || !author->empty();
+}
+
+void EpubBook::take_navigation(metadata_memory::Vector<EpubSpineItem>& spine,
+                               metadata_memory::Vector<EpubTocItem>& toc)
+{
+    spine=std::move(_spine); toc=std::move(_toc);
+    metadata_memory::release(_manifest_by_id);
+    metadata_memory::release(_spine_index_by_href);
 }

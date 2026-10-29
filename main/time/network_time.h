@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdint.h>
+#include <stdbool.h>
 #include "esp_err.h"
 
 #ifdef __cplusplus
@@ -14,6 +15,9 @@ esp_err_t network_time_sync(uint32_t timeout_ms);
 esp_err_t network_time_set_manual(const char *local_datetime);
 // Nonblocking IP-event hook. Starts at most one automatic attempt per boot.
 void network_time_on_connected(void);
+bool network_time_busy(void);
+bool network_time_try_pause(void);
+void network_time_resume(void);
 
 #ifdef __cplusplus
 }

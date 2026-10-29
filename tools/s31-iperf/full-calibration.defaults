@@ -1,0 +1,4 @@
+# Compared with PhyTrack, bypass cached RF calibration without erasing NVS.
+# IDF phy_init.c uses PHY_RF_CAL_FULL and performs no calibration NVS I/O
+# when this option is disabled. Existing stored calibration remains intact.
+# CONFIG_ESP_PHY_CALIBRATION_AND_DATA_STORAGE is not set

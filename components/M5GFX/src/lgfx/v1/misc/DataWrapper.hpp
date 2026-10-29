@@ -24,6 +24,10 @@ Contributors:
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>
+#include <stdio.h>
+// FILE-backed wrappers must not depend on a caller's include order. Without
+// stdio here some translation units select the no-op void wrapper, producing
+// conflicting class/vtable definitions and file decoders that always read 0.
 #include "../../utility/pgmspace.h"
 
 namespace lgfx
@@ -100,7 +104,8 @@ namespace lgfx
 
 //----------------------------------------------------------------------------
 
-#if defined (__FILE_defined) || defined (_FILE_DEFINED) || defined (_FSTDIO)
+// IDF 6's Picolibc provides FILE but does not define Newlib's guard macros.
+#if defined (__FILE_defined) || defined (_FILE_DEFINED) || defined (_FSTDIO) || defined (__PICOLIBC__)
   template <>
   struct DataWrapperT<FILE> : public DataWrapper
   {
@@ -124,7 +129,7 @@ namespace lgfx
     int read(uint8_t *buf, uint32_t len) override { return fread((char*)buf, 1, len, _fp); }
     void skip(int32_t offset) override { seek(offset, SEEK_CUR); }
     bool seek(uint32_t offset) override { return seek(offset, SEEK_SET); }
-    bool seek(uint32_t offset, int origin) { return fseek(_fp, offset, origin); }
+    bool seek(uint32_t offset, int origin) { return fseek(_fp, offset, origin) == 0; }
     void close(void) override { if (_fp) { fclose(_fp); _fp = nullptr; } }
     int32_t tell(void) override { return ftell(_fp); }
   protected:

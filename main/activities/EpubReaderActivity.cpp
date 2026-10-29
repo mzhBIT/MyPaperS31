@@ -20,6 +20,7 @@
 #include "renderer/TurboJpegDecoder.h"
 #include "storage/app_paths.h"
 #include "ui/SystemFont.h"
+#include "ui/ReaderHeader.h"
 #include "ui/UiLocale.h"
 #include "ui/reader_background.h"
 #include "weread/WereadApi.h"
@@ -53,7 +54,7 @@
 #include <vector>
 
 static const char *TAG = "REFLOW_READER";
-static const int TOP_H = 50;
+static const int TOP_H = reader_header::height;
 static const uint32_t EPUB_PROGRESS_MAGIC = 0x45504231; // EPB1
 static const uint32_t EPUB_PROGRESS_VERSION = 2;
 static const uint32_t MOBI_PROGRESS_MAGIC = 0x4d4f4231; // MOB1
@@ -428,6 +429,7 @@ public:
         flush_progress(true);
         release_runtime_cache();
         g_epub.close();
+        reader_text_renderer().releaseFontStreamCache();
     }
 
     void on_create() override
@@ -463,6 +465,13 @@ public:
         _weread_session.allow_io(false);
         _reading_timer.pause(); _auto_page.reset();
     }
+    bool can_standby() const override { return _annotation_task == nullptr; }
+    void on_standby_resume() override {
+        _weread_visible = true;
+        _weread_last_tick_us = esp_timer_get_time();
+        if (!g_epub.is_weread()) _reading_timer.resume();
+        _auto_page.reset();
+    }
 
     void loop() override
     {
@@ -482,6 +491,15 @@ public:
         poll_annotation_worker();
         start_pending_annotation_fetch();
         run_page_prefetch();
+        if (header_visible() && !_overlay.visible() && !_footnote_popup_visible &&
+            !M5.Display.displayBusy() && !_prefetch.pending)
+            reader_header::update_clock(_header_clock);
+    }
+
+    bool on_navigation_key(int direction) override { return on_key(direction < 0 ? APP_KEY_UP : APP_KEY_DOWN); }
+    bool on_cover_home_key() override { return on_key(APP_KEY_BACK); }
+    bool on_reader_menu_key() override {
+        return on_key(_overlay.visible() ? APP_KEY_BACK : APP_KEY_READER_MENU);
     }
 
     bool on_key(int key) override
@@ -506,8 +524,8 @@ public:
             ActivityManager::instance().pop();
             return true;
         }
-        if (key == APP_KEY_EXTRA) {
-            _overlay.open(ReaderOverlay::Tab::Chapters);
+        if (key == APP_KEY_EXTRA || key == APP_KEY_READER_MENU) {
+            _overlay.open(key == APP_KEY_READER_MENU ? ReaderOverlay::Tab::Settings : ReaderOverlay::Tab::Chapters);
             _overlay.redraw();
             return true;
         }
@@ -647,7 +665,7 @@ private:
         const auto &title = g_epub.toc_item(index).title;
         auto *reader = static_cast<EpubReaderActivity *>(context);
         return reader && reader->_script_mode != script_conversion::Mode::Original
-            ? script_conversion::convert(title, reader->_script_mode).text : title;
+            ? script_conversion::convert(title, reader->_script_mode).text : std::string(title);
     }
 
     static int overlay_chapter_depth(void *, int index)
@@ -825,6 +843,7 @@ private:
     reader_writing_mode::Mode _writing_override = reader_writing_mode::Mode::Auto;
     bool _seen_show = false;
     BookReadingTimer _reading_timer;
+    std::string _header_clock;
     int _spine_index = 0;
     int _page_index = 0;
     int _page_count = 0;
@@ -3191,19 +3210,16 @@ private:
     void draw_topbar(lgfx::LGFXBase &gfx, int w, int target_spine = -1)
     {
         if (!header_visible()) return;
-        gfx.fillRect(0, 0, w, TOP_H, TFT_WHITE);
-        gfx.setTextColor(TFT_BLACK, TFT_WHITE);
-
         std::string title = _ok ? short_title(g_epub.title) : ui_locale::text(ui_locale::TextId::DocumentOpenFailed);
-        system_font::draw_center(gfx, system_font::ellipsize(title, w - 180), w / 2, 3);
-
+        std::string progress;
         if (_ok) {
             char pg[32];
             snprintf(pg, sizeof(pg), "%d/%d",
                      (target_spine >= 0 ? target_spine : _spine_index) + 1,
                      g_epub.spine_count());
-            system_font::draw_right(gfx, pg, w - 5, 3);
+            progress = pg;
         }
+        reader_header::draw(gfx, w, title, progress);
     }
 
     void draw_topbar(int w)

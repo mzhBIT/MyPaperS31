@@ -10,6 +10,8 @@ set(srcs
     "time/network_time.cpp"
     "input/adc_keys.cpp"
     "input/touch_input.cpp"
+    "ui/ControlCenter.cpp"
+    "ui/ControlCenter.cpp"
     "ime/PinyinEngine.cpp"
     "deepseek/DeepSeekConfig.cpp"
     "deepseek/DeepSeekSessionStore.cpp"

@@ -1,4 +1,5 @@
 #pragma once
+#include "memory/MetadataAllocator.h"
 
 #include "parser/epub_parser.h"
 #include "parser/fb2_parser.h"
@@ -11,19 +12,8 @@
 #include <string>
 #include <vector>
 
-struct ReflowSectionItem {
-    std::string id;
-    std::string href;
-    std::string media_type;
-    uint32_t uncompressed_size = 0;
-};
-
-struct ReflowTocItem {
-    std::string title;
-    std::string href;
-    int spine_index = -1;
-    int depth = 0;
-};
+using ReflowSectionItem = EpubSpineItem;
+using ReflowTocItem = EpubTocItem;
 
 class ReflowBook {
 public:
@@ -89,6 +79,6 @@ private:
     weread::Book _weread_book;
     std::vector<weread::Chapter> _weread_chapters;
     int _weread_active_chapter = -1;
-    std::vector<ReflowSectionItem> _sections;
-    std::vector<ReflowTocItem> _toc;
+    metadata_memory::Vector<ReflowSectionItem> _sections;
+    metadata_memory::Vector<ReflowTocItem> _toc;
 };

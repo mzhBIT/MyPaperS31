@@ -148,6 +148,7 @@ void chat_task(void *argument)
 
 class DeepSeekActivity final : public Activity {
 public:
+    bool can_standby() const override { return !_busy; }
     ~DeepSeekActivity() override
     {
         release_wifi();

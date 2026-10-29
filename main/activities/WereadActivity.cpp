@@ -841,6 +841,8 @@ public:
     }
 
     bool allow_system_back() const override { return !_busy; }
+    bool allow_system_home() const override { return !_busy; }
+    bool can_standby() const override { return !_busy; }
 
 private:
     enum class View { Loading, Login, Shelf, Catalog, Reviews, ReviewDetail, Error, OfflineNotice };
