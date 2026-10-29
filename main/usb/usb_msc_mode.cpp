@@ -3,6 +3,7 @@
 #include "input/touch_input.h"
 #include "storage/storage_sdcard.h"
 #include "ui/SystemFont.h"
+#include "ui/AppStatusBar.h"
 #include "ui/UiLocale.h"
 #include "usb/usb_transfer_boot.h"
 
@@ -34,6 +35,7 @@
 namespace {
 
 const char *TAG = "USB_MSC";
+app_status_bar::State s_status_bar;
 
 enum class UiState : uint8_t {
     Waiting,
@@ -126,8 +128,7 @@ void draw_page()
     M5.Display.setEpdMode(epd_mode_t::epd_text);
     M5.Display.fillScreen(TFT_WHITE);
     M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-    system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::UsbTransfer), w / 2, 28, TFT_BLACK);
-    M5.Display.drawFastHLine(0, 28 + line_h + 12, w, TFT_BLACK);
+    s_status_bar.draw(ui_locale::text(ui_locale::TextId::UsbTransfer));
 
     system_font::draw_center(M5.Display, state_text(s_state.load(std::memory_order_acquire)),
                              w / 2, 170, TFT_BLACK);

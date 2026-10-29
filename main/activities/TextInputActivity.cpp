@@ -5,6 +5,7 @@
 #include "ime/PinyinEngine.h"
 #include "ui/SystemFont.h"
 #include "ui/HeaderLayout.h"
+#include "ui/AppStatusBar.h"
 #include "ui/TextCursorView.h"
 #include "ui/UiLocale.h"
 #include "ui/Utf8Text.h"
@@ -58,6 +59,9 @@ public:
     }
 
     void on_create() override { redraw(); }
+    void loop() override {
+        if (_options.unified_status_bar) _status_bar.refresh(_options.title.c_str());
+    }
 
     bool on_touch(const TouchEvent &event) override
     {
@@ -66,7 +70,7 @@ public:
             return true;
         }
         if (event.type != TouchEventType::Tap) return false;
-        if (header_layout::left_hit(event.x, event.y, 130)) {
+        if (!_options.unified_status_bar && header_layout::left_hit(event.x, event.y, 130)) {
             ActivityManager::instance().pop();
             return true;
         }
@@ -151,6 +155,7 @@ public:
     }
 
 private:
+    app_status_bar::State _status_bar;
     TextInputOptions _options;
     TextInputCallback _callback;
     ui::VirtualKeyboard _keyboard;
@@ -320,12 +325,17 @@ private:
             _committed = _keyboard.text();
         }
         std::string result = _committed + _options.fixed_suffix;
+        if (_options.validate) {
+            _message=_options.validate(result);
+            if (!_message.empty()) { redraw(); return; }
+        }
         if (_callback) _callback(result);
         ActivityManager::instance().pop();
     }
 
     void draw_header()
     {
+        if (_options.unified_status_bar) { _status_bar.draw(_options.title); return; }
         int width = M5.Display.width();
         M5.Display.fillRect(0, 0, width, HEADER_H, TFT_WHITE);
         system_font::draw_left(M5.Display, "<", 18, header_layout::text_y(), TFT_BLACK);
@@ -420,7 +430,7 @@ private:
         _keyboard.draw(M5.Display);
         draw_candidates();
         if (!_message.empty()) {
-            system_font::draw_center(M5.Display, _message, M5.Display.width() / 2, 962, TFT_BLACK);
+            system_font::draw_center(M5.Display, system_font::ellipsize(_message,M5.Display.width()-48), M5.Display.width() / 2, 962, TFT_BLACK);
         }
         M5.Display.display();
         M5.Display.endWrite();

@@ -2,6 +2,7 @@
 #include "activities/ActivityManager.h"
 #include "activities/RssReaderActivity.h"
 #include "activities/ReaderBackgroundPickerActivity.h"
+#include "activities/TextInputActivity.h"
 #include "activities/ReaderOverlay.h"
 #include "ui/ReaderAutoPage.h"
 #include "ui/ReaderPageAnimation.h"
@@ -14,6 +15,7 @@
 #include "storage/app_paths.h"
 #include "ui/SystemFont.h"
 #include "ui/HeaderLayout.h"
+#include "ui/AppStatusBar.h"
 #include "ui/UiLocale.h"
 #include "ui/reader_background.h"
 #include "renderer/ReaderPageBuffer.h"
@@ -21,6 +23,8 @@
 #include "utils/CooperativeYield.h"
 #include "wifi/wifi_setting.h"
 #include "rss/RssHttpPolicy.h"
+#include "rss/FeedStore.h"
+#include "ui/ListFocus.h"
 
 #include <M5Unified.h>
 #include <esp_crt_bundle.h>
@@ -84,8 +88,8 @@ static void log_feed_dns(const std::string& url)
     (void)url;
 #endif
 }
-static const int TOP_H = header_layout::height;
-static const int ARTICLE_TOP_H = 50;
+static const int TOP_H = app_status_bar::height;
+static const int ARTICLE_TOP_H = app_status_bar::height;
 static const int FEED_ROW_H = 78;
 static const int NEWS_ROW_H = 150;
 static const int PAD = 12;
@@ -101,10 +105,7 @@ struct RssImageRef {
     int height = 0;
 };
 
-struct RssFeed {
-    std::string title;
-    std::string url;
-};
+using RssFeed = rss_feeds::Feed;
 
 struct RssItem {
     std::string title;
@@ -1080,26 +1081,12 @@ static bool parse_bing_wallpaper_items(const std::string &json, std::vector<RssI
 static void load_feeds()
 {
     g_feeds.clear();
-    FILE *fp = std::fopen(RSS_CONFIG_PATH, "rb");
-    if (fp) {
-        char line[384];
-        while (std::fgets(line, sizeof(line), fp)) {
-            std::string s = trim_copy(line);
-            if (s.empty() || s[0] == '#') continue;
-            size_t bar = s.find('|');
-            RssFeed feed;
-            if (bar == std::string::npos) {
-                feed.title = s;
-                feed.url = s;
-            } else {
-                feed.title = trim_copy(s.substr(0, bar));
-                feed.url = trim_copy(s.substr(bar + 1));
-            }
-            if (!feed.url.empty()) g_feeds.push_back(feed);
-        }
-        std::fclose(fp);
+    const auto loaded=rss_feeds::load(RSS_CONFIG_PATH,g_feeds);
+    if (loaded==rss_feeds::Load::Error) {
+        g_status=ui_locale::text(ui_locale::TextId::FeedLoadFailed);
+        return;
     }
-    if (g_feeds.empty()) {
+    if (loaded==rss_feeds::Load::Missing) {
         g_feeds.push_back({ui_locale::text(ui_locale::TextId::FeedItHome), "https://www.ithome.com/rss"});
         g_feeds.push_back({ui_locale::text(ui_locale::TextId::FeedZaobaoChina), "https://plink.anyfeeder.com/zaobao/realtime/china"});
         g_feeds.push_back({ui_locale::text(ui_locale::TextId::FeedZaobaoWorld), "https://plink.anyfeeder.com/zaobao/realtime/world"});
@@ -1161,6 +1148,7 @@ public:
     void on_show() override
     {
         _auto_page.reset();
+        if (_pending_feed_url) return; // Open the next editor after the first pops.
         if (!_seen_show) {
             _seen_show = true;
             return;
@@ -1176,6 +1164,11 @@ public:
 
     void loop() override
     {
+        if (_pending_feed_url) {
+            _pending_feed_url=false;
+            edit_feed(FeedEdit::AddUrl);
+            return;
+        }
         poll_article_image_loader();
         run_article_prefetch();
         const bool allowed = _view == View::Article && !_reader_overlay.visible() &&
@@ -1185,6 +1178,9 @@ public:
         if (_auto_page.due(esp_timer_get_time(), reader_auto_page_seconds(ReaderProfile::Rss), allowed)) {
             next_article_page();
         }
+        if ((_view != View::Article || article_header_visible() || _reader_overlay.visible()) &&
+            !_confirm_wallpaper_save && _feed_menu==FeedMenu::None)
+            _status_bar.refresh(status_title());
     }
 
     bool can_standby() const override { return !_image_load_busy; }
@@ -1199,6 +1195,8 @@ public:
     bool on_key(int key) override
     {
         _auto_page.reset();
+        if (_feed_menu!=FeedMenu::None) return feed_menu_key(key);
+        if (_view==View::Feeds && key==APP_KEY_EXTRA) { edit_feed(FeedEdit::AddName); return true; }
         if (_view == View::Article) return article_key(key);
         if (key == APP_KEY_BACK) {
             if (_view == View::Items) {
@@ -1235,6 +1233,7 @@ public:
     bool on_touch(const TouchEvent &event) override
     {
         _auto_page.reset();
+        if (_feed_menu!=FeedMenu::None) return feed_menu_touch(event);
         if (_view == View::Article && _reader_overlay.visible()) {
             handle_reader_overlay_action(_reader_overlay.on_touch(event));
             return true;
@@ -1255,10 +1254,23 @@ public:
             return true;
         }
 
-        if (event.type == TouchEventType::Tap &&
-            header_layout::left_hit(event.x, event.y, 140,
+        if (_view==View::Feeds) {
+            if (event.type==TouchEventType::Tap && feed_add_rect().contains(event.x,event.y)) {
+                edit_feed(FeedEdit::AddName); return true;
+            }
+            if (event.type==TouchEventType::LongPress) {
+                const int index=hit_row(event.y);
+                if(index>=0) {
+                    g_focus=_editing_feed=index;
+                    _feed_menu=FeedMenu::Actions; _feed_menu_focus=0; redraw_list();
+                }
+                return true;
+            }
+        }
+
+        if (event.type == TouchEventType::Tap && header_layout::contains(event.y,
                 _view == View::Article ? article_header_height() : TOP_H)) {
-            on_key(APP_KEY_BACK);
+            // Clock and state icons are not invisible back/page buttons.
             return true;
         }
 
@@ -1290,8 +1302,7 @@ public:
             int w = M5.Display.width();
             const auto tap=reader_tap_action(event.x,event.y,w,M5.Display.height());
             if (!tap.page) {
-                _reader_overlay.open(ReaderOverlay::Tab::Settings);
-                _reader_overlay.redraw();
+                open_reader_settings();
             } else {
                 _swipe_animation=tap.animation;
                 if (tap.page>0) next_article_page(); else prev_article_page();
@@ -1322,6 +1333,131 @@ public:
 
 private:
     enum class View { Feeds, Items, Article };
+    enum class FeedEdit {AddName,AddUrl,Name,Url};
+    enum class FeedMenu {None,Actions,Delete};
+    FeedMenu _feed_menu=FeedMenu::None;
+    int _feed_menu_focus=0,_editing_feed=-1;
+    std::string _new_feed_name;
+    bool _pending_feed_url=false;
+    app_status_bar::State _status_bar;
+    const char* status_title()const {
+        return ui_locale::text(_view==View::Feeds ? ui_locale::TextId::RssFeeds :
+            _current_feed_is_bing ? ui_locale::TextId::FeedBingWallpaper : ui_locale::TextId::RssNews);
+    }
+
+    app_status_bar_layout::Rect feed_add_rect()const {
+        return {M5.Display.width()-88,M5.Display.height()-80,72,64};
+    }
+    int list_bottom()const { return M5.Display.height()-(_view==View::Feeds ? 84 : 0); }
+    bool apply_feeds(std::vector<RssFeed> updated,int focus) {
+        if(!rss_feeds::save(RSS_CONFIG_PATH,updated)) {
+            g_status=ui_locale::text(ui_locale::TextId::FeedSaveFailed); return false;
+        }
+        g_feeds.swap(updated);
+        g_focus=std::clamp(focus,0,std::max(0,int(g_feeds.size())-1));
+        ensure_focus_visible();
+        _feed_focus=g_focus; _feed_scroll=g_scroll;
+        g_status=ui_locale::text(ui_locale::TextId::FeedSaved);
+        return true;
+    }
+    void edit_feed(FeedEdit kind) {
+        if(kind==FeedEdit::AddName) { _editing_feed=-1; _new_feed_name.clear(); }
+        const bool name=kind==FeedEdit::AddName || kind==FeedEdit::Name;
+        const bool adding=kind==FeedEdit::AddName || kind==FeedEdit::AddUrl;
+        if(!adding && (_editing_feed<0 || _editing_feed>=int(g_feeds.size())))return;
+        _feed_menu=FeedMenu::None;
+        TextInputOptions options;
+        options.title=ui_locale::text(name ? ui_locale::TextId::FeedName : ui_locale::TextId::FeedAddress);
+        options.initial_text=adding ? (name ? "" : "https://") :
+            name ? g_feeds[_editing_feed].title : g_feeds[_editing_feed].url;
+        options.max_bytes=name ? rss_feeds::name_limit : rss_feeds::url_limit;
+        options.start_in_chinese=name;
+        options.unified_status_bar=true;
+        options.validate=[this,name,adding](const std::string& input)->std::string {
+            const auto value=rss_feeds::trim(input);
+            if(name && !rss_feeds::valid_name(value))return ui_locale::text(ui_locale::TextId::FeedNameInvalid);
+            if(!name) {
+                if(!rss_feeds::valid_url(value))return ui_locale::text(ui_locale::TextId::FeedAddressInvalid);
+                if(rss_feeds::duplicate_url(g_feeds,value,adding ? -1 : _editing_feed))
+                    return ui_locale::text(ui_locale::TextId::FeedAddressDuplicate);
+            }
+            return {};
+        };
+        launch_text_input(options,[this,kind](const std::string& input) {
+            const auto value=rss_feeds::trim(input);
+            if(kind==FeedEdit::AddName) { _new_feed_name=value; _pending_feed_url=true; return; }
+            auto updated=g_feeds;
+            if(kind==FeedEdit::AddUrl) {
+                updated.push_back({_new_feed_name,value});
+                apply_feeds(std::move(updated),int(g_feeds.size()));
+            } else if(_editing_feed>=0 && _editing_feed<int(updated.size())) {
+                if(kind==FeedEdit::Name)updated[_editing_feed].title=value;
+                else updated[_editing_feed].url=value;
+                apply_feeds(std::move(updated),_editing_feed);
+            }
+        });
+    }
+    int feed_menu_count()const {return _feed_menu==FeedMenu::Delete ? 2 : 4;}
+    int feed_menu_row_height()const {return std::max(64,system_font::line_height()+24);}
+    int feed_menu_header_height()const {return 2*system_font::line_height()+32;}
+    app_status_bar_layout::Rect feed_menu_rect()const {
+        const int height=feed_menu_header_height()+feed_menu_count()*feed_menu_row_height()+16;
+        return {48,std::max(TOP_H+16,(int(M5.Display.height())-height)/2),int(M5.Display.width())-96,height};
+    }
+    app_status_bar_layout::Rect feed_menu_row(int index)const {
+        const auto r=feed_menu_rect();
+        return {r.x+16,r.y+feed_menu_header_height()+index*feed_menu_row_height(),r.w-32,feed_menu_row_height()};
+    }
+    void draw_feed_menu() {
+        if(_feed_menu==FeedMenu::None || _editing_feed<0 || _editing_feed>=int(g_feeds.size()))return;
+        const auto r=feed_menu_rect();
+        M5.Display.fillRoundRect(r.x,r.y,r.w,r.h,8,TFT_WHITE);
+        M5.Display.drawRoundRect(r.x,r.y,r.w,r.h,8,TFT_BLACK);
+        const auto title=_feed_menu==FeedMenu::Delete ?
+            std::string(ui_locale::text(ui_locale::TextId::DeleteFeedQuestion)) :
+            std::string(ui_locale::text(ui_locale::TextId::RssFeeds));
+        system_font::draw_center(M5.Display,system_font::ellipsize(title,r.w-32),M5.Display.width()/2,r.y+12);
+        system_font::draw_center(M5.Display,system_font::ellipsize(g_feeds[_editing_feed].title,r.w-32),
+            M5.Display.width()/2,r.y+system_font::line_height()+20);
+        for(int i=0;i<feed_menu_count();++i) {
+            const auto row=feed_menu_row(i);
+            using ui_locale::TextId;
+            const TextId actions[]={TextId::EditFeedName,TextId::EditFeedAddress,TextId::Delete,TextId::Cancel};
+            const auto id=_feed_menu==FeedMenu::Delete ? (i==0 ? TextId::Delete : TextId::Cancel) : actions[i];
+            list_focus::draw(M5.Display,row.x,row.y,row.h,i==_feed_menu_focus);
+            system_font::draw_left(M5.Display,system_font::ellipsize(ui_locale::text(id),row.w-40),
+                row.x+list_focus::text_inset(),row.y+(row.h-system_font::line_height())/2);
+            M5.Display.drawFastHLine(row.x,row.y+row.h-1,row.w,TFT_BLACK);
+        }
+    }
+    void choose_feed_menu() {
+        if(_feed_menu==FeedMenu::Actions) {
+            if(_feed_menu_focus<2) {edit_feed(_feed_menu_focus==0 ? FeedEdit::Name : FeedEdit::Url);return;}
+            if(_feed_menu_focus==2) {_feed_menu=FeedMenu::Delete;_feed_menu_focus=1;redraw_list();return;}
+        } else if(_feed_menu==FeedMenu::Delete && _feed_menu_focus==0 &&
+                  _editing_feed>=0 && _editing_feed<int(g_feeds.size())) {
+            auto updated=g_feeds; updated.erase(updated.begin()+_editing_feed);
+            apply_feeds(std::move(updated),_editing_feed);
+        }
+        _feed_menu=FeedMenu::None;redraw_list();
+    }
+    bool feed_menu_key(int key) {
+        if(key==APP_KEY_BACK) {_feed_menu=FeedMenu::None;redraw_list();}
+        else if(key==APP_KEY_UP || key==APP_KEY_DOWN) {
+            _feed_menu_focus=(_feed_menu_focus+(key==APP_KEY_UP ? feed_menu_count()-1 : 1))%feed_menu_count();
+            redraw_list();
+        } else if(key==APP_KEY_OK)choose_feed_menu();
+        return true;
+    }
+    bool feed_menu_touch(const TouchEvent& event) {
+        if(event.type==TouchEventType::Back)return feed_menu_key(APP_KEY_BACK);
+        if(event.type!=TouchEventType::Tap)return true;
+        if(!feed_menu_rect().contains(event.x,event.y))return feed_menu_key(APP_KEY_BACK);
+        for(int i=0;i<feed_menu_count();++i)if(feed_menu_row(i).contains(event.x,event.y)) {
+            _feed_menu_focus=i;choose_feed_menu();break;
+        }
+        return true;
+    }
 
     struct ArticleImageLoadResult {
         uint32_t generation = 0;
@@ -1364,6 +1500,15 @@ private:
 
     bool rss_cache_enabled() const {
         return MYPAPER_EPD_USE_2D_ENGINE && !M5.Display.getPanel()->getDither();
+    }
+    void open_reader_settings() {
+        _reader_overlay.open(ReaderOverlay::Tab::Settings);
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(epd_mode_t::epd_fast);
+        draw_topbar(status_title());
+        _reader_overlay.draw();
+        M5.Display.display();
+        M5.Display.endWrite();
     }
     void invalidate_article_frame() {
         _article_frames.clear();
@@ -1960,7 +2105,8 @@ private:
         M5.Display.setEpdMode(epd_mode_t::epd_quality);
         M5.Display.fillScreen(TFT_WHITE);
         M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-        system_font::draw_center(M5.Display, title, M5.Display.width() / 2, 140);
+        _status_bar.draw(status_title());
+        system_font::draw_center(M5.Display, system_font::ellipsize(title,M5.Display.width()-48), M5.Display.width() / 2, 140);
         system_font::draw_center(M5.Display, msg, M5.Display.width() / 2, 210);
         M5.Display.display();
         M5.Display.endWrite();
@@ -1968,13 +2114,7 @@ private:
 
     void draw_topbar(const char *title)
     {
-        const int height = _view == View::Article ? ARTICLE_TOP_H : TOP_H;
-        const int text_y = _view == View::Article ? 3 : header_layout::text_y();
-        M5.Display.fillRect(0, 0, M5.Display.width(), height, TFT_WHITE);
-        M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-        system_font::draw_left(M5.Display, "<", 12, text_y, TFT_BLACK);
-        system_font::draw_center(M5.Display, title, M5.Display.width() / 2, text_y, TFT_BLACK);
-        M5.Display.drawFastHLine(0, height - 1, M5.Display.width(), TFT_BLACK);
+        _status_bar.draw(title);
     }
 
     bool article_header_visible() const
@@ -2116,7 +2256,7 @@ private:
 
     int visible_rows() const
     {
-        return std::max(1, ((int)M5.Display.height() - TOP_H - 6) / row_height());
+        return std::max(1, (list_bottom() - TOP_H - 6) / row_height());
     }
 
     void clamp_scroll()
@@ -2128,8 +2268,10 @@ private:
     int hit_row(int ty) const
     {
         int y0 = TOP_H;
-        if (ty < y0) return -1;
-        int idx = g_scroll + (ty - y0) / row_height();
+        if (ty < y0 || ty >= list_bottom()) return -1;
+        const int row=(ty-y0)/row_height();
+        if(row>=visible_rows())return -1;
+        int idx = g_scroll + row;
         return idx >= 0 && idx < item_count() ? idx : -1;
     }
 
@@ -2163,12 +2305,11 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_topbar(ui_locale::text(_view == View::Feeds ? ui_locale::TextId::RssFeeds
-                                                    : ui_locale::TextId::RssNews));
+        draw_topbar(status_title());
         int w = M5.Display.width();
         int y0 = TOP_H;
         int rh = row_height();
-        int vis = std::max(1, ((int)M5.Display.height() - y0) / rh);
+        int vis = visible_rows();
         for (int i = 0; i < vis; ++i) {
             int idx = g_scroll + i;
             int y = y0 + i * rh;
@@ -2200,9 +2341,21 @@ private:
                 system_font::draw_left(M5.Display, line, PAD + 12, y + 12);
             }
         }
-        if (!g_status.empty() && item_count() == 0) {
+        if (item_count() == 0) {
             M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
-            system_font::draw_center(M5.Display, g_status, w / 2, 180);
+            const std::string message=_view==View::Feeds &&
+                (g_status.empty() || g_status==ui_locale::text(ui_locale::TextId::FeedSaved)) ?
+                ui_locale::text(ui_locale::TextId::NoFeedsHint) : g_status;
+            system_font::draw_center(M5.Display, system_font::ellipsize(message,w-48), w / 2, 180);
+        }
+        if (_view==View::Feeds) {
+            const auto add=feed_add_rect();
+            system_font::draw_on_background(M5.Display,"+",add.x+(add.w-system_font::measure("+",48))/2,
+                system_font::centered_y("+",add.y+add.h/2,48),48,TFT_BLACK,TFT_WHITE);
+            if(!g_status.empty() && (!g_feeds.empty() || g_status==ui_locale::text(ui_locale::TextId::FeedSaved)))
+                system_font::draw_left(M5.Display,system_font::ellipsize(g_status,M5.Display.width()-132),
+                    PAD+12,M5.Display.height()-64);
+            draw_feed_menu();
         }
         M5.Display.display();
         M5.Display.endWrite();
@@ -2449,13 +2602,15 @@ private:
         int screen_h = M5.Display.height();
         // Match the file-manager image viewer: fit the complete wallpaper
         // inside the current logical screen instead of filling and cropping.
+        const int top=article_header_height();
+        const int content_h=std::max(1,screen_h-top);
         float scale = std::min((float)screen_w / (float)image.width,
-                               (float)screen_h / (float)image.height);
+                               (float)content_h / (float)image.height);
         if (scale <= 0.0f) scale = 1.0f;
         int draw_w = std::max(1, (int)((float)image.width * scale + 0.5f));
         int draw_h = std::max(1, (int)((float)image.height * scale + 0.5f));
         int x = std::max(0, (screen_w - draw_w) / 2);
-        int y = std::max(0, (screen_h - draw_h) / 2);
+        int y = top+std::max(0, (content_h - draw_h) / 2);
 
         bool ok = draw_article_image_file(M5.Display, image, x, y,
                                           draw_w, draw_h, scale);
@@ -2470,6 +2625,7 @@ private:
                                      screen_w / 2,
                                      screen_h / 2 - 18);
         }
+        if (article_header_visible() || _reader_overlay.visible()) draw_topbar(status_title());
         if (_confirm_wallpaper_save) draw_wallpaper_save_dialog();
         M5.Display.display();
         M5.Display.endWrite();
@@ -2810,7 +2966,7 @@ private:
             _article_frames.import(M5.Display, uint64_t(g_page + 1)));
         if (imported) ESP_LOGI(TAG, "redraw framebuffer hit page=%d", g_page + 1);
         if (!imported) reader_background_draw(M5.Display, M5.Display.width(), M5.Display.height(), ReaderProfile::Rss);
-        if (article_header_visible()) draw_topbar("RSS");
+        if (article_header_visible() || _reader_overlay.visible()) draw_topbar(status_title());
         if (!imported) draw_article_content(M5.Display, g_page);
         char pct[24];
         int pages = article_page_count();
@@ -2893,8 +3049,7 @@ private:
             }
         }
         if (key == APP_KEY_EXTRA) {
-            _reader_overlay.open(ReaderOverlay::Tab::Settings);
-            _reader_overlay.redraw();
+            open_reader_settings();
             return true;
         }
         if (key == APP_KEY_UP) {

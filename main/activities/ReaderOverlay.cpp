@@ -230,6 +230,7 @@ ReaderOverlay::Geometry ReaderOverlay::geometry() const
     Geometry g;
     g.x = screen_w / 100;
     g.y = screen_h * 10 / 100;
+    if (m_profile==ReaderProfile::Rss) g.y=std::max(g.y,80);
     g.w = screen_w * 98 / 100;
     const int bottom_gap = std::max(8, screen_h * 2 / 100);
     g.h = screen_h - g.y - bottom_gap;

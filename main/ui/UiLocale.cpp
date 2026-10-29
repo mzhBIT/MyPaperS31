@@ -789,7 +789,7 @@ constexpr Translation kText[] = {
     {"Standby wallpaper set", "已设置为待机壁纸", "已設為待機桌布"},
     {"Control Center", "控制中心", "控制中心"},
     {"Battery level", "电池电量", "電池電量"},
-    {"Free PSRAM", "剩余 PSRAM", "剩餘 PSRAM"},
+    {"Free PSRAM/SRAM", "剩余 PSRAM/SRAM", "剩餘 PSRAM/SRAM"},
     {"Wi-Fi protocol test", "Wi-Fi 协议测试", "Wi-Fi 協定測試"},
     {"Transfer active; switch after it finishes", "传输进行中，请完成后切换", "傳輸進行中，請完成後切換"},
     {"Transfer connection restarting", "传输连接正在重启", "傳輸連線正在重新啟動"},
@@ -805,6 +805,18 @@ constexpr Translation kText[] = {
     {"Report updates after upload/download", "上传或下载后可查看诊断报告", "上傳或下載後可查看診斷報告"},
     {"TX power limit", "发射功率上限", "發射功率上限"},
     {"Default", "默认", "預設"},
+    {"Subscription name", "订阅名称", "訂閱名稱"},
+    {"Subscription URL", "订阅地址", "訂閱網址"},
+    {"Edit name", "修改名称", "修改名稱"},
+    {"Edit URL", "修改订阅地址", "修改訂閱網址"},
+    {"Delete this subscription?", "删除此订阅源？", "刪除此訂閱來源？"},
+    {"Invalid subscription name", "名称格式不正确", "名稱格式不正確"},
+    {"Invalid subscription URL", "订阅地址格式不正确", "訂閱網址格式不正確"},
+    {"Subscription URL already exists", "订阅地址已存在", "訂閱網址已存在"},
+    {"Subscriptions saved", "订阅源已保存", "訂閱來源已儲存"},
+    {"Could not save subscriptions", "订阅源保存失败", "訂閱來源儲存失敗"},
+    {"Could not load subscriptions", "订阅源读取失败", "訂閱來源讀取失敗"},
+    {"No subscriptions. Tap + to add", "暂无订阅源，点击+添加", "暫無訂閱來源，點選+新增"},
 };
 static_assert(sizeof(kText) / sizeof(kText[0]) == static_cast<size_t>(TextId::Count));
 

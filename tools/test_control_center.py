@@ -33,6 +33,25 @@ struct Page : Activity {
 };
 '''
 program += source[start:end]
+shutdown_start = source.index('        if (_shutdown) {')
+shutdown_end = source.index('\n#endif', shutdown_start)
+program += r'''
+namespace mypaper::board::s31::standby {
+unsigned calls=0, requested_generation=0;
+void request_shutdown() {
+    auto& manager=ActivityManager::instance();
+    assert(!manager.has_overlay() && manager.can_standby());
+    requested_generation=manager.generation();
+    ++calls;
+}
+}
+struct ShutdownModal : Page {
+    bool _shutdown=true;
+    using Page::Page;
+    void loop() override {
+'''
+program += source[shutdown_start:shutdown_end]
+program += '\n    }\n};\n'
 program += r'''
 int main() {
     auto& am = ActivityManager::instance();
@@ -74,9 +93,18 @@ int main() {
     }
     am.pop_to_root();
     assert(tabs.destroy==50 && root.show==3 && am.depth()==1);
+    Counts shutdown;
+    assert(am.show_overlay(new ShutdownModal(shutdown)));
+    const auto before_shutdown=am.generation();
+    am.current()->loop(); // Request must survive overlay destruction/generation change.
+    assert(!am.has_overlay() && am.current()==page);
+    assert(shutdown.restore==1 && shutdown.destroy==1 && root.show==3);
+    assert(mypaper::board::s31::standby::calls==1);
+    assert(mypaper::board::s31::standby::requested_generation==am.generation());
+    assert(am.generation()>before_shutdown);
     am.pop();
     assert(root.destroy==1);
-    std::puts("Control center: modal lifecycle, restore/discard, root, edge gesture PASS");
+    std::puts("Control center: modal lifecycle, restore/discard, root, edge gesture, shutdown order PASS");
 }
 '''
 (out / 'test.cpp').write_text(program, encoding='utf-8')

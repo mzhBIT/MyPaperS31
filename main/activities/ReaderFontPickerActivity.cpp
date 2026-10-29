@@ -5,6 +5,7 @@
 #include "reader_style.h"
 #include "ui/SystemFont.h"
 #include "ui/HeaderLayout.h"
+#include "ui/AppStatusBar.h"
 #include "ui/UiLocale.h"
 
 #include <M5Unified.h>
@@ -50,6 +51,8 @@ class FontPickerActivity : public Activity {
 public:
     explicit FontPickerActivity(ReaderProfile profile = ReaderProfile::Shared) : m_profile(profile) {}
 private:
+    app_status_bar::State m_status_bar;
+    int top_height()const {return m_profile==ReaderProfile::Rss ? app_status_bar::height : TOP_H;}
     std::vector<std::string> m_fonts;
     int m_focus = 0;
     int m_scroll = 0;
@@ -97,7 +100,7 @@ private:
         if (found < 0) return;
 
         m_focus = found;
-        int rows = std::max(1, ((int)M5.Display.height() - TOP_H - 20) / ROW_H);
+        int rows = std::max(1, ((int)M5.Display.height() - top_height() - 20) / ROW_H);
         m_scroll = std::max(0, m_focus - rows / 2);
     }
 
@@ -105,7 +108,7 @@ private:
     {
         int w = M5.Display.width();
         int h = M5.Display.height();
-        int y0 = TOP_H;
+        int y0 = top_height();
         int rows = std::max(1, (h - y0 - 12) / ROW_H);
         int max_scroll = std::max(0, (int)m_fonts.size() - rows);
         m_scroll = std::min(std::max(0, m_scroll), max_scroll);
@@ -113,7 +116,8 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header(ui_locale::text(ui_locale::TextId::Fonts));
+        if(m_profile==ReaderProfile::Rss)m_status_bar.draw(ui_locale::text(ui_locale::TextId::Fonts));
+        else draw_header(ui_locale::text(ui_locale::TextId::Fonts));
 
         if (m_fonts.empty()) {
             M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
@@ -138,12 +142,12 @@ private:
     int visible_rows() const
     {
         int h = M5.Display.height();
-        return std::max(1, (h - TOP_H - 20) / ROW_H);
+        return std::max(1, (h - top_height() - 20) / ROW_H);
     }
 
     int hit_row(int y) const
     {
-        int y0 = TOP_H;
+        int y0 = top_height();
         if (y < y0) return -1;
         int idx = m_scroll + (y - y0) / ROW_H;
         return idx >= 0 && idx < (int)m_fonts.size() ? idx : -1;
@@ -172,6 +176,9 @@ public:
         load_fonts();
         focus_current_font();
         redraw();
+    }
+    void loop() override {
+        if(m_profile==ReaderProfile::Rss)m_status_bar.refresh(ui_locale::text(ui_locale::TextId::Fonts));
     }
 
     bool on_key(int key) override

@@ -6,6 +6,7 @@
 #include "activities/WifiTransferActivity.h"
 #include "ui/SystemFont.h"
 #include "ui/HeaderLayout.h"
+#include "ui/AppStatusBar.h"
 #include "ui/UiLocale.h"
 #include "usb/usb_transfer_boot.h"
 
@@ -16,7 +17,7 @@
 
 namespace {
 
-constexpr int HEADER_H = header_layout::height;
+constexpr int HEADER_H = app_status_bar::height;
 constexpr int PAD = 24;
 constexpr int ROW_GAP = 24;
 constexpr int FIRST_ROW_Y = HEADER_H;
@@ -27,6 +28,7 @@ class TransferActivity final : public Activity {
 public:
     explicit TransferActivity(bool usb = false) : _confirm_usb(usb) {}
     void on_create() override { draw(); }
+    void loop() override { _status_bar.refresh(status_title()); }
     void on_show() override
     {
         if (_shown) draw();
@@ -35,8 +37,7 @@ public:
 
     bool on_touch(const TouchEvent &event) override
     {
-        if (event.type == TouchEventType::Back ||
-            (event.type == TouchEventType::Tap && header_layout::left_hit(event.x, event.y, 120))) {
+        if (event.type == TouchEventType::Back) {
             ActivityManager::instance().pop();
             return true;
         }
@@ -104,6 +105,10 @@ public:
     }
 
 private:
+    app_status_bar::State _status_bar;
+    const char* status_title()const {
+        return ui_locale::text(_confirm_usb ? ui_locale::TextId::EnterUsbTransfer : ui_locale::TextId::Transfer);
+    }
     bool _shown = false;
     bool _confirm_usb = false;
     int _focus = 0;
@@ -140,10 +145,7 @@ private:
         M5.Display.setDither(false);
         M5.Display.setEpdMode(epd_mode_t::epd_text);
         M5.Display.fillScreen(TFT_WHITE);
-        system_font::draw_center(M5.Display, ui_locale::text(_confirm_usb ? ui_locale::TextId::EnterUsbTransfer
-                                                                          : ui_locale::TextId::Transfer),
-                                 w / 2, header_layout::text_y(), TFT_BLACK);
-        header_layout::draw_separator(M5.Display);
+        _status_bar.draw(status_title());
 
         if (!_confirm_usb) {
             draw_row(FIRST_ROW_Y, ui_locale::text(ui_locale::TextId::UsbTransfer),

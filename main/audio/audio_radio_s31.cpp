@@ -76,6 +76,10 @@ constexpr size_t OUTPUT_CHUNK_MAX = 512 * 1024;
 constexpr size_t WRITE_CHUNK_FRAMES = 512;
 constexpr uint32_t WORKER_STACK_BYTES = 12288;
 constexpr UBaseType_t WORKER_PRIORITY = 5;
+// RadioActivity raises the UI task to 10. Decoding/resampling and the blocking
+// I2S sink must run above it, otherwise a status redraw can exhaust the ~90 ms
+// DMA queue. The sink blocks on I2S regularly, leaving time for UI and IO.
+constexpr UBaseType_t NETWORK_AUDIO_PRIORITY = 12;
 // The BT/PA rail is switched on when the backend initializes, so the module
 // still has to boot before it accepts AT commands.  200 ms was demonstrably
 // too short (AT+RX=2 went unanswered); the reference board leaves the rail on
@@ -117,6 +121,9 @@ uint32_t s_hls_format = 0;
 wifi_ps_type_t s_network_previous_ps = WIFI_PS_NONE;
 bool s_network_restore_ps = false; // Protected by s_lock.
 std::atomic<bool> s_network_endpoint_logged{false};
+std::atomic<uint32_t> s_network_last_pcm_ms{0};
+uint32_t s_network_gap_log_ms = 0; // Owned by the network audio task.
+unsigned s_network_gap_count = 0;
 
 i2s_chan_handle_t s_tx = nullptr;
 i2s_chan_handle_t s_rx = nullptr;
@@ -935,11 +942,31 @@ int network_write(uint8_t *data, int length, void *)
     // Consume callbacks arriving during teardown without touching I2S.
     if (!s_network_write_enabled.load()) return length;
     if (!data || length <= 0 || length % 4) return -1;
-    return write_pcm(data, uint32_t(length / 4)) ? length : -1;
+    const uint32_t now = uint32_t(esp_timer_get_time() / 1000);
+    const uint32_t previous = s_network_last_pcm_ms.exchange(0);
+    const uint32_t dma_ms = CODEC_DMA_DESC_NUM * CODEC_DMA_FRAME_NUM * 1000 /
+                            s_output_rate.load();
+    // Time between callbacks excludes the previous blocking I2S write. This
+    // measures delayed PCM supply, not normal playback pacing or HTTP TS EOF.
+    if (previous && uint32_t(now - previous) >= dma_ms * 2 / 3) {
+        ++s_network_gap_count;
+        if (s_network_gap_count == 1 || uint32_t(now - s_network_gap_log_ms) >= 5000) {
+            ESP_LOGW(TAG, "radio PCM supply gap: %u ms DMA_capacity=%u ms gaps=%u task_prio=%u",
+                     unsigned(now - previous), unsigned(dma_ms), s_network_gap_count,
+                     unsigned(uxTaskPriorityGet(nullptr)));
+            s_network_gap_log_ms = now;
+        }
+    }
+    const bool ok = write_pcm(data, uint32_t(length / 4));
+    s_network_last_pcm_ms.store(uint32_t(esp_timer_get_time() / 1000));
+    return ok ? length : -1;
 }
 
 int network_prepare(esp_asp_handle_t *handle, void *)
 {
+    s_network_last_pcm_ms.store(0);
+    s_network_gap_log_ms = 0;
+    s_network_gap_count = 0;
     // The ASP callback passes its opaque handle directly (same API as P4).
     esp_gmf_pipeline_handle_t pipeline = nullptr;
     esp_gmf_element_handle_t rate = nullptr, channel = nullptr, bits = nullptr;
@@ -963,6 +990,8 @@ int network_event(esp_asp_event_pkt_t *event, void *)
 {
     if (!event || !event->payload || !s_network_active.load()) return 0;
     if (event->type == ESP_ASP_EVENT_TYPE_STATE) {
+        // Pauses, first playback and teardown are intentional supply gaps.
+        s_network_last_pcm_ms.store(0);
         const auto state = *static_cast<esp_asp_state_t *>(event->payload);
         if (state == ESP_ASP_STATE_RUNNING) s_state.store(AUDIO_PLAYBACK_PLAYING);
         else if (state == ESP_ASP_STATE_PAUSED) s_state.store(AUDIO_PLAYBACK_PAUSED);
@@ -1039,11 +1068,15 @@ bool create_network_locked()
     }
     esp_asp_cfg_t config = {};
     config.out.cb = network_write;
-    config.task_prio = WORKER_PRIORITY;
+    config.task_prio = NETWORK_AUDIO_PRIORITY;
     config.task_core = 0;
     config.task_stack = 8192;
     config.task_stack_in_ext = true;
     config.prev = network_prepare;
+    ESP_LOGI(TAG, "radio scheduling: PCM priority=%u core=0 DMA=%u ms HLS_buffer=%u KB",
+             unsigned(NETWORK_AUDIO_PRIORITY),
+             unsigned(CODEC_DMA_DESC_NUM * CODEC_DMA_FRAME_NUM * 1000 / s_output_rate.load()),
+             128u);
     if (esp_audio_simple_player_new(&config, &s_network_player) != ESP_GMF_ERR_OK) return false;
     esp_gmf_pool_handle_t pool = nullptr;
     if (esp_audio_simple_player_get_pool(s_network_player, &pool) != ESP_GMF_ERR_OK || !pool) return false;

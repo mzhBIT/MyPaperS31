@@ -5,6 +5,7 @@
 #include "activities/ActivityManager.h"
 #include "ui/SystemFont.h"
 #include "ui/HeaderLayout.h"
+#include "ui/AppStatusBar.h"
 #include "ui/UiLocale.h"
 #include "ui/reader_background.h"
 #include "ui/reader_book_cover.h"
@@ -65,6 +66,9 @@ public:
         load(initial);
         redraw();
     }
+    void loop() override {
+        if(m_profile==ReaderProfile::Rss)m_status_bar.refresh(status_title());
+    }
 
     bool on_key(int key) override
     {
@@ -105,7 +109,7 @@ public:
             return true;
         }
         if (event.type != TouchEventType::Tap) return false;
-        if (header_layout::left_hit(event.x, event.y, 120)) {
+        if (m_profile!=ReaderProfile::Rss && header_layout::left_hit(event.x, event.y, 120)) {
             back();
             return true;
         }
@@ -117,6 +121,11 @@ public:
     }
 
 private:
+    app_status_bar::State m_status_bar;
+    int top_height()const {return m_profile==ReaderProfile::Rss ? app_status_bar::height : TOP_H;}
+    const char* status_title()const {
+        return ui_locale::text(m_standby ? ui_locale::TextId::StandbyWallpaper : m_book_cover ? ui_locale::TextId::LockScreenBookCover : ui_locale::TextId::ReadingBackground);
+    }
     ReaderProfile m_profile = ReaderProfile::Shared;
     bool m_book_cover = false;
     bool m_standby = false;
@@ -130,7 +139,7 @@ private:
 
     int visible_rows() const
     {
-        return std::max(1, ((int)M5.Display.height() - TOP_H - 12) / ROW_H);
+        return std::max(1, ((int)M5.Display.height() - top_height() - 12) / ROW_H);
     }
 
     void load(const std::string &path)
@@ -180,7 +189,7 @@ private:
 
     int hit(int y) const
     {
-        int top = TOP_H;
+        int top = top_height();
         if (y < top) return -1;
         int index = m_scroll + (y - top) / ROW_H;
         return index >= 0 && index < item_count() ? index : -1;
@@ -230,14 +239,14 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        system_font::draw_left(M5.Display, "<", 16, header_layout::text_y(), TFT_BLACK);
-        system_font::draw_center(M5.Display,
-                                 ui_locale::text(m_standby ? ui_locale::TextId::StandbyWallpaper : m_book_cover ? ui_locale::TextId::LockScreenBookCover
-                                                              : ui_locale::TextId::ReadingBackground),
-                                 width / 2, header_layout::text_y(), TFT_BLACK);
-        header_layout::draw_separator(M5.Display);
+        if(m_profile==ReaderProfile::Rss) m_status_bar.draw(status_title());
+        else {
+            system_font::draw_left(M5.Display, "<", 16, header_layout::text_y(), TFT_BLACK);
+            system_font::draw_center(M5.Display,status_title(),width/2,header_layout::text_y(),TFT_BLACK);
+            header_layout::draw_separator(M5.Display);
+        }
 
-        int top = TOP_H;
+        int top = top_height();
         for (int row = 0; row < rows; ++row) {
             int index = m_scroll + row;
             if (index >= item_count()) break;

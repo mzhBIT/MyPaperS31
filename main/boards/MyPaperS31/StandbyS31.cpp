@@ -126,7 +126,7 @@ void request_shutdown() {
     pending = shutdown_requested = true;
     generation = ActivityManager::instance().generation();
     requested_at = lgfx::millis();
-    ESP_LOGW(TAG, "shutdown requested by 3-second power hold; waiting for safe I/O boundary");
+    ESP_LOGW(TAG, "shutdown requested; waiting for safe I/O boundary");
 }
 bool service() {
     if (!pending) return false;

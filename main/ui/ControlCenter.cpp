@@ -13,6 +13,10 @@
 #include <algorithm>
 #include <cstdio>
 #include <new>
+#include <sdkconfig.h>
+#if CONFIG_IDF_TARGET_ESP32S31
+#include "boards/MyPaperS31/StandbyS31.h"
+#endif
 
 namespace {
 bool pending = false;
@@ -36,6 +40,7 @@ public:
         _previous_mode = M5.Display.getEpdMode();
         _battery_level = read_battery();
         _free_psram_kb = read_free_psram();
+        _free_sram_kb = read_free_sram();
         _last_battery_check = lgfx::millis();
         draw();
     }
@@ -78,7 +83,13 @@ public:
             _closing = true; return true;
         }
         if (event.type == TouchEventType::Tap) {
-            if (event.y >= panel_height() || header_layout::right_hit(event.x, event.y, M5.Display.width(), 90))
+            if (header_layout::right_hit(event.x, event.y, M5.Display.width(), 90)) {
+#if CONFIG_IDF_TARGET_ESP32S31
+                _shutdown = true;
+#else
+                _closing = true;
+#endif
+            } else if (event.y >= panel_height())
                 _closing = true;
             else for (int row=0; row<rows(); ++row) {
                 if (event.y < slider_y(row)-40 || event.y >= slider_y(row)+40) continue;
@@ -101,13 +112,27 @@ public:
             if (!contact.down) { _drag = -1; save(); }
         }
         if (M5.Display.displayBusy()) return;
+#if CONFIG_IDF_TARGET_ESP32S31
+        if (_shutdown) {
+            // Dismiss first: an overlay prevents standby, and dismiss changes
+            // the activity generation. Request against the resulting page.
+            ActivityManager::instance().dismiss_overlay(true);
+            mypaper::board::s31::standby::request_shutdown();
+            return; // The overlay (this) has been deleted.
+        }
+#endif
         if (_closing) { ActivityManager::instance().pop(); return; }
         if (!contact.down && uint32_t(lgfx::millis()-_last_battery_check) >= 1000) {
             _last_battery_check = lgfx::millis();
             const int level = read_battery();
             if (level != _battery_level) { _battery_level = level; _dirty |= BATTERY_DIRTY; }
             const size_t free_psram = read_free_psram();
-            if (free_psram != _free_psram_kb) { _free_psram_kb = free_psram; _dirty |= PSRAM_DIRTY; }
+            const size_t free_sram = read_free_sram();
+            if (free_psram != _free_psram_kb || free_sram != _free_sram_kb) {
+                _free_psram_kb = free_psram;
+                _free_sram_kb = free_sram;
+                _dirty |= PSRAM_DIRTY;
+            }
         }
         if (_dirty && (_drag < 0 || uint32_t(lgfx::millis()-_last_draw) >= 160)) {
             M5.Display.startWrite();
@@ -136,9 +161,11 @@ private:
     uint32_t _last_battery_check = 0;
     int _battery_level = -1;
     size_t _free_psram_kb = 0;
+    size_t _free_sram_kb = 0;
     static constexpr unsigned BATTERY_DIRTY = 1u << 2;
     static constexpr unsigned PSRAM_DIRTY = 1u << 3;
     bool _unsaved = false, _closing = false;
+    bool _shutdown = false;
     int _drag = -1, _focus = 0;
     unsigned _dirty = 0;
     static int rows() { return frontlight_controls::has_temperature() ? 2 : 1; }
@@ -157,6 +184,9 @@ private:
     static size_t read_free_psram() {
         return heap_caps_get_free_size(MALLOC_CAP_SPIRAM) / 1024;
     }
+    static size_t read_free_sram() {
+        return heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT) / 1024;
+    }
     static int read_battery() {
         return battery_status::available() ? std::clamp<int>(M5.Power.getBatteryLevel(), 0, 100) : -1;
     }
@@ -168,8 +198,18 @@ private:
     }
     void draw_psram() {
         M5.Display.fillRect(0, psram_y(), M5.Display.width(), battery_height(), TFT_WHITE);
-        system_font::draw_left(M5.Display, ui_locale::text(ui_locale::TextId::FreePsram), 24, psram_y()+8);
-        system_font::draw_right(M5.Display, std::to_string(_free_psram_kb)+" KB", M5.Display.width()-24, psram_y()+8);
+        const std::string label = ui_locale::text(ui_locale::TextId::FreeMemory);
+        const std::string value = std::to_string(_free_psram_kb)+"KB/"+std::to_string(_free_sram_kb)+"KB";
+        int px=system_font::pixel_size();
+        while(px>16) {
+            const int measured=system_font::measure(label,px)+system_font::measure(value,px);
+            const int available=M5.Display.width()-72;
+            if(measured<=available) break;
+            px=std::max(16,std::min(px-1,int(int64_t(px)*available/measured)-1));
+        }
+        const int y=psram_y()+(battery_height()-system_font::line_height(px))/2;
+        system_font::draw_left_sized(M5.Display, label, 24, y, px);
+        system_font::draw_right_sized(M5.Display, value, M5.Display.width()-24, y, px);
     }
     static int left() { return 110; }
     static int right() { return M5.Display.width()-110; }
@@ -207,7 +247,16 @@ private:
         M5.Display.fillRect(0, 0, M5.Display.width(), panel_height(), TFT_WHITE);
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::ControlCenter),
             M5.Display.width()/2, header_layout::text_y());
+#if CONFIG_IDF_TARGET_ESP32S31
+        // Vector power symbol: independent of the selected font/subset.
+        const int cx = M5.Display.width()-45, cy = header_layout::height/2;
+        for (int r=12; r<=14; ++r) M5.Display.drawCircle(cx, cy+2, r, TFT_BLACK);
+        M5.Display.fillRect(cx-7, cy-14, 15, 13, TFT_WHITE);
+        M5.Display.fillRoundRect(cx-1, cy-16, 3, 19, 1, TFT_BLACK);
+#else
+        // P4 has no implemented hardware power-cut path; do not substitute sleep.
         system_font::draw_right(M5.Display, "x", M5.Display.width()-28, header_layout::text_y());
+#endif
         header_layout::draw_separator(M5.Display);
         for (int row=0; row<rows(); ++row) draw_row(row);
         draw_battery();

@@ -16,6 +16,9 @@ struct TextInputOptions {
     bool secret = false;
     // Opt-in for callers whose overlay should retain the page's Text refresh.
     bool text_refresh = false;
+    bool unified_status_bar = false;
+    // Return a localized error to keep editing, or an empty string to accept.
+    std::function<std::string(const std::string&)> validate;
 };
 
 using TextInputCallback = std::function<void(const std::string &)>;

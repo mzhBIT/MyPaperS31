@@ -7,6 +7,7 @@
 #include "storage/app_paths.h"
 #include "storage/storage_sdcard.h"
 #include "ui/SystemFont.h"
+#include "ui/AppStatusBar.h"
 #include "ui/UiLocale.h"
 #include "wifi/wifi_setting.h"
 #include "wifi/S31WifiPolicy.h"
@@ -452,6 +453,7 @@ public:
         if (!M5.Display.displayBusy() && _dirty.exchange(false)) {
             draw();
         }
+        if (!_session_gate.busy()) _status_bar.refresh(status_title());
     }
 
     bool on_touch(const TouchEvent& event) override {
@@ -509,6 +511,10 @@ public:
     }
 
 private:
+    app_status_bar::State _status_bar;
+    const char* status_title()const {
+        return ui_locale::text(_force_hotspot ? ui_locale::TextId::FileHotspotTransfer : ui_locale::TextId::WifiTransfer);
+    }
     bool _force_hotspot = false;
     bool _running = false;
     httpd_handle_t _server = nullptr;
@@ -966,7 +972,8 @@ private:
         M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
 
         int x = 24;
-        int y = 12;
+        _status_bar.draw(status_title());
+        int y = app_status_bar::height+16;
         int line_h = system_font::line_height() + 4;
         int text_pixels = system_font::pixel_size();
         auto draw_line = [&](const std::string &text) {
@@ -985,9 +992,6 @@ private:
 #endif
             y += line_h;
         };
-        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::WifiTransfer), M5.Display.width() / 2, y);
-        y += line_h + 10;
-
 #if CONFIG_IDF_TARGET_ESP32S31
         using ui_locale::TextId;
         const int available = M5.Display.height()-system_font::line_height()-4-y;

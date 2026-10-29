@@ -10,6 +10,7 @@
 #include "renderer/CoverThumbnail.h"
 #include "renderer/P4JpegDecoder.h"
 #include "ui/SystemFont.h"
+#include "ui/AppStatusBar.h"
 #include "ui/MusicLyricLayout.h"
 #include "ui/UiLocale.h"
 #include "ui/music_icons_1bpp.h"
@@ -236,6 +237,7 @@ public:
         if (update_volume_toast()) return;
         update_progress_if_due();
         update_controls_if_state_changed();
+        if (!_refresh_frozen) _status_bar.refresh(ui_locale::text(ui_locale::TextId::Music));
     }
 
     bool on_touch(const TouchEvent &event) override
@@ -264,11 +266,11 @@ public:
         }
         if (event.type != TouchEventType::Tap) return false;
 
-        if (event.x < design_x(100) && event.y < design_y(130)) {
+        if (app_status_bar_layout::back_hit(event.x,event.y)) {
             ActivityManager::instance().pop();
             return true;
         }
-        if (event.x >= design_x(558) && event.y < design_y(130)) {
+        if (app_status_bar_layout::audio_output(M5.Display.width()).contains(event.x,event.y)) {
             cycle_audio_output();
             return true;
         }
@@ -353,6 +355,7 @@ public:
     }
 
 private:
+    app_status_bar::State _status_bar;
     std::string _initial_path;
     std::vector<Track> _tracks;
     std::vector<int> _shuffle_order;
@@ -1017,8 +1020,8 @@ private:
         // waveform to clear remnants from whichever activity was visible.
         M5.Display.setEpdMode(epd_mode_t::epd_quality);
         M5.Display.fillScreen(TFT_WHITE);
-        system_font::draw_left(M5.Display, ui_locale::text(ui_locale::TextId::Music),
-                               design_x(TITLE_X), design_y(TITLE_Y), TFT_BLACK);
+
+        _status_bar.draw(ui_locale::text(ui_locale::TextId::Music));
         system_font::draw_center(M5.Display, message, M5.Display.width() / 2,
                                  M5.Display.height() / 2 - 20, TFT_BLACK);
         M5.Display.display();
@@ -1171,13 +1174,7 @@ private:
 
     void draw_audio_output_selector()
     {
-        const int x = design_x(570);
-        const int y = design_y(34);
-        const int w = design_x(88);
-        const int h = design_y(56);
-        M5.Display.drawRect(x, y, w, h, TFT_BLACK);
-        system_font::draw_center(M5.Display, audio_radio_get_output_mode_name(),
-                                 x + w / 2, y + design_y(13), TFT_BLACK);
+        app_status_bar::draw_audio_output(audio_radio_get_output_mode_name());
     }
 
     void cycle_audio_output()
@@ -1206,13 +1203,15 @@ private:
         M5.Display.setEpdMode(epd_mode_t::epd_text);
         M5.Display.fillScreen(TFT_WHITE);
 
+        _status_bar.draw(ui_locale::text(ui_locale::TextId::Music));
+
         std::string title;
         if (_view == ContentView::List) title = ui_locale::text(ui_locale::TextId::SongList);
         else if (_current >= 0) title = track_title(_tracks[_current].path);
         else title = ui_locale::text(ui_locale::TextId::SelectSong);
         system_font::draw_left(M5.Display,
-                               system_font::ellipsize(title, design_x(455)),
-                               design_x(TITLE_X), design_y(TITLE_Y), TFT_BLACK);
+                               system_font::ellipsize(title, std::max(0,app_status_bar_layout::audio_output(M5.Display.width()).x-design_x(TITLE_X)-16)),
+                               design_x(TITLE_X), std::max(app_status_bar::height+8,design_y(TITLE_Y)), TFT_BLACK);
         draw_audio_output_selector();
 
         M5.Display.drawRect(design_x(COVER_X), design_y(COVER_Y),
