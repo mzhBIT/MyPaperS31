@@ -27,7 +27,9 @@
 #include "esp_heap_caps.h"
 #include "esp_check.h"
 #include "usb/usb_host.h"
+#if CONFIG_IDF_TARGET_ESP32P4
 #include "usb/hcd_mypaper_diag.h"
+#endif
 #include "usb/uac2_host.h"
 
 static const char *TAG = "uac2-host";
@@ -728,6 +730,7 @@ static void stream_tx_xfer_done(usb_transfer_t *xfer)
                      "TX URB: %d/%d packets skipped, %d errors, first=%d, gap=%lld us",
                      skipped, xfer->num_isoc_packets, errors, first_skipped,
                      (long long)gap_us);
+#if CONFIG_IDF_TARGET_ESP32P4
             usb_hcd_mypaper_diag_t diag;
             if (usb_hcd_mypaper_diag_get(xfer, &diag)) {
                 const uint32_t ticks_per_us = esp_rom_get_cpu_ticks_per_us();
@@ -755,6 +758,7 @@ static void stream_tx_xfer_done(usb_transfer_t *xfer)
             } else {
                 ESP_LOGW(TAG, "HCD timing unavailable for skipped TX URB");
             }
+#endif
         }
         stream_tx_xfer_submit(iface, xfer);
         break;
@@ -1091,6 +1095,11 @@ static const uac2_as_iface_t *find_matching_as_iface(
         // Match format
         if (config->bit_resolution && as->bit_resolution != config->bit_resolution) continue;
         if (config->channels && as->nr_channels != config->channels) continue;
+#if CONFIG_IDF_TARGET_ESP32S31
+        // Keep the chosen alternate consistent with the S31 facade's packed
+        // PCM contract, including 24 valid bits in exactly three bytes.
+        if (dir==UAC2_STREAM_TX && as->sub_slot_size != as->bit_resolution/8) continue;
+#endif
 
         if (!best || as->bit_resolution > best->bit_resolution) {
             best = as;

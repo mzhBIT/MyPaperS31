@@ -98,7 +98,7 @@ ESP_ERR_NOT_SUPPORTED，日志前缀 `S31_HW`，不假装播放、发短信或�
 | 功能 | 当前状态 |
 |---|---|
 | BH1098G 扬声器音频 | 已接入本地音乐播放（MP3/FLAC/WAV/M4A/AAC/OGG/Opus），见下节；尚未实机验证 |
-| 电台流 / 录音 / USB 耳机 | 未实现；`audio_radio_play()`、`audio_radio_record_wav()` 返回 NOT_SUPPORTED，USB 输出模式保留给后续实现 |
+| 电台流 / 录音 / USB 耳机 | 网络收音机已接入（见 `S31_RADIO_PLAYBACK.md`）；USB UAC1/UAC2 已接入、待实机验证（见 `S31_USB_AUDIO.md`）；录音仍返回 NOT_SUPPORTED |
 | ML307 / 4G / 电话 / 短信 | Activity 已接入，AT/USB/RNDIS 未在 S31 适配 |
 | USB MSC / raw SD 导出 | 已实现重启隔离式虚拟 U 盘（TinyUSB 2.4.0 HS UTMI + ANA_SW GPIO36），详见 `S31_USB_MASS_STORAGE_DESIGN.md`；尚未实机验证 |
 | 冷暖前光 | 已接入 GPIO6 冷光 / GPIO7 暖光，高电平有效 20kHz、10bit PWM；需实机确认 |
@@ -117,8 +117,7 @@ S31 / IDF 6.1 使用 Picolibc。M5GFX 的 `DataWrapper.hpp` 必须自行包含 `
 重启隔离式 USB 虚拟 U 盘；基带/充电等硬件功能仍需按 S31 接线单独适配，
 不应靠测试 P4 驱动碰运气。扬声器播放尚未实机验证，见下节。
 
-USB 虚拟 U 盘沿用现有 Transfer 页面与文案，未改动任何 UI；S31 后续也要接入
-USB 耳机，因此“USB 耳机将断开”等提示保持原样。
+USB 虚拟 U 盘沿用现有 Transfer 页面与文案；与现已接入的 USB 耳机采用重启隔离的 Device / Host 互斥模式，因此“USB 耳机将断开”等提示保持原样。
 
 ### S31 扬声器音频（BH1098G）
 
@@ -146,8 +145,7 @@ USB 耳机，因此“USB 耳机将断开”等提示保持原样。
   经 `esp_ae_bit_cvt` / `esp_ae_ch_cvt` / `esp_ae_rate_cvt` 统一成 16bit 立体声，
   再扩成 32bit 槽写入 I2S；音量按 `(vol/100)^2` 衰减，NVS 键与 P4 相同
   （`audio_out/mode`、`spk_volume`，默认音量 30）。
-- 仍不支持：网络电台流（`audio_radio_play`）、录音（`audio_radio_record_wav`）、
-  USB 输出模式，均返回 `ESP_ERR_NOT_SUPPORTED`，保证 UI 继续显示 USB 耳机不可用。
+- 后续状态：网络电台流已接入，USB 输出也已适配，分别见 `S31_RADIO_PLAYBACK.md` 和 `S31_USB_AUDIO.md`；录音（`audio_radio_record_wav`）仍返回 `ESP_ERR_NOT_SUPPORTED`。
 - 依赖：新增托管组件 `espressif__esp_audio_codec`、`espressif__esp_audio_effects`、
   `espressif__gmf_fft`。gmf_fft 是 audio-effects 预编译库的链接依赖，在
   `set(COMPONENTS application)` 下必须显式写进 application 的 `REQUIRES`。
@@ -165,9 +163,11 @@ USB 耳机，因此“USB 耳机将断开”等提示保持原样。
 | 按键 | 短按 | 长按 |
 |---|---|---|
 | BOOT / GPIO61 | TXT、重排阅读器（含EPUB/MOBI/漫画/DOCX/微信正文）和RSS正文切换阅读设置 | 500ms识别但不执行AI动作，松手不补短按 |
-| 音量+ / TCA P10（索引8） | 保留音量+事件，暂不改变音量（音量用音乐/电台界面的按钮调节） | 500ms识别，最大音量功能暂不执行 |
-| 音量- / TCA P11（索引9） | 保留音量-事件，暂不改变音量 | 500ms识别，静音功能暂不执行 |
+| 音量+ / TCA P10（索引8） | 音量增加10%，最高100% | 500ms设为最大音量100%，松手不补短按 |
+| 音量- / TCA P11（索引9） | 音量降低10%，最低0% | 500ms静音至0%，松手不补短按 |
 | 电源 / TCA P17（索引15） | 切换待机壁纸后 light sleep，再按唤醒 | 长按3秒，保存阅读记录后输出P13硬件关机脉冲 |
+
+音量键在主线程分发。音乐／收音机通过独立 `on_volume_key()` 响应，复用页面原有的音量设置和显示；其他页面及控制中心浮层使用系统音量接口，不能转成列表焦点或翻页动作。音量保存在 `audio_out/spk_volume`，范围0–100，0为静音。S31 设置读取采用一次加载，首次未播放时调整音量不会启动BT/I2S，也不会被随后初始化播放器覆盖。浮层遮挡期间调整音量不会绘制到底层页面，恢复后音乐提示值及收音机音量行根据实际音量更新。保留既有按键去抖、长按抑制松手短按、页面切换丢弃旧事件和待机后吞掉唤醒按键的规则。
 
 待机壁纸在系统设置中选择，也可在文件管理的图片长按菜单中设置；选择“无”时保留当前画面。
 壁纸使用独立的 `standby_bg` NVS 配置及 `/sdcard/.reader/standby_wallpaper.g4` 缓存，

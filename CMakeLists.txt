@@ -36,6 +36,10 @@ if(MYPAPER_BOARD STREQUAL "MyPaperS31")
                        "${CMAKE_CURRENT_LIST_DIR}/components/freetype"
                        "${CMAKE_CURRENT_LIST_DIR}/third_party/s31/esp_tinyusb"
                        "${CMAKE_CURRENT_LIST_DIR}/third_party/s31/tinyusb"
+                       "${CMAKE_CURRENT_LIST_DIR}/third_party/s31/usb"
+                       "${CMAKE_CURRENT_LIST_DIR}/components/uac2_host"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__usb_host_uac"
+                       "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__cmake_utilities"
                        "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__libjpeg-turbo"
                        "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__esp_audio_codec"
                        "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__esp_audio_effects"
@@ -55,6 +59,8 @@ if(MYPAPER_BOARD STREQUAL "MyPaperS31")
                        "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__esp_extractor"
                        "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__media_lib_sal"
                        "$ENV{IDF_PATH}/components")
+    # UAC1 uses the package_manager module even with dependency resolution off.
+    list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__cmake_utilities")
     set(COMPONENTS application)
 elseif(MYPAPER_BOARD STREQUAL "MyPaperP4")
     if(NOT IDF_VERSION_MAJOR EQUAL 5 OR NOT IDF_VERSION_MINOR EQUAL 3 OR NOT IDF_VERSION_PATCH EQUAL 5)

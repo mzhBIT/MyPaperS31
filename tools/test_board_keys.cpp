@@ -56,4 +56,11 @@ static_assert(cover_hit(100,1600)==Key::Home);
 static_assert(cover_hit(200,1600)==Key::Previous);
 static_assert(cover_hit(300,1600)==Key::Next);
 static_assert(cover_hit(100,1215)==Key::None && cover_hit(150,1600)==Key::None);
+static_assert(volume_delta(Key::VolumeUp,Gesture::Click)==10);
+static_assert(volume_delta(Key::VolumeDown,Gesture::Click)==-10);
+static_assert(volume_delta(Key::VolumeUp,Gesture::LongPress)==100);
+static_assert(volume_delta(Key::VolumeDown,Gesture::LongPress)==-100);
+static_assert(volume_delta(Key::VolumeUp,Gesture::None)==0);
+static_assert(volume_delta(Key::VolumeDown,Gesture::Repeat)==0);
+static_assert(volume_delta(Key::Power,Gesture::Click)==0);
 int main() {}

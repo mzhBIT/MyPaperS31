@@ -23,7 +23,7 @@ typedef struct {
     char product[48];
 } usb_audio_output_status_t;
 
-/** Install the ESP32-P4 HS USB Host and UAC 1.0 class driver. */
+/** Install the board HS USB Host and UAC1/UAC2 class drivers. */
 esp_err_t usb_audio_output_init(void);
 
 /** Stop the active UAC stream but keep device enumeration alive. */
@@ -65,6 +65,9 @@ void usb_audio_output_get_status(usb_audio_output_status_t *status);
 
 /** Stop the stream, close the device and release USB Host resources. */
 void usb_audio_output_deinit(void);
+
+/** True only after all Host/class tasks and DMA ownership are released. */
+bool usb_audio_output_is_quiescent(void);
 
 #ifdef __cplusplus
 }

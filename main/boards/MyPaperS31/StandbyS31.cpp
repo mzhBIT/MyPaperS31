@@ -149,6 +149,10 @@ bool service() {
     struct TimeResume { ~TimeResume() { network_time_resume(); } } time_resume;
     const bool shutting_down = shutdown_requested;
     pending = shutdown_requested = false;
+    if (!activity->prepare_standby()) {
+        ESP_LOGW(TAG, "power action cancelled: application I/O could not be stopped safely");
+        return true; // Keep Wi-Fi/netif alive for the unfinished application.
+    }
     activity->on_standby_enter(); // Pause reading clocks; do not count sleep.
     if (!keys::pause_for_sleep()) {
         activity->on_standby_resume();

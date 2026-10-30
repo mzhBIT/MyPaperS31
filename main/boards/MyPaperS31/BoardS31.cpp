@@ -79,7 +79,7 @@ const Profile& profile() {
                       bit(Capability::Speaker) |
                       bit(Capability::Frontlight) | bit(Capability::FrontlightCct) |
                       bit(Capability::BatteryGauge) | bit(Capability::Rtc) |
-                      bit(Capability::UsbMsc), false
+                      bit(Capability::UsbMsc) | bit(Capability::UsbAudio), false
     };
     return p;
 }

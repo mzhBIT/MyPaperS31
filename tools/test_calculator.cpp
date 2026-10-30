@@ -1,5 +1,6 @@
 #include "calculator/Calculator.h"
 #include "calculator/CalculatorPresentation.h"
+#include "calculator/CalculatorLayout.h"
 #include <cassert>
 #include <cmath>
 #include <cstdio>
@@ -7,6 +8,21 @@
 #include <algorithm>
 
 int main() {
+    for (bool scientific : {false,true}) {
+        const auto g=calculator::layout::geometry(684,1216,scientific);
+        const auto mode=calculator::layout::action(g.width,false);
+        const auto history=calculator::layout::action(g.width,true);
+        assert(mode.y>=app_status_bar_layout::height);
+        assert(mode.y+mode.h<calculator::layout::content_top);
+        assert(mode.x+mode.w<=history.x);
+        assert(!mode.contains(36,40) && !history.contains(570,40));
+        assert(mode.contains(mode.x,mode.y));
+        assert(history.contains(history.x,history.y));
+        assert(!mode.contains(mode.x,calculator::layout::content_top));
+        assert(g.keypad_y>calculator::layout::content_top && g.key_height>=70);
+        const int rows=scientific ? 9 : 5;
+        assert(g.keypad_y+rows*g.key_height+(rows-1)*calculator::layout::gap<=g.height-calculator::layout::padding);
+    }
     assert(calculator::function_label("(")=="(");
     assert(calculator::function_label(")")==")");
     assert(calculator::function_label("sin(")=="sin");

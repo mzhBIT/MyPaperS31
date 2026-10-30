@@ -1,4 +1,5 @@
 #include "activities/OfflineMapPickerActivity.h"
+#include "activities/StatusBarActivity.h"
 #include "ui/ListFocus.h"
 #include "activities/ActivityManager.h"
 #include "map/AmapConfig.h"
@@ -22,12 +23,12 @@ using ui_locale::TextId;
 const char *tr(TextId id) { return ui_locale::text(id); }
 constexpr int ROW = 84, FOOT = 72;
 struct Entry { std::string name; bool dir; };
-class Picker final : public Activity {
+class Picker final : public StatusBarActivity {
     std::string _path = "/sdcard", _message;
     std::vector<Entry> _entries;
     int _page = 0, _focus = 0;
     bool _dirty = true;
-    int rows() const { return std::max(1, (int(M5.Display.height())-header_layout::height-FOOT)/ROW); }
+    int rows() const { return std::max(1, (int(M5.Display.height())-app_status_bar::height-FOOT)/ROW); }
     void load(const std::string &path) {
         _path = path; _entries.clear(); _page = _focus = 0; _message.clear();
         DIR *d = opendir(path.c_str());
@@ -81,13 +82,11 @@ class Picker final : public Activity {
     void draw() {
         auto &d = M5.Display; const int w = d.width(), h = d.height();
         d.startWrite(); d.setEpdMode(epd_mode_t::epd_text); d.fillScreen(TFT_WHITE);
-        system_font::draw_left(d, "<", 18, header_layout::text_y());
-        system_font::draw_center(d, tr(TextId::SelectMapPackage), w/2, header_layout::text_y());
-        header_layout::draw_separator(d);
+        draw_header(tr(TextId::SelectMapPackage));
         for (int r=0; r<rows(); ++r) {
             int i = _page*rows()+r;
             if (i >= int(_entries.size())) break;
-            int y = header_layout::height+r*ROW;
+            int y = app_status_bar::height+r*ROW;
             list_focus::draw(d, 18, y, ROW, i == _focus);
             system_font::draw_left(d, system_font::ellipsize((_entries[i].dir ? "[+] " : "")+_entries[i].name, w-36-list_focus::text_inset()), 18+list_focus::text_inset(), y+14);
             d.drawFastHLine(18, y+ROW-1, w-36, TFT_BLACK);
@@ -102,16 +101,20 @@ public:
         else load("/sdcard");
     }
     bool allow_system_back() const override { return false; }
-    void loop() override { if (_dirty && !M5.Display.displayBusy()) draw(); }
+    void loop() override {
+        if (_dirty && !M5.Display.displayBusy()) draw();
+        else if (!_dirty) StatusBarActivity::loop();
+    }
     bool on_touch(const TouchEvent &e) override {
         if (M5.Display.displayBusy()) return true;
-        if (e.type == TouchEventType::Back || (e.type == TouchEventType::Tap && header_layout::left_hit(e.x,e.y,120))) { back(); return true; }
+        if (status_bar_touch(e)) return true;
+        if (e.type == TouchEventType::Back) { back(); return true; }
         if (e.type == TouchEventType::SwipeUp || e.type == TouchEventType::SwipeDown) {
             _page = std::max(0,std::min(_page+(e.type == TouchEventType::SwipeUp ? 1 : -1), int((_entries.empty()?0:_entries.size()-1)/rows())));
             _dirty = true; return true;
         }
-        if (e.type == TouchEventType::Tap && e.y >= header_layout::height && e.y < header_layout::height+rows()*ROW)
-            activate(_page*rows()+(e.y-header_layout::height)/ROW);
+        if (e.type == TouchEventType::Tap && e.y >= app_status_bar::height && e.y < app_status_bar::height+rows()*ROW)
+            activate(_page*rows()+(e.y-app_status_bar::height)/ROW);
         return true;
     }
     bool on_key(int key) override {

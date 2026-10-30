@@ -4,7 +4,7 @@
 #include "ui/standby_wallpaper.h"
 #include "ui/ListFocus.h"
 
-#include "activities/Activity.h"
+#include "activities/StatusBarActivity.h"
 #include "activities/ActivityManager.h"
 #include "activities/EpdDiagnosticActivity.h"
 #include "activities/RssReaderActivity.h"
@@ -43,7 +43,7 @@
 
 namespace {
 
-constexpr int HEADER_H = header_layout::height;
+constexpr int HEADER_H = app_status_bar::height;
 constexpr int PAD = 20;
 constexpr int SETTINGS_ROW_Y = HEADER_H;
 constexpr int SETTINGS_ROW_H = 110;
@@ -69,21 +69,7 @@ struct AccessPoint {
     bool secured = true;
 };
 
-void draw_header(const char *title)
-{
-    M5.Display.fillRect(0, 0, M5.Display.width(), HEADER_H, TFT_WHITE);
-    system_font::draw_center(M5.Display, title, M5.Display.width() / 2,
-                             header_layout::text_y(),
-                             TFT_BLACK);
-    header_layout::draw_separator(M5.Display);
-}
-
-bool header_back_hit(const TouchEvent &event)
-{
-    return event.type == TouchEventType::Tap && header_layout::left_hit(event.x, event.y, 120);
-}
-
-class WifiSettingsActivity final : public Activity {
+class WifiSettingsActivity final : public StatusBarActivity {
 public:
     ~WifiSettingsActivity() override
     {
@@ -97,7 +83,8 @@ public:
 
     bool on_touch(const TouchEvent &event) override
     {
-        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+        if (status_bar_touch(event)) return true;
+        if (event.type == TouchEventType::Back) {
             go_back();
             return true;
         }
@@ -472,7 +459,7 @@ private:
     }
 };
 
-class DeepSeekSettingsActivity final : public Activity {
+class DeepSeekSettingsActivity final : public StatusBarActivity {
 public:
     void on_create() override { draw(true); }
 
@@ -487,7 +474,8 @@ public:
 
     bool on_touch(const TouchEvent &event) override
     {
-        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+        if (status_bar_touch(event)) return true;
+        if (event.type == TouchEventType::Back) {
             ActivityManager::instance().pop();
             return true;
         }
@@ -538,6 +526,7 @@ private:
     void edit_api_key()
     {
         TextInputOptions options;
+        options.unified_status_bar = true;
         options.title = ui_locale::text(ui_locale::TextId::DeepSeekApiKey);
         options.submit_label = ui_locale::text(ui_locale::TextId::Save);
         options.max_bytes = 255;
@@ -610,7 +599,7 @@ private:
     }
 };
 
-class MapSettingsActivity final : public Activity {
+class MapSettingsActivity final : public StatusBarActivity {
 public:
     void on_create() override { draw(true); }
 
@@ -625,7 +614,8 @@ public:
 
     bool on_touch(const TouchEvent &event) override
     {
-        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+        if (status_bar_touch(event)) return true;
+        if (event.type == TouchEventType::Back) {
             ActivityManager::instance().pop();
             return true;
         }
@@ -665,6 +655,7 @@ private:
     void edit_api_key()
     {
         TextInputOptions options;
+        options.unified_status_bar = true;
         options.title = ui_locale::text(ui_locale::TextId::AmapWebServiceKey);
         options.submit_label = ui_locale::text(ui_locale::TextId::Save);
         options.max_bytes = 255;
@@ -773,7 +764,7 @@ static std::string format_cache_bytes(uint64_t bytes)
     return text;
 }
 
-class RssCacheSettingsActivity final : public Activity {
+class RssCacheSettingsActivity final : public StatusBarActivity {
 public:
     void on_create() override
     {
@@ -783,7 +774,8 @@ public:
 
     bool on_touch(const TouchEvent &event) override
     {
-        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+        if (status_bar_touch(event)) return true;
+        if (event.type == TouchEventType::Back) {
             if (_confirm) {
                 _confirm = false;
                 draw(false);
@@ -928,7 +920,7 @@ private:
     }
 };
 
-class NetworkSettingsActivity final : public Activity {
+class NetworkSettingsActivity final : public StatusBarActivity {
 public:
     void on_create() override
     {
@@ -946,7 +938,8 @@ public:
 
     bool on_touch(const TouchEvent &event) override
     {
-        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+        if (status_bar_touch(event)) return true;
+        if (event.type == TouchEventType::Back) {
             ActivityManager::instance().pop();
             return true;
         }
@@ -1071,7 +1064,7 @@ private:
     }
 };
 
-class FrontlightSettingsActivity final : public Activity {
+class FrontlightSettingsActivity final : public StatusBarActivity {
     using Kind = frontlight_controls::Kind;
 public:
     ~FrontlightSettingsActivity() override { finish_drag(); }
@@ -1092,6 +1085,7 @@ public:
         }
         if (_dirty && !M5.Display.displayBusy() &&
             (_drag < 0 || uint32_t(lgfx::millis()-_last_draw) >= 160)) draw_dirty();
+        if (_drag < 0) StatusBarActivity::loop();
     }
     bool on_touch(const TouchEvent& event) override {
         int row = _drag >= 0 ? _drag : slider_hit(event.start_x, event.start_y);
@@ -1101,7 +1095,8 @@ public:
             if (!touch_input_contact().down) finish_drag();
             return true;
         }
-        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+        if (status_bar_touch(event)) return true;
+        if (event.type == TouchEventType::Back) {
             ActivityManager::instance().pop(); return true;
         }
         if (event.type != TouchEventType::Tap) return false;
@@ -1206,7 +1201,7 @@ std::string time_basis_label()
     return label;
 }
 
-class TimeBasisSettingsActivity final : public Activity {
+class TimeBasisSettingsActivity final : public StatusBarActivity {
 public:
     void on_create() override { draw(true); }
     void on_show() override
@@ -1216,7 +1211,8 @@ public:
     }
     bool on_touch(const TouchEvent &event) override
     {
-        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+        if (status_bar_touch(event)) return true;
+        if (event.type == TouchEventType::Back) {
             ActivityManager::instance().pop();
             return true;
         }
@@ -1303,7 +1299,7 @@ private:
     }
 };
 
-class DateTimeSettingsActivity final : public Activity {
+class DateTimeSettingsActivity final : public StatusBarActivity {
 public:
     void on_create() override { draw(true); }
     void on_show() override
@@ -1313,7 +1309,8 @@ public:
     }
     bool on_touch(const TouchEvent &event) override
     {
-        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+        if (status_bar_touch(event)) return true;
+        if (event.type == TouchEventType::Back) {
             ActivityManager::instance().pop();
             return true;
         }
@@ -1370,6 +1367,7 @@ private:
     {
         using ui_locale::TextId;
         TextInputOptions options;
+        options.unified_status_bar = true;
         options.title = ui_locale::text(TextId::ManualDateTime);
         options.submit_label = ui_locale::text(TextId::Save);
         options.start_in_chinese = false;
@@ -1454,13 +1452,14 @@ private:
     }
 };
 
-class LanguageSettingsActivity final : public Activity {
+class LanguageSettingsActivity final : public StatusBarActivity {
 public:
     void on_create() override { draw(); }
 
     bool on_touch(const TouchEvent &event) override
     {
-        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+        if (status_bar_touch(event)) return true;
+        if (event.type == TouchEventType::Back) {
             ActivityManager::instance().pop();
             return true;
         }
@@ -1530,7 +1529,7 @@ private:
     }
 };
 
-class AppSettingsActivity final : public Activity {
+class AppSettingsActivity final : public StatusBarActivity {
 public:
     void on_create() override { draw(true); }
     void on_show() override
@@ -1540,7 +1539,8 @@ public:
     }
     bool on_touch(const TouchEvent &event) override
     {
-        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+        if (status_bar_touch(event)) return true;
+        if (event.type == TouchEventType::Back) {
             ActivityManager::instance().pop();
             return true;
         }
@@ -1616,12 +1616,13 @@ private:
     }
 };
 
-class RestoreDefaultsActivity final : public Activity {
+class RestoreDefaultsActivity final : public StatusBarActivity {
 public:
     void on_create() override { draw(); }
     bool on_touch(const TouchEvent &event) override
     {
-        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+        if (status_bar_touch(event)) return true;
+        if (event.type == TouchEventType::Back) {
             ActivityManager::instance().pop();
             return true;
         }
@@ -1684,7 +1685,7 @@ private:
     }
 };
 
-class SettingActivity final : public Activity {
+class SettingActivity final : public StatusBarActivity {
 public:
     void on_create() override
     {
@@ -1708,7 +1709,8 @@ public:
 
     bool on_touch(const TouchEvent &event) override
     {
-        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+        if (status_bar_touch(event)) return true;
+        if (event.type == TouchEventType::Back) {
             ActivityManager::instance().pop();
             return true;
         }
@@ -1869,7 +1871,7 @@ private:
     }
 };
 
-class WifiSetupGuideActivity final : public Activity {
+class WifiSetupGuideActivity final : public StatusBarActivity {
 public:
     void on_create() override
     {
@@ -1890,11 +1892,13 @@ public:
 
     void loop() override
     {
-        if (esp_timer_get_time() >= _exit_at_us) close();
+        if (esp_timer_get_time() >= _exit_at_us) { close(); return; }
+        StatusBarActivity::loop();
     }
 
     bool on_touch(const TouchEvent &event) override
     {
+        if (status_bar_touch(event)) return true;
         if (event.type == TouchEventType::Tap || event.type == TouchEventType::Back) {
             close();
             return true;

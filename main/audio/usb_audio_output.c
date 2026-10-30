@@ -8,6 +8,9 @@
 #include "sdkconfig.h"
 
 #if CONFIG_MYPAPER_USB_AUDIO
+#if CONFIG_IDF_TARGET_ESP32S31
+#include "boards/MyPaperS31/UsbAudioPort.h"
+#endif
 
 #include "esp_heap_caps.h"
 #include "esp_log.h"
@@ -29,8 +32,13 @@
 // can miss a 125 us HS microframe. 64 KiB is about 371 ms at 44.1k/16/stereo,
 // enough to absorb normal HLS segment hand-off jitter without using 128 KiB of
 // scarce internal memory.
+#if CONFIG_IDF_TARGET_ESP32S31
+#define USB_AUDIO_UAC2_PCM_BUFFER_SIZE (32 * 1024)
+#define USB_AUDIO_UAC2_PCM_THRESHOLD   (16 * 1024)
+#else
 #define USB_AUDIO_UAC2_PCM_BUFFER_SIZE (64 * 1024)
 #define USB_AUDIO_UAC2_PCM_THRESHOLD   (32 * 1024)
+#endif
 #define USB_AUDIO_EVENT_QUEUE_LEN 20
 #define USB_AUDIO_HOST_STACK      (5 * 1024)
 #define USB_AUDIO_UAC_STACK       (5 * 1024)
@@ -114,6 +122,7 @@ static bool s_uac2_installed;
 // unless process_pending_flags, lib_event_flags and num_clients are all zero,
 // and a non-zero return there must not be mistaken for a successful teardown.
 static volatile bool s_host_lib_installed;
+static esp_err_t s_host_start_result = ESP_FAIL;
 // Set when deinit() cannot tear the USB Host stack down. The UAC client stays
 // registered in that case, so the host library is unusable for the rest of this
 // boot; init() refuses to start rather than corrupt the leftover state.
@@ -280,6 +289,11 @@ static bool uac2_has_alt_locked(uint8_t channels, uint8_t bits)
     for (uint8_t alt = 1; alt <= 16; ++alt) {
         uac2_host_dev_alt_param_t param = {0};
         if (uac2_host_get_device_alt_param(s_uac2_device, alt, &param) != ESP_OK) continue;
+#if CONFIG_IDF_TARGET_ESP32S31
+        // S31's sink packs exactly bits/8 bytes per sample. Do not select an
+        // alternate with padding (e.g. 16 valid bits in a 32-bit container).
+        if (param.sub_slot_size != bits / 8) continue;
+#endif
         if (param.channels == channels && param.bit_resolution == bits) return true;
     }
     return false;
@@ -556,7 +570,7 @@ static void uac_event_task(void *arg)
     }
     xEventGroupSetBits(s_event_group, EVENT_UAC_TASK_DONE);
     s_uac_task = NULL;
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(NULL);
 }
 
 static void host_event_task(void *arg)
@@ -565,15 +579,23 @@ static void host_event_task(void *arg)
     const usb_host_config_t config = {
         .skip_phy_setup = false,
         .root_port_unpowered = false,
-        // HS UAC2 OUT is serviced every 125 us. Keep this above the EPD
-        // PARLIO/GDMA low/medium-priority activity and allow it to run while
-        // external-memory cache maintenance is active.
+        // Keep HS audio above low/medium-priority EPD activity. The S31 stock
+        // Host 1.6.0 ISR is in Flash: setting IRAM there makes esp_intr_alloc()
+        // reject it with ESP_ERR_INVALID_ARG before any device can enumerate.
+#if CONFIG_IDF_TARGET_ESP32S31
+        .intr_flags = ESP_INTR_FLAG_LEVEL3,
+#else
+        // P4's local HCD override/linker fragment places its ISR chain in IRAM.
         .intr_flags = ESP_INTR_FLAG_LEVEL3 | ESP_INTR_FLAG_IRAM,
+#endif
         .enum_filter_cb = NULL,
         .fifo_settings_custom = {0},
-        .peripheral_map = 0,  // ESP32-P4 default is its High-Speed peripheral.
+        .peripheral_map = 0,  // Default HS peripheral on P4 and S31.
     };
+    ESP_LOGI(TAG, "USB Host start: interrupt_flags=0x%x IRAM=%d",
+             config.intr_flags, (config.intr_flags & ESP_INTR_FLAG_IRAM) != 0);
     esp_err_t ret = usb_host_install(&config);
+    s_host_start_result = ret;
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "USB Host install failed: %s", esp_err_to_name(ret));
         // ESP_ERR_INVALID_STATE here means the library is already installed, i.e.
@@ -586,11 +608,11 @@ static void host_event_task(void *arg)
         }
         xEventGroupSetBits(s_event_group, EVENT_HOST_FAILED | EVENT_HOST_TASK_DONE);
         s_host_task = NULL;
-        vTaskDelete(NULL);
+        vTaskDeleteWithCaps(NULL);
         return;
     }
     s_host_lib_installed = true;
-    ESP_LOGI(TAG, "ESP32-P4 USB Host installed on default HS peripheral");
+    ESP_LOGI(TAG, "USB Host installed on default HS peripheral");
     xEventGroupSetBits(s_event_group, EVENT_HOST_READY);
 
     bool no_clients = false;
@@ -658,7 +680,7 @@ static void host_event_task(void *arg)
     }
     xEventGroupSetBits(s_event_group, EVENT_HOST_TASK_DONE);
     s_host_task = NULL;
-    vTaskDelete(NULL);
+    vTaskDeleteWithCaps(NULL);
 }
 
 esp_err_t usb_audio_output_init(void)
@@ -673,6 +695,10 @@ esp_err_t usb_audio_output_init(void)
         ESP_LOGE(TAG, "USB audio unusable: previous teardown left the USB Host stack installed");
         return ESP_ERR_INVALID_STATE;
     }
+#if CONFIG_IDF_TARGET_ESP32S31
+    esp_err_t port_ret = s31_usb_audio_port_acquire();
+    if (port_ret != ESP_OK) return port_ret;
+#endif
     log_heap("before-init");
     s_lock = xSemaphoreCreateMutex();
     s_events = xQueueCreate(USB_AUDIO_EVENT_QUEUE_LEN, sizeof(usb_audio_event_t));
@@ -686,6 +712,7 @@ esp_err_t usb_audio_output_init(void)
     s_run = true;
     s_uac_uninstalling = false;
     s_host_shutdown = false;
+    s_host_start_result = ESP_FAIL;
     s_accept_devices = true;
     s_backend = USB_AUDIO_BACKEND_NONE;
     s_software_volume = true;
@@ -702,9 +729,11 @@ esp_err_t usb_audio_output_init(void)
     EventBits_t bits = xEventGroupWaitBits(s_event_group, EVENT_HOST_READY | EVENT_HOST_FAILED,
                                            pdFALSE, pdFALSE, pdMS_TO_TICKS(1500));
     if ((bits & EVENT_HOST_READY) == 0) {
-        ESP_LOGE(TAG, "USB Host startup timed out or failed");
+        const esp_err_t startup_ret = (bits & EVENT_HOST_FAILED)
+                                          ? s_host_start_result : ESP_ERR_TIMEOUT;
+        ESP_LOGE(TAG, "USB Host startup failed: %s", esp_err_to_name(startup_ret));
         usb_audio_output_deinit();
-        return ESP_FAIL;
+        return startup_ret;
     }
 
     const uac_host_driver_config_t uac_config = {
@@ -1185,7 +1214,21 @@ void usb_audio_output_deinit(void)
     }
     s_uac_uninstalling = false;
     s_teardown_failed = false;
+#if CONFIG_IDF_TARGET_ESP32S31
+    s31_usb_audio_port_release();
+#endif
     log_heap("after-deinit");
+}
+
+bool usb_audio_output_is_quiescent(void)
+{
+    const bool stopped = !s_host_lib_installed && !s_uac_installed && !s_uac2_installed &&
+                         s_host_task == NULL && s_uac_task == NULL;
+#if CONFIG_IDF_TARGET_ESP32S31
+    return stopped && s31_usb_audio_port_is_released();
+#else
+    return stopped;
+#endif
 }
 
 #else
@@ -1211,5 +1254,6 @@ bool usb_audio_output_is_connected(void) { return false; }
 void usb_audio_output_get_status(usb_audio_output_status_t *status)
 { if (status != NULL) memset(status, 0, sizeof(*status)); }
 void usb_audio_output_deinit(void) {}
+bool usb_audio_output_is_quiescent(void) { return true; }
 
 #endif

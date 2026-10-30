@@ -4,6 +4,7 @@
 #include "activities/ActivityManager.h"
 #include "activities/SettingActivity.h"
 #include "audio/audio_radio.h"
+#include "audio/usb_audio_output.h"
 #include "ui/SystemFont.h"
 #include "ui/AppStatusBar.h"
 #include "ui/UiLocale.h"
@@ -116,8 +117,12 @@ static void radio_play_worker(void *arg)
     RadioPlayResult result = {
         .index = job->index,
         .request_id = job->request_id,
-        .result = audio_radio_play(job->url),
+        // Reuse an established connection without NVS/driver configuration.
+        // Reconnect on the worker only when offline, including after standby.
+        .result = wifi_setting_is_connected() ? ESP_OK
+            : wifi_setting_connect_saved(CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS),
     };
+    if (result.result == ESP_OK) result.result = audio_radio_play(job->url);
     ESP_LOGI(TAG, "Radio play worker complete station=%d request=%lu result=%s",
              result.index, (unsigned long)result.request_id,
              esp_err_to_name(result.result));
@@ -129,6 +134,29 @@ static void radio_play_worker(void *arg)
 class RadioActivity final : public Activity {
 public:
     bool can_standby() const override { return _play_task == nullptr; }
+    bool prepare_standby() override
+    {
+        if (_play_task != nullptr) return false;
+        // Pausing ASP is insufficient: its HTTP/HLS input tasks keep receiving.
+        // Join/destroy them while the Wi-Fi RX callbacks/netif are still valid.
+        const esp_err_t result = audio_radio_stop();
+        if (result != ESP_OK) {
+            ESP_LOGE(TAG, "standby audio stop failed: %s; keeping Wi-Fi alive",
+                     esp_err_to_name(result));
+            return false;
+        }
+        audio_radio_deinit(); // Disable I2S/BT only after PA is muted and IO joined.
+#if CONFIG_IDF_TARGET_ESP32S31
+        if (!usb_audio_output_is_quiescent()) return false;
+#endif
+        _switching = false;
+        _queued_station = -1;
+        _queued_request_id = 0;
+        _status.clear();
+        _error_drawn = false;
+        ESP_LOGI(TAG, "standby audio ready: PA muted, HTTP/HLS stopped, sink released");
+        return true;
+    }
     ~RadioActivity() override
     {
         if (_play_task != nullptr) {
@@ -326,6 +354,10 @@ public:
         return false;
     }
 
+    bool on_volume_key(int delta) override {
+        adjust_volume(delta);
+        return true;
+    }
 private:
     app_status_bar::State _status_bar;
     bool _wifi_ok = false;
@@ -348,6 +380,7 @@ private:
     // State the panel and control row were last drawn with. Losing or regaining
     // the USB output pauses and resumes playback with no touch behind it, so the
     // two places showing the state have to notice that on their own.
+    int _drawn_volume = -1;
     audio_playback_state_t _drawn_state = AUDIO_PLAYBACK_IDLE;
     TaskHandle_t _ui_task = nullptr;
     UBaseType_t _ui_original_priority = 0;
@@ -501,7 +534,7 @@ private:
             // newer worker actually completes.
             _current = result.index;
             _show_list = false;
-            ESP_LOGI(TAG, "Playing station %d/%d: %s", result.index + 1,
+            ESP_LOGI(TAG, "Playback start submitted station %d/%d: %s", result.index + 1,
                      STATION_COUNT, STATIONS[result.index].name);
         } else if (!superseded) {
             char message[96] = {};
@@ -759,7 +792,8 @@ private:
 
     bool update_state_if_changed()
     {
-        if (audio_radio_get_state() == _drawn_state) return false;
+        if (audio_radio_get_state() == _drawn_state &&
+            audio_radio_get_volume() == _drawn_volume) return false;
         // Level-triggered on purpose: a refresh already in flight only means the
         // next poll does the work, so nothing is lost by waiting for the panel.
         if (M5.Display.displayBusy()) return false;
@@ -807,6 +841,7 @@ private:
     {
         audio_playback_state_t state = audio_radio_get_state();
         _drawn_state = state;
+        _drawn_volume = audio_radio_get_volume();
         draw_icon(MusicIconId::Previous, 207, MAIN_CONTROL_Y);
         draw_play_pause_icon();
         draw_icon(MusicIconId::Next, 479, MAIN_CONTROL_Y);

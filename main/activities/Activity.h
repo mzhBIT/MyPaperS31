@@ -30,8 +30,14 @@ public:
     virtual bool on_navigation_key(int /*direction*/) { return false; }
     virtual bool on_reader_menu_key() { return false; }
     virtual bool on_cover_home_key() { return false; }
+    // Dedicated volume keys must not be interpreted as focus/page navigation.
+    // Return true after applying the delta and updating this page's volume UI.
+    virtual bool on_volume_key(int /*delta*/) { return false; }
     // Background-I/O barrier for manual light sleep; called on the UI thread.
     virtual bool can_standby() const { return true; }
+    // Close live resource users before the system tears down Wi-Fi/peripherals.
+    // Return false to cancel this power action without releasing those resources.
+    virtual bool prepare_standby() { return true; }
     virtual void on_standby_enter() { on_hide(); }
     virtual void on_standby_resume() {}
 };

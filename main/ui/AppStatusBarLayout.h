@@ -14,4 +14,5 @@ inline Rect title(int width,int clock_right) {
 }
 inline Rect audio_output(int width) {return {width-134,height+12,110,56};}
 inline bool back_hit(int x,int y) {return Rect{0,height,100,158-height}.contains(x,y);}
+inline bool contains(int x,int y,int width) {return Rect{0,0,width,height}.contains(x,y);}
 }

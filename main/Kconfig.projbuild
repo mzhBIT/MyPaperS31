@@ -26,12 +26,12 @@ endmenu
 menu "Audio Radio Configuration"
 
     config MYPAPER_USB_AUDIO
-        bool "Enable ESP32-P4 USB Host UAC headphone output"
-        depends on IDF_TARGET_ESP32P4
+        bool "Enable USB Host UAC1/UAC2 headphone output"
+        depends on IDF_TARGET_ESP32P4 || IDF_TARGET_ESP32S31
         default y
         help
-            Enable UAC 1.0 PCM playback through the ESP32-P4 High-Speed USB
-            Host port. The existing ES8311 speaker remains available.
+            Enable UAC1/UAC2 PCM playback through the board High-Speed USB
+            Host port. The existing board speaker remains available.
 
     config MYPAPER_USB_AUDIO_SOFTWARE_VOLUME
         bool "Use software volume for USB audio"

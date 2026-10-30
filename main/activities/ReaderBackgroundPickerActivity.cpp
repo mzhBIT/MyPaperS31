@@ -67,7 +67,7 @@ public:
         redraw();
     }
     void loop() override {
-        if(m_profile==ReaderProfile::Rss)m_status_bar.refresh(status_title());
+        if(unified_header())m_status_bar.refresh(status_title());
     }
 
     bool on_key(int key) override
@@ -89,6 +89,8 @@ public:
 
     bool on_touch(const TouchEvent &event) override
     {
+        if (unified_header() && event.type == TouchEventType::Tap &&
+            app_status_bar_layout::contains(event.x,event.y,M5.Display.width())) return true;
         if (!m_notice.empty()) {
             if (event.type == TouchEventType::Tap || event.type == TouchEventType::Back) {
                 m_notice.clear();
@@ -109,7 +111,7 @@ public:
             return true;
         }
         if (event.type != TouchEventType::Tap) return false;
-        if (m_profile!=ReaderProfile::Rss && header_layout::left_hit(event.x, event.y, 120)) {
+        if (!unified_header() && header_layout::left_hit(event.x, event.y, 120)) {
             back();
             return true;
         }
@@ -122,7 +124,8 @@ public:
 
 private:
     app_status_bar::State m_status_bar;
-    int top_height()const {return m_profile==ReaderProfile::Rss ? app_status_bar::height : TOP_H;}
+    bool unified_header()const {return m_standby || m_profile==ReaderProfile::Rss;}
+    int top_height()const {return unified_header() ? app_status_bar::height : TOP_H;}
     const char* status_title()const {
         return ui_locale::text(m_standby ? ui_locale::TextId::StandbyWallpaper : m_book_cover ? ui_locale::TextId::LockScreenBookCover : ui_locale::TextId::ReadingBackground);
     }
@@ -239,7 +242,7 @@ private:
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        if(m_profile==ReaderProfile::Rss) m_status_bar.draw(status_title());
+        if(unified_header()) m_status_bar.draw(status_title());
         else {
             system_font::draw_left(M5.Display, "<", 16, header_layout::text_y(), TFT_BLACK);
             system_font::draw_center(M5.Display,status_title(),width/2,header_layout::text_y(),TFT_BLACK);

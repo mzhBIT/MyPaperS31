@@ -23,7 +23,9 @@ class State {
     std::string _clock;
     uint32_t _last_draw=0,_last_check=0;
     bool _wifi=false;
+    bool _separator=false;
 public:
+    explicit State(bool separator=false) : _separator(separator) {}
     void draw(const std::string& title) {
         M5.Display.fillRect(0,0,M5.Display.width(),height,TFT_WHITE);
         _clock=shelf_status_bar::draw();
@@ -34,6 +36,7 @@ public:
             M5.Display.width()/2-system_font::measure(label,app_status_bar_layout::pixels)/2,
             system_font::centered_y(label,app_status_bar_layout::center_y,app_status_bar_layout::pixels),
             app_status_bar_layout::pixels,TFT_BLACK,TFT_WHITE);
+        if (_separator) M5.Display.drawFastHLine(0,height-1,M5.Display.width(),TFT_BLACK);
         _wifi=wifi_setting_is_enabled();
         _last_draw=_last_check=lgfx::millis();
     }

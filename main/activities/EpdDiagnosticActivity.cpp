@@ -1,7 +1,7 @@
 #include "activities/EpdDiagnosticActivity.h"
 #include "ui/ListFocus.h"
 
-#include "activities/Activity.h"
+#include "activities/StatusBarActivity.h"
 #include "activities/ActivityManager.h"
 #include "ui/SystemFont.h"
 #include "ui/HeaderLayout.h"
@@ -20,7 +20,7 @@
 
 namespace {
 
-constexpr int HEADER_H = header_layout::height;
+constexpr int HEADER_H = app_status_bar::height;
 constexpr int PAD = 20;
 constexpr int MENU_TOP = HEADER_H;
 constexpr int MENU_ROW_H = 70;
@@ -51,20 +51,6 @@ const ui_locale::TextId MENU_LABELS[MENU_COUNT] = {
     ui_locale::TextId::OeGateTest,
 #endif
 };
-
-void draw_header(const char *title)
-{
-    M5.Display.fillRect(0, 0, M5.Display.width(), HEADER_H, TFT_WHITE);
-    system_font::draw_center(M5.Display, title, M5.Display.width() / 2,
-                             header_layout::text_y(),
-                             TFT_BLACK);
-    header_layout::draw_separator(M5.Display);
-}
-
-bool header_back_hit(const TouchEvent &event)
-{
-    return event.type == TouchEventType::Tap && header_layout::left_hit(event.x, event.y, 120);
-}
 
 void draw_center_fit(const char *text, int y, uint16_t color = TFT_BLACK)
 {
@@ -122,7 +108,7 @@ void draw_horizontal_stripes(int x, int y, int w, int h, int stripe)
     M5.Display.drawRect(x, y, w, h, TFT_BLACK);
 }
 
-class EpdDiagnosticActivity final : public Activity {
+class EpdDiagnosticActivity final : public StatusBarActivity {
 public:
     ~EpdDiagnosticActivity() override
     {
@@ -135,9 +121,15 @@ public:
         draw_menu(true);
     }
 
+    void loop() override {
+        // Do not insert status refreshes into waveform/timing test patterns.
+        if (_view == View::Menu) StatusBarActivity::loop();
+    }
+
     bool on_touch(const TouchEvent &event) override
     {
-        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+        if (status_bar_touch(event)) return true;
+        if (event.type == TouchEventType::Back) {
             return go_back();
         }
         if (event.type != TouchEventType::Tap) return false;

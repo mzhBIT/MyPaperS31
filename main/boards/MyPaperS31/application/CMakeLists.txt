@@ -4,9 +4,9 @@ list(REMOVE_ITEM srcs
     "frontlight/frontlight.cpp"
     "usb/usb_modem_probe.c"
     "modem/ml307_sms.cpp"
-    "audio/audio_radio.c" "audio/usb_audio_output.c" "audio/m5_i2c_codec_ctrl.cpp")
+    "audio/audio_radio.c" "audio/m5_i2c_codec_ctrl.cpp")
 list(TRANSFORM srcs PREPEND "${CMAKE_CURRENT_LIST_DIR}/../../../")
-list(APPEND srcs "../BoardS31.cpp" "../FrontlightS31.cpp" "../UnavailableHardware.cpp" "../KeysS31.cpp" "../StandbyS31.cpp"
+list(APPEND srcs "../BoardS31.cpp" "../FrontlightS31.cpp" "../UnavailableHardware.cpp" "../KeysS31.cpp" "../StandbyS31.cpp" "../UsbAudioPort.cpp"
                 "../../../audio/audio_radio_s31.cpp" "../../../audio/file_duration.cpp")
 
 idf_component_register(
@@ -19,7 +19,7 @@ idf_component_register(
              nvs_flash esp_common esp_system esp_psram esp_hw_support log freertos
              esp_wifi esp_event esp_netif esp_http_client esp_http_server esp-tls
              esp_driver_jpeg esp_driver_ppa esp_adc esp_timer mbedtls
-             esp_tinyusb
+             esp_tinyusb usb uac2_host espressif__usb_host_uac
              espressif__libjpeg-turbo espressif__esp_audio_codec
              espressif__esp_audio_effects espressif__gmf_fft
              espressif__gmf_core espressif__gmf_audio espressif__gmf_io

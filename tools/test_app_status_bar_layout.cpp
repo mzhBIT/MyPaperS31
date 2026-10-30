@@ -18,6 +18,16 @@ int main() {
         assert(l::back_hit(36,72));
         assert(!l::back_hit(100,72));
         assert(!l::back_hit(36,158));
+        // Clock, title and status icons share the reserved strip. Its bottom
+        // edge belongs to the first settings row, never an invisible Back hit.
+        for (int x : {0,36,width/2,width-1}) {
+            assert(l::contains(x,0,width));
+            assert(l::contains(x,71,width));
+            assert(!l::contains(x,72,width));
+            assert(!l::contains(x,-1,width));
+        }
+        assert(!l::contains(-1,40,width));
+        assert(!l::contains(width,40,width));
     }
     std::puts("App status strip: title collision bounds, shared height, audio/back hit regions PASS");
 }

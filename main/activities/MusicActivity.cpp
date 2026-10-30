@@ -5,6 +5,7 @@
 #include "activities/ActivityManager.h"
 #include "audio/audio_file_formats.h"
 #include "audio/audio_radio.h"
+#include "audio/usb_audio_output.h"
 #include "audio/embedded_cover.h"
 #include "audio/embedded_lyrics.h"
 #include "renderer/CoverThumbnail.h"
@@ -190,8 +191,18 @@ public:
         audio_radio_deinit();
     }
 
+#if CONFIG_IDF_TARGET_ESP32S31
+    bool prepare_standby() override
+    {
+        if (audio_radio_stop()!=ESP_OK) return false;
+        audio_radio_deinit();
+        return usb_audio_output_is_quiescent();
+    }
+#endif
+
     void on_create() override
     {
+        _observed_volume = audio_radio_get_volume();
         draw_message(ui_locale::text(ui_locale::TextId::ScanningAudioFiles));
         scan_music_dir(MUSIC_ROOT, 0, _tracks);
         std::sort(_tracks.begin(), _tracks.end(), [](const Track &a, const Track &b) {
@@ -233,6 +244,12 @@ public:
             _status = ui_locale::text(ui_locale::TextId::PlaybackFailed);
             draw_all();
             return;
+        }
+        const int volume = audio_radio_get_volume();
+        if (volume != _observed_volume) {
+            _observed_volume = volume;
+            _volume_toast_value = volume;
+            _volume_toast_pending = true;
         }
         if (update_volume_toast()) return;
         update_progress_if_due();
@@ -354,6 +371,10 @@ public:
         return false;
     }
 
+    bool on_volume_key(int delta) override {
+        adjust_volume(delta);
+        return true;
+    }
 private:
     app_status_bar::State _status_bar;
     std::string _initial_path;
@@ -378,6 +399,7 @@ private:
     std::vector<std::string> _lyric_lines;
     std::vector<int> _lyric_starts;
     int _volume_toast_value = 0;
+    int _observed_volume = -1;
     int64_t _volume_toast_hide_us = 0;
     bool _volume_toast_pending = false;
     bool _volume_toast_drawn = false;
@@ -686,6 +708,7 @@ private:
         esp_err_t ret = audio_radio_set_volume(volume);
         if (ret == ESP_OK) {
             _status.clear();
+            _observed_volume = volume;
             _volume_toast_value = volume;
             _volume_toast_pending = true;
             update_volume_toast();

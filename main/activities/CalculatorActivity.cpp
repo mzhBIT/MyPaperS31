@@ -1,8 +1,9 @@
 #include "activities/CalculatorActivity.h"
-#include "activities/Activity.h"
+#include "activities/StatusBarActivity.h"
 #include "activities/ActivityManager.h"
 #include "calculator/Calculator.h"
 #include "calculator/CalculatorPresentation.h"
+#include "calculator/CalculatorLayout.h"
 #include "ui/HeaderLayout.h"
 #include "ui/UiLocale.h"
 #include "ui/calculator_icons_1bpp.h"
@@ -17,7 +18,8 @@ using ui_locale::TextId;
 const char *tr(TextId id) { return ui_locale::text(id); }
 struct Entry { std::string expression, result; };
 std::vector<Entry> history; // At most 20; survives closing the app, not reboot.
-constexpr int PAD = 16, GAP = 12, FULL_REFRESH_INTERVAL = 30;
+constexpr int PAD = calculator::layout::padding, GAP = calculator::layout::gap, FULL_REFRESH_INTERVAL = 30;
+constexpr int CONTENT_TOP = calculator::layout::content_top;
 constexpr char KEYS[] = {'C','D','%','/', '7','8','9','*', '4','5','6','-',
                          '1','2','3','+', 'S','0','.','='};
 constexpr const char *SCI_KEYS[] = {"(", ")", "^2", "^", "sqrt(", "ln(", "log(", "2nd",
@@ -55,21 +57,15 @@ TextId error_text(calculator::Error error) {
     }
 }
 
-class CalculatorActivity final : public Activity {
+class CalculatorActivity final : public StatusBarActivity {
     calculator::Calculator calc_;
     bool dirty_ = true, full_ = true, history_view_ = false, exiting_ = false;
     bool core_ok_ = true;
     bool scientific_ = false, second_ = false;
     int partial_count_ = 0, history_page_ = 0, focus_ = -1;
-    struct Geometry {
-        int width, height, keypad_y, key_width, key_height;
-    };
+    using Geometry = calculator::layout::Geometry;
     Geometry geometry() const {
-        const int w = M5.Display.width(), h = M5.Display.height();
-        const int result_h = scientific_ ? 180 : std::max(170, (h - header_layout::height) / 4);
-        const int top = header_layout::height + result_h;
-        const int rows = scientific_ ? 9 : 5;
-        return {w, h, top, (w-2*PAD-3*GAP)/4, (h-top-PAD-(rows-1)*GAP)/rows};
+        return calculator::layout::geometry(M5.Display.width(),M5.Display.height(),scientific_);
     }
     int key_count() const { return scientific_ ? 36 : 20; }
     void toggle_mode() { scientific_ = !scientific_; focus_ = -1; dirty_ = full_ = true; }
@@ -100,7 +96,7 @@ class CalculatorActivity final : public Activity {
         }
     }
     int history_rows() const {
-        return std::max(1, (static_cast<int>(M5.Display.height())-header_layout::height-72)/132);
+        return std::max(1, (static_cast<int>(M5.Display.height())-CONTENT_TOP-72)/132);
     }
     int history_pages() const {
         return std::max(1, (static_cast<int>(history.size())+history_rows()-1)/history_rows());
@@ -143,19 +139,33 @@ class CalculatorActivity final : public Activity {
         if (before != calc_.expression() || before_error != calc_.error() ||
             before_evaluated != calc_.evaluated()) dirty_ = true;
     }
+    void draw_actions(int width) {
+        auto& d=M5.Display;
+        const int pixels=std::min(32,system_font::pixel_size());
+        for (int side=0; side<(history_view_ ? 1 : 2); ++side) {
+            const auto box=calculator::layout::action(width,side!=0);
+            const std::string label=history_view_ ? std::string("< ")+tr(TextId::Calculator)
+                : tr(side ? TextId::CalcHistory : scientific_ ? TextId::CalcBasic : TextId::CalcScientific);
+            const auto fitted=app_status_bar::fit(label,box.w-12,pixels);
+            system_font::draw_on_background(d,fitted,
+                box.x+(box.w-system_font::measure(fitted,pixels))/2,
+                system_font::centered_y(fitted,box.y+box.h/2,pixels),pixels,TFT_BLACK,TFT_WHITE);
+        }
+        d.drawFastHLine(0,CONTENT_TOP-1,width,TFT_BLACK);
+    }
     void draw_result(const Geometry &g) {
         auto &d = M5.Display;
         int32_t clip_x, clip_y, clip_w, clip_h;
         d.getClipRect(&clip_x,&clip_y,&clip_w,&clip_h);
         const int x = std::max(0,static_cast<int>(clip_x));
-        const int y = std::max(header_layout::height,static_cast<int>(clip_y));
+        const int y = std::max(CONTENT_TOP,static_cast<int>(clip_y));
         const int right = std::min(g.width,static_cast<int>(clip_x+clip_w));
         const int bottom = std::min(g.keypad_y,static_cast<int>(clip_y+clip_h));
         // Never allow glyph backgrounds to erase the first row of keys.
         d.setClipRect(x,y,std::max(0,right-x),std::max(0,bottom-y));
-        d.fillRect(0, header_layout::height, g.width, g.keypad_y-header_layout::height, TFT_WHITE);
+        d.fillRect(0, CONTENT_TOP, g.width, g.keypad_y-CONTENT_TOP, TFT_WHITE);
         const int font_h = system_font::line_height();
-        const int expression_y = header_layout::height+12;
+        const int expression_y = CONTENT_TOP+12;
         const int result_y = expression_y+font_h+8;
         system_font::draw_right(d, tail(pretty(calc_.expression()), g.width-2*PAD),
                                 g.width-PAD, expression_y);
@@ -192,11 +202,11 @@ class CalculatorActivity final : public Activity {
     void draw_history(const Geometry &g) {
         auto &d = M5.Display;
         const int rows = history_rows();
-        if (history.empty()) system_font::draw_center(d,tr(TextId::CalcHistoryEmpty),g.width/2,header_layout::height+40);
+        if (history.empty()) system_font::draw_center(d,tr(TextId::CalcHistoryEmpty),g.width/2,CONTENT_TOP+40);
         for (int row=0; row<rows; ++row) {
             const int index = static_cast<int>(history.size())-1-history_page_*rows-row;
             if (index < 0) break;
-            const int y = header_layout::height+row*132;
+            const int y = CONTENT_TOP+row*132;
             system_font::draw_right(d,tail(pretty(history[index].expression),g.width-2*PAD),g.width-PAD,y+14);
             system_font::draw_right(d,"= " + history[index].result,g.width-PAD,y+62);
             d.drawFastHLine(PAD,y+131,g.width-2*PAD,TFT_BLACK);
@@ -213,17 +223,14 @@ class CalculatorActivity final : public Activity {
         d.startWrite(); d.setDither(false);
         if (whole) {
             d.fillScreen(TFT_WHITE);
-            system_font::draw_left(d,"<",18,header_layout::text_y());
-            system_font::draw_center(d,tr(history_view_ ? TextId::CalcHistory : TextId::Calculator),g.width/2,header_layout::text_y());
-            if (!history_view_) system_font::draw_left(d,system_font::ellipsize(tr(scientific_ ? TextId::CalcBasic : TextId::CalcScientific),148),80,header_layout::text_y());
-            if (!history_view_) system_font::draw_right(d,tr(TextId::CalcHistory),g.width-PAD,header_layout::text_y());
-            header_layout::draw_separator(d);
+            draw_header(tr(history_view_ ? TextId::CalcHistory : TextId::Calculator));
+            draw_actions(g.width);
             if (history_view_) draw_history(g);
             else { draw_result(g); draw_keyboard(g); }
             d.display();
         } else {
             draw_result(g);
-            d.display(0,header_layout::height,g.width,g.keypad_y-header_layout::height);
+            d.display(0,CONTENT_TOP,g.width,g.keypad_y-CONTENT_TOP);
         }
         d.endWrite();
         if (quality) partial_count_ = 0; else ++partial_count_;
@@ -239,6 +246,7 @@ public:
         if (M5.Display.displayBusy()) return;
         if (exiting_) { ActivityManager::instance().pop(); return; }
         if (dirty_) draw();
+        else StatusBarActivity::loop();
     }
     bool on_key(int key) override {
         if (exiting_) return true;
@@ -260,11 +268,13 @@ public:
             page(event.type == TouchEventType::SwipeUp ? 1 : -1); return true;
         }
         if (event.type != TouchEventType::Tap) return true;
-        if (header_layout::left_hit(event.x,event.y,64)) { back(); return true; }
-        if (!history_view_ && header_layout::contains(event.y) && event.x >= 64 && event.x < 240) {
-            toggle_mode(); return true;
+        if (status_bar_touch(event)) return true;
+        if (calculator::layout::action(M5.Display.width(),false).contains(event.x,event.y)) {
+            if (history_view_) back();
+            else toggle_mode();
+            return true;
         }
-        if (!history_view_ && header_layout::right_hit(event.x,event.y,M5.Display.width(),150)) {
+        if (!history_view_ && calculator::layout::action(M5.Display.width(),true).contains(event.x,event.y)) {
             history_view_ = true; history_page_ = 0; dirty_ = full_ = true; return true;
         }
         if (history_view_) return true;

@@ -5,6 +5,11 @@ namespace board_keys {
 enum class Key : uint8_t { None, Boot, VolumeUp, VolumeDown, Power, Home, Previous, Next };
 enum class Gesture : uint8_t { None, Click, LongPress, Repeat };
 
+constexpr int volume_delta(Key key, Gesture gesture) {
+    const int direction = key == Key::VolumeUp ? 1 : key == Key::VolumeDown ? -1 : 0;
+    return direction * (gesture == Gesture::Click ? 10 : gesture == Gesture::LongPress ? 100 : 0);
+}
+
 // Pure state machine, independent of GPIO/I2C and application callbacks.
 struct Button {
     bool stable = false, candidate = false, suppressed = false, long_sent = false;

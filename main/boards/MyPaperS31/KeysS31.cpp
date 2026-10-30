@@ -2,6 +2,7 @@
 #include "Pins.h"
 #include "StandbyS31.h"
 #include "input/BoardKeyState.h"
+#include "audio/audio_radio.h"
 #include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include <M5Unified.h>
@@ -11,6 +12,7 @@
 #include <freertos/queue.h>
 #include <freertos/task.h>
 #include <atomic>
+#include <algorithm>
 
 namespace mypaper::board::s31::keys {
 namespace {
@@ -199,9 +201,17 @@ bool dispatch_one() {
             if (event.gesture == Gesture::Click) standby::request();
             else if (event.gesture == Gesture::LongPress) standby::request_shutdown();
             break;
-        case Key::VolumeUp: case Key::VolumeDown:
-            ESP_LOGI(TAG, "%s reserved: physical volume keys are not wired; use the music/radio controls", name(event.key));
+        case Key::VolumeUp: case Key::VolumeDown: {
+            const int delta = board_keys::volume_delta(event.key,event.gesture);
+            if (!delta || activity->on_volume_key(delta)) break;
+            const int current = audio_radio_get_volume();
+            const int volume = std::clamp(current+delta,0,100);
+            if (volume != current) {
+                const esp_err_t result = audio_radio_set_volume(volume);
+                if (result != ESP_OK) ESP_LOGW(TAG, "volume adjustment failed: %s", esp_err_to_name(result));
+            }
             break;
+        }
         default: break;
         }
         sync_context(manager.generation());

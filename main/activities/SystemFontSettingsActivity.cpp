@@ -1,5 +1,5 @@
 #include "activities/SystemFontSettingsActivity.h"
-#include "activities/Activity.h"
+#include "activities/StatusBarActivity.h"
 #include "activities/ActivityManager.h"
 #include "ui/SystemFont.h"
 #include "ui/EmbeddedFont.h"
@@ -9,11 +9,11 @@
 #include <algorithm>
 
 namespace {
-constexpr int TOP = header_layout::height;
+constexpr int TOP = app_status_bar::height;
 constexpr int LIST_TOP = TOP + 250;
 constexpr int ROW_H = 88;
 constexpr int PAD = 20;
-class SystemFontSettingsActivity final : public Activity {
+class SystemFontSettingsActivity final : public StatusBarActivity {
 public:
     void on_create() override {
         _fonts = system_font::available_fonts();
@@ -22,8 +22,8 @@ public:
         scroll_to_focus(); draw(true);
     }
     bool on_touch(const TouchEvent &event) override {
-        if (event.type == TouchEventType::Back ||
-            (event.type == TouchEventType::Tap && header_layout::left_hit(event.x, event.y))) {
+        if (status_bar_touch(event)) return true;
+        if (event.type == TouchEventType::Back) {
             ActivityManager::instance().pop(); return true;
         }
         if (event.type == TouchEventType::SwipeUp) { move(visible()); return true; }
@@ -76,9 +76,7 @@ private:
         auto &d = M5.Display;
         d.startWrite(); d.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_text);
         d.fillScreen(TFT_WHITE);
-        system_font::draw_left(d, "<", PAD, header_layout::text_y());
-        system_font::draw_center(d, text(TextId::SystemFont), d.width()/2, header_layout::text_y());
-        header_layout::draw_separator(d);
+        draw_header(text(TextId::SystemFont));
         const int center = TOP + 32;
         system_font::draw_left(d, "-", 65, center);
         system_font::draw_center(d, std::string(text(TextId::FontSize)) + ": " +

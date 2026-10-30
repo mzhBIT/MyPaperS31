@@ -23,7 +23,8 @@ typedef enum {
     AUDIO_OUTPUT_AUTO,
 } audio_output_mode_t;
 
-// S31 initialization reads NVS: call from a task with an internal-RAM stack.
+// S31 initialization and settings access may read/write NVS: call from a task
+// with an internal-RAM stack. Volume access alone does not initialize audio.
 esp_err_t audio_radio_init(void);
 esp_err_t audio_radio_play(const char *url);
 esp_err_t audio_radio_play_file(const char *path);

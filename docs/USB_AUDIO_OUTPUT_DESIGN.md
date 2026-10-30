@@ -232,3 +232,8 @@ HLS 的 stop/destroy/run 不能放在 UI 触摸回调中，否则网络超时会
 - `TX URB ... packets skipped` 是否只为偶发一次还是持续出现；
 - Radio worker 的 `request/latest` 是否一致；
 - EPD 刷新期间是否同时出现 USB gap、HLS underrun 或 UI 饥饿。
+
+
+## S31 / IDF 6.1 接入
+
+S31 复用本文件描述的 UAC1/UAC2 facade 与驱动。Type-C 路由、OTG 供电、PCM 末端转换和实机验证范围见 [S31_USB_AUDIO.md](S31_USB_AUDIO.md)。P4 保持原 IDF 5.3.5 Host 覆盖组件和缓冲参数。

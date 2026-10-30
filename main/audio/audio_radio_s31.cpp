@@ -15,6 +15,8 @@
 
 #include "audio/audio_radio.h"
 #include "audio/file_duration.h"
+#include "audio/usb_audio_output.h"
+#include "audio/S31UsbPcm.h"
 #include "boards/MyPaperS31/Pins.h"
 
 #include "esp_ae_bit_cvt.h"
@@ -30,8 +32,6 @@
 #include "esp_gmf_bit_cvt.h"
 #include "esp_hls_io.h"
 #include "esp_gmf_io_http.h"
-#include "esp_gmf_uri_parser.h"
-#include "esp_http_client.h"
 #include "esp_crt_bundle.h"
 #include "media_lib_adapter.h"
 
@@ -49,14 +49,15 @@
 #include <freertos/queue.h>
 #include <freertos/task.h>
 #include <nvs.h>
-#include <lwip/netdb.h>
-#include <lwip/inet.h>
+#include <lwip/ip_addr.h>
 
 #include <atomic>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <new>
+#include <mutex>
+#include <initializer_list>
 #include <strings.h>
 
 namespace pins = mypaper::board::s31;
@@ -68,8 +69,14 @@ constexpr const char *TAG = "AUDIO_S31";
 constexpr const char *NVS_NAMESPACE = "audio_out";
 constexpr const char *NVS_MODE_KEY = "mode";
 constexpr const char *NVS_SPK_VOLUME_KEY = "spk_volume";
+constexpr const char *NVS_USB_VOLUME_KEY = "usb_volume";
 
 constexpr uint32_t DEFAULT_OUTPUT_RATE = 16000;
+#ifdef CONFIG_MYPAPER_USB_AUDIO_MAX_VOLUME
+constexpr int USB_VOLUME_CEILING = CONFIG_MYPAPER_USB_AUDIO_MAX_VOLUME;
+#else
+constexpr int USB_VOLUME_CEILING = 5;
+#endif
 constexpr size_t INPUT_CHUNK_BYTES = 8192;
 constexpr size_t OUTPUT_CHUNK_INITIAL = 16384;
 constexpr size_t OUTPUT_CHUNK_MAX = 512 * 1024;
@@ -80,6 +87,7 @@ constexpr UBaseType_t WORKER_PRIORITY = 5;
 // I2S sink must run above it, otherwise a status redraw can exhaust the ~90 ms
 // DMA queue. The sink blocks on I2S regularly, leaving time for UI and IO.
 constexpr UBaseType_t NETWORK_AUDIO_PRIORITY = 12;
+constexpr size_t NETWORK_HTTP_BUFFER_BYTES = 128 * 1024;
 // The BT/PA rail is switched on when the backend initializes, so the module
 // still has to boot before it accepts AT commands.  200 ms was demonstrably
 // too short (AT+RX=2 went unanswered); the reference board leaves the rail on
@@ -102,6 +110,19 @@ constexpr unsigned CODEC_DMA_FRAME_NUM = 240;
 std::atomic<bool> s_initialized{false};
 std::atomic<int> s_state{AUDIO_PLAYBACK_IDLE};
 std::atomic<int> s_volume{30};
+std::atomic<int> s_usb_volume{20};
+std::atomic<bool> s_force_speaker{false}, s_active_usb{false}, s_usb_loss_pause{false};
+std::atomic<uint32_t> s_active_rate{DEFAULT_OUTPUT_RATE};
+std::atomic<uint64_t> s_played_time_us{0};
+std::mutex s_pcm_mutex; // Format/conversion/write and route changes share this barrier.
+uint8_t s_usb_channels = 2, s_usb_bits = 16;
+uint8_t s_source_pcm_bits=16, s_usb_preferred_bits=16; // Protected by s_pcm_mutex.
+bool s_usb_streaming = false; // Protected by s_pcm_mutex.
+std::atomic<uint32_t> s_usb_retry_ms{0};
+std::mutex s_usb_lifecycle_mutex;
+std::mutex s_sync_mutex;
+std::mutex s_settings_mutex;
+bool s_settings_loaded = false;
 std::atomic<int> s_output_mode{AUDIO_OUTPUT_SPEAKER};
 std::atomic<bool> s_stop{false};
 std::atomic<bool> s_pause{false};
@@ -120,10 +141,24 @@ std::atomic<bool> s_network_write_enabled{false};
 uint32_t s_hls_format = 0;
 wifi_ps_type_t s_network_previous_ps = WIFI_PS_NONE;
 bool s_network_restore_ps = false; // Protected by s_lock.
-std::atomic<bool> s_network_endpoint_logged{false};
 std::atomic<uint32_t> s_network_last_pcm_ms{0};
+std::atomic<uint32_t> s_network_pcm_rate{DEFAULT_OUTPUT_RATE};
 uint32_t s_network_gap_log_ms = 0; // Owned by the network audio task.
 unsigned s_network_gap_count = 0;
+
+struct NetworkReadStats {
+    std::atomic<uint32_t> bytes{0}, max_wait_us{0}, buffer_before{0};
+    void reset() { bytes=0; max_wait_us=0; buffer_before=0; }
+    void record(uint32_t count, uint32_t wait_us, uint32_t buffered) {
+        bytes.fetch_add(count);
+        buffer_before.store(buffered);
+        uint32_t maximum=max_wait_us.load();
+        while (maximum<wait_us && !max_wait_us.compare_exchange_weak(maximum,wait_us)) {}
+    }
+};
+NetworkReadStats s_http_read_stats, s_input_read_stats;
+using NetworkReadFilter = decltype(esp_gmf_io_cfg_t{}.buffer_cfg.read_filter);
+NetworkReadFilter s_input_read_filter = nullptr; // Set before run; cleared after task join.
 
 i2s_chan_handle_t s_tx = nullptr;
 i2s_chan_handle_t s_rx = nullptr;
@@ -136,6 +171,7 @@ bool s_decoders_registered = false;
 
 void ensure_sync()
 {
+    std::lock_guard<std::mutex> guard(s_sync_mutex);
     if (s_lock == nullptr) s_lock = xSemaphoreCreateMutex();
     if (s_exited == nullptr) s_exited = xSemaphoreCreateBinary();
     if (s_bt_done == nullptr) s_bt_done = xSemaphoreCreateBinary();
@@ -190,6 +226,80 @@ void pa_set(bool on)
     }
 }
 
+// USB Host is optional: charger/PC VBUS and unavailable devices must never
+// prevent the speaker path from starting. Called under s_lock (or at init).
+esp_err_t ensure_usb_host()
+{
+    std::lock_guard<std::mutex> lifecycle(s_usb_lifecycle_mutex);
+    if (s_force_speaker.load() || s_output_mode.load()==AUDIO_OUTPUT_SPEAKER)
+        return ESP_ERR_NOT_SUPPORTED;
+    s_usb_retry_ms.store(uint32_t(esp_timer_get_time()/1000));
+    const esp_err_t result=usb_audio_output_init();
+    static esp_err_t previous=ESP_OK;
+    if (result!=ESP_OK && result!=previous)
+        ESP_LOGW(TAG,"Type-C audio Host unavailable: %s (check external VBUS / charger)",esp_err_to_name(result));
+    previous=result;
+    return result;
+}
+
+void finish_usb_host()
+{
+    std::lock_guard<std::mutex> lifecycle(s_usb_lifecycle_mutex);
+    usb_audio_output_deinit();
+    s_usb_retry_ms=0;
+}
+
+// Caller owns s_pcm_mutex. This serializes a complete PCM block with routing:
+// converters cannot render with one rate and submit to another sink.
+esp_err_t select_sink_locked(bool manual_speaker_fallback = false)
+{
+    const bool want_usb = !manual_speaker_fallback && !s_force_speaker.load() &&
+        s_output_mode.load() != AUDIO_OUTPUT_SPEAKER && usb_audio_output_is_connected();
+    if (want_usb) {
+        const uint8_t preferred=s31_usb_pcm::valid_bits(s_source_pcm_bits) ? s_source_pcm_bits : 16;
+        if (s_active_usb.load() && s_usb_streaming && s_usb_preferred_bits==preferred) return ESP_OK;
+        uint32_t rate = 0;
+        uint8_t channels = 0, bits = 0;
+        // Match P4's bit-depth preference and packed-24 layout. The shared
+        // facade and S31 class driver reject padded UAC2 subslots.
+        for (uint8_t c : {uint8_t(2), uint8_t(1)}) {
+            for (uint8_t b : {preferred, uint8_t(32), uint8_t(24), uint8_t(16)}) {
+                if (usb_audio_output_select_rate(48000,48000,c,b,&rate)) {
+                    channels=c; bits=b; break;
+                }
+            }
+            if (rate) break;
+        }
+        if (!rate) return ESP_ERR_NOT_SUPPORTED;
+        // Apply attenuation before the first non-silent packet.
+        usb_audio_output_set_volume(uint8_t(s_usb_volume.load()));
+        const esp_err_t ret = usb_audio_output_start(rate,channels,bits);
+        if (ret != ESP_OK) return ret;
+        pa_set(false);
+        s_usb_channels=channels; s_usb_bits=bits; s_usb_preferred_bits=preferred;
+        s_active_rate.store(rate);
+        s_usb_streaming=true;
+        s_active_usb.store(true);
+        ESP_LOGI(TAG,"output USB: %u Hz %u ch %u bit",unsigned(rate),channels,bits);
+        return ESP_OK;
+    }
+    if (s_output_mode.load()==AUDIO_OUTPUT_USB && !s_force_speaker.load() &&
+        !manual_speaker_fallback) return ESP_ERR_NOT_FOUND;
+    if (s_usb_streaming) usb_audio_output_stop();
+    s_usb_streaming=false;
+    s_active_usb.store(false);
+    s_active_rate.store(s_output_rate.load());
+    if (!s_bt_ready.load() || !s_tx) return ESP_ERR_INVALID_STATE;
+    pa_set(s_state.load()==AUDIO_PLAYBACK_PLAYING && !s_pause.load());
+    return ESP_OK;
+}
+
+bool wait_pcm_unpaused()
+{
+    while (s_pause.load() && !s_stop.load()) vTaskDelay(pdMS_TO_TICKS(10));
+    return !s_stop.load();
+}
+
 // -------------------------------------------------------------- converters --
 
 struct Converters {
@@ -200,6 +310,7 @@ struct Converters {
     uint32_t dst_rate = 0;
     uint8_t channels = 0;
     uint8_t bits = 0;
+    uint8_t dst_bits = 16;
     bool configured = false;
     uint8_t *stage1 = nullptr;
     uint8_t *stage2 = nullptr;
@@ -224,6 +335,7 @@ struct Converters {
         src_rate = dst_rate = 0;
         channels = 0;
         bits = 0;
+        dst_bits = 16;
         configured = false;
     }
 
@@ -238,10 +350,10 @@ struct Converters {
     }
 
     bool configure(uint32_t source_rate, uint8_t source_channels, uint8_t source_bits,
-                   uint32_t target_rate)
+                   uint32_t target_rate, uint8_t target_bits=16)
     {
         if (configured && source_rate == src_rate && target_rate == dst_rate &&
-            source_channels == channels && source_bits == bits) {
+            source_channels == channels && source_bits == bits && target_bits == dst_bits) {
             return true;
         }
         close();
@@ -249,14 +361,15 @@ struct Converters {
         dst_rate = target_rate;
         channels = source_channels;
         bits = source_bits;
-        configured = true;
+        dst_bits = target_bits;
 
-        if (source_bits != 16) {
+        if (!s31_usb_pcm::valid_bits(target_bits)) return false;
+        if (source_bits != target_bits) {
             esp_ae_bit_cvt_cfg_t cfg = {
                 .sample_rate = source_rate,
                 .channel = source_channels,
                 .src_bits = source_bits,
-                .dest_bits = 16,
+                .dest_bits = target_bits,
             };
             if (esp_ae_bit_cvt_open(&cfg, &bit) != ESP_AE_ERR_OK) {
                 ESP_LOGE(TAG, "bit converter open failed (%u bit)", source_bits);
@@ -266,7 +379,7 @@ struct Converters {
         if (source_channels != 2) {
             esp_ae_ch_cvt_cfg_t cfg = {
                 .sample_rate = source_rate,
-                .bits_per_sample = 16,
+                .bits_per_sample = target_bits,
                 .src_ch = source_channels,
                 .dest_ch = 2,
                 .weight = nullptr,
@@ -282,7 +395,7 @@ struct Converters {
                 .src_rate = source_rate,
                 .dest_rate = target_rate,
                 .channel = 2,
-                .bits_per_sample = 16,
+                .bits_per_sample = target_bits,
                 .complexity = 2,
                 .perf_type = ESP_AE_RATE_CVT_PERF_TYPE_MEMORY,
             };
@@ -292,12 +405,13 @@ struct Converters {
                 return false;
             }
         }
-        ESP_LOGI(TAG, "PCM %u Hz %u ch %u bit -> %u Hz 2 ch 16 bit",
-                 source_rate, source_channels, source_bits, target_rate);
+        configured = true;
+        ESP_LOGI(TAG, "PCM %u Hz %u ch %u bit -> %u Hz 2 ch %u bit",
+                 source_rate, source_channels, source_bits, target_rate, target_bits);
         return true;
     }
 
-    // Converts interleaved PCM to 16-bit stereo at dst_rate.
+    // Converts interleaved PCM to dst_bits stereo at dst_rate.
     bool process(const uint8_t *input, size_t length, const uint8_t **output,
                  uint32_t *frames)
     {
@@ -308,8 +422,9 @@ struct Converters {
         if (count == 0) return false;
 
         const uint8_t *data = input;
+        const size_t sample_bytes=dst_bits/8;
         if (bit != nullptr) {
-            if (!ensure(&stage1, &cap1, (size_t)count * channels * 2)) return false;
+            if (!ensure(&stage1, &cap1, (size_t)count * channels * sample_bytes)) return false;
             if (esp_ae_bit_cvt_process(bit, count, (esp_ae_sample_t)data, stage1) !=
                 ESP_AE_ERR_OK) {
                 return false;
@@ -317,7 +432,7 @@ struct Converters {
             data = stage1;
         }
         if (channel != nullptr) {
-            if (!ensure(&stage2, &cap2, (size_t)count * 2 * 2)) return false;
+            if (!ensure(&stage2, &cap2, (size_t)count * 2 * sample_bytes)) return false;
             if (esp_ae_ch_cvt_process(channel, count, (esp_ae_sample_t)data, stage2) !=
                 ESP_AE_ERR_OK) {
                 return false;
@@ -331,7 +446,7 @@ struct Converters {
                 max_out == 0) {
                 return false;
             }
-            if (!ensure(&stage3, &cap3, (size_t)max_out * 2 * 2)) return false;
+            if (!ensure(&stage3, &cap3, (size_t)max_out * 2 * sample_bytes)) return false;
             uint32_t out_count = max_out;
             if (esp_ae_rate_cvt_process(rate, (esp_ae_sample_t)data, count,
                                         stage3, &out_count) != ESP_AE_ERR_OK) {
@@ -401,8 +516,41 @@ bool i2s_write_all(const void *data, size_t bytes)
 // Expand signed 16-bit stereo to the BH1098G layout: left-justified 16-bit
 // samples in 32-bit slots, duplicated to both channels, with a square-law
 // software volume (100 == full scale).
-bool write_pcm(const uint8_t *data, uint32_t frames)
+bool write_pcm(const uint8_t *data, uint32_t frames, uint8_t pcm_bits=16)
 {
+    if (s_active_usb.load()) {
+        uint8_t packed[WRITE_CHUNK_FRAMES*2*4];
+        const uint8_t *samples=data;
+        const int v=s_usb_volume.load();
+        const int gain=usb_audio_output_uses_software_volume()
+            ? int(int64_t(v)*65536*USB_VOLUME_CEILING/10000) : 65536;
+        while (frames && !s_stop.load()) {
+            if (!usb_audio_output_is_connected()) {
+                s_usb_streaming=false;
+                s_usb_loss_pause.store(true);
+                s_pause.store(true);
+                s_state.store(AUDIO_PLAYBACK_PAUSED);
+                return true;
+            }
+            const uint32_t n=frames<WRITE_CHUNK_FRAMES ? frames : WRITE_CHUNK_FRAMES;
+            const size_t bytes=s31_usb_pcm::pack(packed,samples,n,pcm_bits,s_usb_channels,s_usb_bits,gain);
+            const esp_err_t ret=usb_audio_output_write(packed,bytes,100);
+            if (ret!=ESP_OK) {
+                if (ret==ESP_ERR_INVALID_STATE || ret==ESP_ERR_NOT_FOUND || !usb_audio_output_is_connected()) {
+                    s_usb_streaming=false; s_usb_loss_pause.store(true);
+                    s_pause.store(true); s_state.store(AUDIO_PLAYBACK_PAUSED);
+                    return true;
+                }
+                ESP_LOGW(TAG,"USB PCM write failed: %s",esp_err_to_name(ret));
+                return false;
+            }
+            s_played_frames.fetch_add(n);
+            s_played_time_us.fetch_add(uint64_t(n)*1000000/s_active_rate.load());
+            samples+=n*2*(pcm_bits/8); frames-=n;
+        }
+        return true;
+    }
+    if (pcm_bits!=16) return false; // Speaker converters always produce 16-bit stereo.
     int32_t expanded[WRITE_CHUNK_FRAMES * 2];
     const auto *samples = reinterpret_cast<const int16_t *>(data);
     const int factor = volume_factor();
@@ -424,6 +572,7 @@ bool write_pcm(const uint8_t *data, uint32_t frames)
         samples += chunk * 2;
         frames -= chunk;
         s_played_frames.fetch_add(chunk);
+        s_played_time_us.fetch_add(uint64_t(chunk)*1000000/s_active_rate.load());
     }
     return true;
 }
@@ -770,6 +919,11 @@ void sink_deinit()
 
 void load_settings()
 {
+    // Read once, without powering BT/I2S, so global volume keys can preserve
+    // the saved level before playback and across audio reinitialization.
+    std::lock_guard<std::mutex> guard(s_settings_mutex);
+    if (s_settings_loaded) return;
+    s_settings_loaded = true;
     nvs_handle_t handle = 0;
     if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) != ESP_OK) return;
     uint8_t value = 0;
@@ -778,12 +932,9 @@ void load_settings()
     }
     if (nvs_get_u8(handle, NVS_MODE_KEY, &value) == ESP_OK &&
         value <= AUDIO_OUTPUT_AUTO) {
-        // USB output is not wired on S31 yet; never leave playback pointed at
-        // a sink that cannot be opened.
-        s_output_mode.store(value == (uint8_t)AUDIO_OUTPUT_USB
-                                ? (int)AUDIO_OUTPUT_SPEAKER
-                                : (int)value);
+        s_output_mode.store(value);
     }
+    if (nvs_get_u8(handle, NVS_USB_VOLUME_KEY, &value)==ESP_OK && value<=100) s_usb_volume.store(value);
     nvs_close(handle);
 }
 
@@ -838,15 +989,20 @@ bool play_pcm(Converters &converters, esp_audio_simple_dec_handle_t decoder,
         }
         return true;
     }
-    const uint32_t target = s_output_rate.load();
+    if (!wait_pcm_unpaused()) return false;
+    std::lock_guard<std::mutex> pcm(s_pcm_mutex);
+    s_source_pcm_bits=info.bits_per_sample;
+    if (s_active_usb.load() && select_sink_locked()!=ESP_OK) return false;
+    const uint32_t target = s_active_rate.load();
+    const uint8_t target_bits=s_active_usb.load() ? s_usb_bits : 16;
     if (!converters.configure(info.sample_rate, info.channel, info.bits_per_sample,
-                              target)) {
+                              target,target_bits)) {
         return false;
     }
     const uint8_t *output = nullptr;
     uint32_t frames = 0;
     if (!converters.process(data, length, &output, &frames)) return false;
-    return write_pcm(output, frames);
+    return write_pcm(output, frames, target_bits);
 }
 
 void network_log_link(const char *stage)
@@ -867,52 +1023,29 @@ void network_log_link(const char *stage)
     esp_netif_t *default_netif = esp_netif_get_default_netif();
     ESP_LOGI(TAG, "radio default route: interface=%s is_wifi=%d",
              default_netif ? esp_netif_get_desc(default_netif) : "none", default_netif == netif && netif != nullptr);
-    for (int i = 0; netif && i < 2; ++i) {
+    for (int i = 0; netif && i < 3; ++i) {
         esp_netif_dns_info_t dns = {};
-        if (esp_netif_get_dns_info(netif, i == 0 ? ESP_NETIF_DNS_MAIN : ESP_NETIF_DNS_BACKUP, &dns) == ESP_OK &&
+        if (esp_netif_get_dns_info(netif, static_cast<esp_netif_dns_type_t>(i), &dns) == ESP_OK &&
             dns.ip.type == ESP_IPADDR_TYPE_V4) {
             ESP_LOGI(TAG, "radio DNS server[%d]=" IPSTR, i, IP2STR(&dns.ip.u_addr.ip4));
         }
     }
 }
 
-int network_http_event(http_stream_event_msg_t *event)
+void network_prepare_dns()
 {
-    if (!event || event->event_id != HTTP_STREAM_PRE_REQUEST ||
-        s_network_endpoint_logged.exchange(true)) return ESP_GMF_ERR_OK;
-    // One diagnostic lookup per station, with the same family/socket hints as
-    // ESP-TLS. Do not replace URLs/Host/SNI or silently change routing policy.
-    char url[512];
-    auto client = static_cast<esp_http_client_handle_t>(event->http_client);
-    if (esp_http_client_get_url(client, url, sizeof(url)) != ESP_OK) return ESP_GMF_ERR_OK;
-    esp_gmf_uri_t *uri = nullptr;
-    if (esp_gmf_uri_parse(url, &uri) != 0 || !uri || !uri->host) {
-        if (uri) esp_gmf_uri_free(uri);
-        return ESP_GMF_ERR_OK;
-    }
-    addrinfo hints = {}, *addresses = nullptr;
-    hints.ai_family = AF_UNSPEC;
-    hints.ai_socktype = SOCK_STREAM;
-    const int64_t begin = esp_timer_get_time();
-    const int result = getaddrinfo(uri->host, nullptr, &hints, &addresses);
-    ESP_LOGI(TAG, "radio resolve: host=%s port=%d result=%d time=%lld ms",
-             uri->host, uri->port, result, (long long)((esp_timer_get_time() - begin) / 1000));
-    int index = 0;
-    for (auto *address = addresses; address && index < 4; address = address->ai_next, ++index) {
-        char text[INET6_ADDRSTRLEN] = {};
-        const void *ip = nullptr;
-        if (address->ai_family == AF_INET)
-            ip = &reinterpret_cast<sockaddr_in *>(address->ai_addr)->sin_addr;
-        else if (address->ai_family == AF_INET6)
-            ip = &reinterpret_cast<sockaddr_in6 *>(address->ai_addr)->sin6_addr;
-        if (ip && inet_ntop(address->ai_family, ip, text, sizeof(text))) {
-            ESP_LOGI(TAG, "radio endpoint[%d]: family=%s address=%s sdk_default_first=%d", index,
-                     address->ai_family == AF_INET ? "IPv4" : "IPv6", text, index == 0);
-        }
-    }
-    if (addresses) freeaddrinfo(addresses);
-    esp_gmf_uri_free(uri);
-    return ESP_GMF_ERR_OK;
+    // Preserve DHCP MAIN/BACKUP (which may serve local names). Only populate
+    // the reserved fallback slot when it has no configured resolver.
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    if (!netif || esp_netif_get_default_netif() != netif) return;
+    esp_netif_dns_info_t dns = {};
+    const auto read = esp_netif_get_dns_info(netif, ESP_NETIF_DNS_FALLBACK, &dns);
+    if (read != ESP_OK || !ESP_IP_IS_ANY(dns.ip)) return;
+    dns.ip.type = ESP_IPADDR_TYPE_V4;
+    dns.ip.u_addr.ip4.addr = ESP_IP4TOADDR(223,5,5,5);
+    const auto result = esp_netif_set_dns_info(netif, ESP_NETIF_DNS_FALLBACK, &dns);
+    if (result == ESP_OK) ESP_LOGI(TAG, "radio DNS fallback: 223.5.5.5 (DHCP main/backup retained)");
+    else ESP_LOGW(TAG, "radio DNS fallback unavailable: %s", esp_err_to_name(result));
 }
 
 void network_acquire_wifi()
@@ -925,6 +1058,7 @@ void network_acquire_wifi()
             s_network_restore_ps = true;
         } else ESP_LOGW(TAG, "radio Wi-Fi power-save disable failed: %s", esp_err_to_name(result));
     }
+    network_prepare_dns();
     network_log_link("start");
 }
 
@@ -937,6 +1071,56 @@ void network_release_wifi()
     s_network_restore_ps = false;
 }
 
+// Instrument the standard buffered-read branch without replacing HTTP reads,
+// gzip decoding, reconnects, or the SDK's matching release_read ownership.
+esp_gmf_err_t network_http_read_filter(esp_gmf_io_handle_t handle, void *payload, uint32_t wanted, int ticks)
+{
+    auto *io=static_cast<esp_gmf_io_t *>(handle);
+    auto *load=static_cast<esp_gmf_payload_t *>(payload);
+    uint32_t filled=0;
+    esp_gmf_io_get_db_filled_size(handle,&filled);
+    const int64_t begin=esp_timer_get_time();
+    const auto result=esp_gmf_db_acquire_read(io->data_bus,&io->db_block,wanted,ticks);
+    const uint32_t elapsed=uint32_t(esp_timer_get_time()-begin);
+    if (result==ESP_GMF_IO_OK) {
+        load->buf=io->db_block.buf;
+        load->buf_length=io->db_block.buf_length;
+        load->valid_size=io->db_block.valid_size;
+        load->is_done=io->db_block.is_last;
+    }
+    s_http_read_stats.record(result==ESP_GMF_IO_OK ? load->valid_size : 0,elapsed,filled);
+    return static_cast<esp_gmf_err_t>(result);
+}
+
+esp_gmf_err_t network_input_read_filter(esp_gmf_io_handle_t handle, void *payload, uint32_t wanted, int ticks)
+{
+    uint32_t filled=0;
+    esp_gmf_io_get_db_filled_size(handle,&filled);
+    const int64_t begin=esp_timer_get_time();
+    // Preserve HLS metadata/format detection and its original read semantics.
+    const auto result=s_input_read_filter(handle,payload,wanted,ticks);
+    auto *load=static_cast<esp_gmf_payload_t *>(payload);
+    s_input_read_stats.record(result==ESP_GMF_ERR_OK ? load->valid_size : 0,
+                             uint32_t(esp_timer_get_time()-begin),filled);
+    return result;
+}
+
+esp_gmf_err_t network_http_io_init(void *config, esp_gmf_obj_handle_t *object)
+{
+    esp_gmf_io_handle_t handle=nullptr;
+    const auto result=esp_gmf_io_http_init(static_cast<http_io_cfg_t *>(config),&handle);
+    if (result!=ESP_GMF_ERR_OK) return result;
+    auto *io=static_cast<esp_gmf_io_t *>(handle);
+    // This SDK's HTTP initializer does not copy buffer_cfg.read_filter.
+    // Install after init, and preserve it in pool clones (including HLS HTTP).
+    io->io_cfg.buffer_cfg.read_filter=network_http_read_filter;
+    io->parent.new_obj=network_http_io_init;
+    *object=handle;
+    return ESP_GMF_ERR_OK;
+}
+
+Converters s_network_sink_converter; // Only the ASP sink task uses it; closed after join.
+
 int network_write(uint8_t *data, int length, void *)
 {
     // Consume callbacks arriving during teardown without touching I2S.
@@ -948,24 +1132,48 @@ int network_write(uint8_t *data, int length, void *)
                             s_output_rate.load();
     // Time between callbacks excludes the previous blocking I2S write. This
     // measures delayed PCM supply, not normal playback pacing or HTTP TS EOF.
+    bool report=false;
+    uint32_t window_ms=0;
     if (previous && uint32_t(now - previous) >= dma_ms * 2 / 3) {
         ++s_network_gap_count;
         if (s_network_gap_count == 1 || uint32_t(now - s_network_gap_log_ms) >= 5000) {
-            ESP_LOGW(TAG, "radio PCM supply gap: %u ms DMA_capacity=%u ms gaps=%u task_prio=%u",
-                     unsigned(now - previous), unsigned(dma_ms), s_network_gap_count,
-                     unsigned(uxTaskPriorityGet(nullptr)));
-            s_network_gap_log_ms = now;
+            window_ms=now-s_network_gap_log_ms;
+            s_network_gap_log_ms=now;
+            report=true;
         }
     }
-    const bool ok = write_pcm(data, uint32_t(length / 4));
+    if (!wait_pcm_unpaused()) return length;
+    bool ok=false;
+    {
+        std::lock_guard<std::mutex> pcm(s_pcm_mutex);
+        const uint8_t *output=nullptr;
+        uint32_t frames=0;
+        const uint8_t target_bits=s_active_usb.load() ? s_usb_bits : 16;
+        ok=s_network_sink_converter.configure(s_network_pcm_rate.load(),2,16,s_active_rate.load(),target_bits) &&
+            s_network_sink_converter.process(data,size_t(length),&output,&frames) && write_pcm(output,frames,target_bits);
+    }
+    // Queue the recovered PCM before printing; diagnostics must not extend an
+    // already empty DMA interval. Counters cover the interval since last log.
+    if (report) {
+        ESP_LOGW(TAG, "radio PCM supply gap: %u ms DMA_capacity=%u ms gaps=%u task_prio=%u window=%u ms http_bytes=%u http_wait_max=%u ms http_buf_before=%u input_bytes=%u input_wait_max=%u ms input_buf_before=%u",
+                 unsigned(now-previous),unsigned(dma_ms),s_network_gap_count,
+                 unsigned(uxTaskPriorityGet(nullptr)),unsigned(window_ms),
+                 unsigned(s_http_read_stats.bytes.exchange(0)),
+                 unsigned(s_http_read_stats.max_wait_us.exchange(0)/1000),
+                 unsigned(s_http_read_stats.buffer_before.load()),
+                 unsigned(s_input_read_stats.bytes.exchange(0)),
+                 unsigned(s_input_read_stats.max_wait_us.exchange(0)/1000),
+                 unsigned(s_input_read_stats.buffer_before.load()));
+    }
     s_network_last_pcm_ms.store(uint32_t(esp_timer_get_time() / 1000));
     return ok ? length : -1;
 }
 
 int network_prepare(esp_asp_handle_t *handle, void *)
 {
+    s_network_pcm_rate.store(s_output_rate.load());
     s_network_last_pcm_ms.store(0);
-    s_network_gap_log_ms = 0;
+    s_network_gap_log_ms = uint32_t(esp_timer_get_time()/1000);
     s_network_gap_count = 0;
     // The ASP callback passes its opaque handle directly (same API as P4).
     esp_gmf_pipeline_handle_t pipeline = nullptr;
@@ -975,10 +1183,18 @@ int network_prepare(esp_asp_handle_t *handle, void *)
         esp_gmf_pipeline_get_el_by_name(pipeline, "aud_rate_cvt", &rate) != ESP_GMF_ERR_OK || !rate ||
         esp_gmf_pipeline_get_el_by_name(pipeline, "aud_ch_cvt", &channel) != ESP_GMF_ERR_OK || !channel ||
         esp_gmf_pipeline_get_el_by_name(pipeline, "aud_bit_cvt", &bits) != ESP_GMF_ERR_OK || !bits) return -1;
+    esp_gmf_io_handle_t input=nullptr;
+    if (esp_gmf_pipeline_get_in(pipeline,&input)==ESP_GMF_ERR_OK && input) {
+        auto *io=static_cast<esp_gmf_io_t *>(input);
+        if (std::strcmp(OBJ_GET_TAG(input),"io_hls")==0 && io->io_cfg.buffer_cfg.read_filter) {
+            s_input_read_filter=io->io_cfg.buffer_cfg.read_filter;
+            io->io_cfg.buffer_cfg.read_filter=network_input_read_filter;
+        }
+    }
     // BH1098G owns the hardware clock: upsample low-rate stations too, rather
     // than applying the adaptive upper limit used by the P4 codec.
     if (esp_gmf_rate_cvt_clear_max_dest_rate(rate) != ESP_GMF_ERR_OK ||
-        esp_gmf_rate_cvt_set_dest_rate(rate, s_output_rate.load()) != ESP_GMF_ERR_OK ||
+        esp_gmf_rate_cvt_set_dest_rate(rate, s_network_pcm_rate.load()) != ESP_GMF_ERR_OK ||
         esp_gmf_ch_cvt_set_dest_channel(channel, 2) != ESP_GMF_ERR_OK ||
         esp_gmf_bit_cvt_set_dest_bits(bits, 16) != ESP_GMF_ERR_OK) return -1;
     ESP_LOGI(TAG, "radio PCM target: %u Hz stereo 16 bit -> BH1098G",
@@ -1047,10 +1263,10 @@ bool stop_network_locked()
     }
     if (esp_audio_simple_player_destroy(s_network_player) != ESP_GMF_ERR_OK) return false;
     s_network_player = nullptr;
+    s_input_read_filter = nullptr;
     // ASP unregisters the shared decoder registry when its last player dies.
     s_decoders_registered = false;
     s_hls_format = 0;
-    s_network_endpoint_logged.store(false);
     network_release_wifi();
     return true;
 }
@@ -1066,6 +1282,8 @@ bool create_network_locked()
         esp_audio_dec_unregister_default();
         s_decoders_registered = false;
     }
+    s_http_read_stats.reset();
+    s_input_read_stats.reset();
     esp_asp_cfg_t config = {};
     config.out.cb = network_write;
     config.task_prio = NETWORK_AUDIO_PRIORITY;
@@ -1073,18 +1291,18 @@ bool create_network_locked()
     config.task_stack = 8192;
     config.task_stack_in_ext = true;
     config.prev = network_prepare;
-    ESP_LOGI(TAG, "radio scheduling: PCM priority=%u core=0 DMA=%u ms HLS_buffer=%u KB",
+    ESP_LOGI(TAG, "radio scheduling: PCM priority=%u core=0 DMA=%u ms HLS_buffer=%u KB HTTP_buffer=%u KB",
              unsigned(NETWORK_AUDIO_PRIORITY),
              unsigned(CODEC_DMA_DESC_NUM * CODEC_DMA_FRAME_NUM * 1000 / s_output_rate.load()),
-             128u);
+             128u,unsigned(NETWORK_HTTP_BUFFER_BYTES/1024));
     if (esp_audio_simple_player_new(&config, &s_network_player) != ESP_GMF_ERR_OK) return false;
     esp_gmf_pool_handle_t pool = nullptr;
     if (esp_audio_simple_player_get_pool(s_network_player, &pool) != ESP_GMF_ERR_OK || !pool) return false;
     http_io_cfg_t http = HTTP_STREAM_CFG_DEFAULT();
+    http.io_cfg.buffer_cfg.buffer_size=NETWORK_HTTP_BUFFER_BYTES;
     http.crt_bundle_attach = esp_crt_bundle_attach;
-    http.event_handle = network_http_event;
     esp_gmf_io_handle_t http_io = nullptr;
-    if (esp_gmf_io_http_init(&http, &http_io) != ESP_GMF_ERR_OK) return false;
+    if (network_http_io_init(&http, &http_io) != ESP_GMF_ERR_OK) return false;
     if (esp_audio_simple_player_register_io(s_network_player, http_io) != ESP_GMF_ERR_OK) {
         esp_gmf_obj_delete(http_io);
         return false;
@@ -1114,7 +1332,12 @@ bool join_worker_locked()
     ++s_duration_generation;
     s_stop.store(true);
     if (!stop_network_locked()) return false;
+    s_network_sink_converter.close();
+    s_usb_loss_pause.store(false);
     if (s_worker == nullptr) {
+        { std::lock_guard<std::mutex> pcm(s_pcm_mutex);
+          usb_audio_output_stop(); s_usb_streaming=false; s_active_usb.store(false);
+          s_source_pcm_bits=16; }
         (void)xSemaphoreTake(s_exited, 0);
         s_stop.store(false);
         s_pause.store(false);
@@ -1123,10 +1346,13 @@ bool join_worker_locked()
     s_stop.store(true);
     if (xSemaphoreTake(s_exited, pdMS_TO_TICKS(3000)) != pdTRUE) {
         // A stuck write with no master clock would otherwise freeze the UI.
-        ESP_LOGW(TAG, "worker did not stop in time; deleting task");
-        vTaskDelete(s_worker);
+        ESP_LOGE(TAG, "worker did not stop in time; keeping its resources alive");
+        return false;
     }
     s_worker = nullptr;
+    { std::lock_guard<std::mutex> pcm(s_pcm_mutex);
+      usb_audio_output_stop(); s_usb_streaming=false; s_active_usb.store(false);
+          s_source_pcm_bits=16; }
     s_stop.store(false);
     s_pause.store(false);
     return true;
@@ -1240,7 +1466,7 @@ void worker_task(void *arg)
         // mode 1 (see bt_init_task).  Do not feed I2S until that finished:
         // writing without a master clock only spins on timeouts.
         const int64_t wait_started = esp_timer_get_time();
-        while (!s_bt_ready.load() && !s_stop.load() &&
+        while (!s_active_usb.load() && !s_bt_ready.load() && !s_stop.load() &&
                esp_timer_get_time() - wait_started < 6000000) {
             vTaskDelay(pdMS_TO_TICKS(50));
         }
@@ -1248,8 +1474,12 @@ void worker_task(void *arg)
                  s_bt_ready.load() ? "ready" : "NOT ready",
                  (long long)((esp_timer_get_time() - wait_started) / 1000),
                  (unsigned)s_output_rate.load(), s_volume.load());
-        pa_set(true);
-        while (!s_stop.load()) {
+        {
+            std::lock_guard<std::mutex> pcm(s_pcm_mutex);
+            ok=select_sink_locked()==ESP_OK;
+        }
+        if (!ok) failed=true;
+        while (ok && !s_stop.load()) {
             if (s_pause.load()) {
                 vTaskDelay(pdMS_TO_TICKS(20));
                 continue;
@@ -1317,7 +1547,7 @@ void worker_task(void *arg)
         }
         // Let the DMA ring drain before cutting the amplifier, otherwise the
         // last fraction of a second is lost.
-        if (!s_stop.load()) vTaskDelay(pdMS_TO_TICKS(120));
+        if (!s_stop.load()) vTaskDelay(pdMS_TO_TICKS(s_active_usb.load() ? 250 : 120));
         pa_set(false);
     }
 
@@ -1348,13 +1578,16 @@ esp_err_t audio_radio_init(void)
     ensure_sync();
     load_settings();
 
+    (void)ensure_usb_host();
     if (!sink_init()) {
         sink_deinit();
+        finish_usb_host();
         return ESP_FAIL;
     }
     s_initialized.store(true);
     s_state.store(AUDIO_PLAYBACK_IDLE);
     s_played_frames.store(0);
+    s_played_time_us.store(0);
     s_file_pos.store(0);
     s_file_size.store(0);
 
@@ -1378,19 +1611,28 @@ esp_err_t audio_radio_play(const char *url)
     if (!url || (strncmp(url, "http://", 7) && strncmp(url, "https://", 8))) return ESP_ERR_INVALID_ARG;
     const esp_err_t init = audio_radio_init();
     if (init != ESP_OK) return init;
+    if (s_output_mode.load()==AUDIO_OUTPUT_USB && !s_force_speaker.load())
+        usb_audio_output_wait_connected(1500);
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (!join_worker_locked()) {
         xSemaphoreGive(s_lock);
         return ESP_FAIL;
     }
     s_played_frames.store(0);
+    s_played_time_us.store(0);
     s_duration_ms.store(0);
     s_file_pos.store(0);
     s_file_size.store(0);
+    {
+        std::lock_guard<std::mutex> pcm(s_pcm_mutex);
+        (void)select_sink_locked();
+    }
     const int64_t deadline = esp_timer_get_time() + 6000000;
-    while (!s_bt_ready.load() && esp_timer_get_time() < deadline) vTaskDelay(pdMS_TO_TICKS(20));
-    if (s_bt_ready.load() && s_tx) network_acquire_wifi();
-    if (!s_bt_ready.load() || !s_tx || !create_network_locked()) {
+    while (!s_active_usb.load() && !s_bt_ready.load() && esp_timer_get_time() < deadline) vTaskDelay(pdMS_TO_TICKS(20));
+    esp_err_t route=ESP_FAIL;
+    { std::lock_guard<std::mutex> pcm(s_pcm_mutex); route=select_sink_locked(); }
+    if (route==ESP_OK) network_acquire_wifi();
+    if (route!=ESP_OK || !create_network_locked()) {
         stop_network_locked();
         s_state.store(AUDIO_PLAYBACK_ERROR);
         xSemaphoreGive(s_lock);
@@ -1399,7 +1641,7 @@ esp_err_t audio_radio_play(const char *url)
     s_state.store(AUDIO_PLAYBACK_PLAYING);
     s_network_active.store(true);
     s_network_write_enabled.store(true);
-    pa_set(true);
+    pa_set(!s_active_usb.load());
     const auto result = esp_audio_simple_player_run(s_network_player, url, nullptr);
     if (result != ESP_GMF_ERR_OK) {
         ESP_LOGE(TAG, "radio start failed: %d", (int)result);
@@ -1419,7 +1661,8 @@ esp_err_t audio_radio_play_file(const char *path)
 
     esp_err_t err = audio_radio_init();
     if (err != ESP_OK) return err;
-    if (s_output_mode.load() == AUDIO_OUTPUT_USB) return ESP_ERR_NOT_SUPPORTED;
+    if (s_output_mode.load()==AUDIO_OUTPUT_USB && !s_force_speaker.load())
+        usb_audio_output_wait_connected(1500);
 
     FILE *file = fopen(path, "rb");
     if (file == nullptr) {
@@ -1451,10 +1694,19 @@ esp_err_t audio_radio_play_file(const char *path)
         return ESP_FAIL;
     }
     s_played_frames.store(0);
+    s_played_time_us.store(0);
     s_duration_ms.store(0);
     s_file_pos.store(0);
     s_file_size.store((uint32_t)size);
     s_state.store(AUDIO_PLAYBACK_PLAYING);
+    {
+        std::lock_guard<std::mutex> pcm(s_pcm_mutex);
+        const esp_err_t route=select_sink_locked();
+        if (route!=ESP_OK && (s_output_mode.load()==AUDIO_OUTPUT_USB && !s_force_speaker.load())) {
+            s_state.store(AUDIO_PLAYBACK_ERROR); xSemaphoreGive(s_lock);
+            fclose(file); delete job; return route;
+        }
+    }
     TaskHandle_t handle = nullptr;
     const BaseType_t created = xTaskCreate(worker_task, "s31_audio", WORKER_STACK_BYTES,
                                            job, WORKER_PRIORITY, &handle);
@@ -1477,9 +1729,9 @@ esp_err_t audio_radio_play_default(void)
     return audio_radio_play("http://ngcdn001.cnr.cn/live/zgzs/index.m3u8");
 }
 
-void audio_radio_force_speaker(bool)
+void audio_radio_force_speaker(bool force)
 {
-    // The S31 backend always uses the speaker until the USB headset path lands.
+    s_force_speaker.store(force);
 }
 
 esp_err_t audio_radio_stop(void)
@@ -1487,9 +1739,9 @@ esp_err_t audio_radio_stop(void)
     if (!s_initialized.load()) return ESP_OK;
     ensure_sync();
     xSemaphoreTake(s_lock, portMAX_DELAY);
+    pa_set(false); // Mute before stopping PCM/HTTP, not after a potentially slow join.
     const bool stopped = join_worker_locked();
     s_state.store(stopped ? AUDIO_PLAYBACK_STOPPED : AUDIO_PLAYBACK_ERROR);
-    pa_set(false);
     xSemaphoreGive(s_lock);
     return stopped ? ESP_OK : ESP_FAIL;
 }
@@ -1516,7 +1768,12 @@ esp_err_t audio_radio_resume(void)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     esp_err_t result = ESP_ERR_INVALID_STATE;
     if (s_state.load() == AUDIO_PLAYBACK_PAUSED) {
-        if (s_network_player) result = esp_audio_simple_player_resume(s_network_player) == ESP_GMF_ERR_OK ? ESP_OK : ESP_FAIL;
+        if (s_usb_loss_pause.load()) {
+            std::lock_guard<std::mutex> pcm(s_pcm_mutex);
+            result=select_sink_locked(!usb_audio_output_is_connected());
+            if (result==ESP_OK) { s_usb_loss_pause.store(false); s_pause.store(false); }
+        }
+        else if (s_network_player) result = esp_audio_simple_player_resume(s_network_player) == ESP_GMF_ERR_OK ? ESP_OK : ESP_FAIL;
         else if (s_worker) { s_pause.store(false); result = ESP_OK; }
         if (result == ESP_OK) s_state.store(AUDIO_PLAYBACK_PLAYING);
     }
@@ -1552,9 +1809,7 @@ esp_err_t audio_radio_get_file_progress(uint32_t *progress_permille)
 esp_err_t audio_radio_get_file_timing(uint32_t *elapsed_ms, uint32_t *duration_ms)
 {
     if (elapsed_ms == nullptr || duration_ms == nullptr) return ESP_ERR_INVALID_ARG;
-    const uint32_t rate = s_output_rate.load();
-    const uint64_t frames = s_played_frames.load();
-    *elapsed_ms = rate ? (uint32_t)(frames * 1000 / rate) : 0;
+    *elapsed_ms = uint32_t(s_played_time_us.load()/1000);
     *duration_ms = s_duration_ms.load();
     return s_initialized.load() ? ESP_OK : ESP_ERR_NOT_SUPPORTED;
 }
@@ -1562,15 +1817,23 @@ esp_err_t audio_radio_get_file_timing(uint32_t *elapsed_ms, uint32_t *duration_m
 esp_err_t audio_radio_set_volume(int volume)
 {
     if (volume < 0 || volume > 100) return ESP_ERR_INVALID_ARG;
-    s_volume.store(volume);
-    save_u8(NVS_SPK_VOLUME_KEY, (uint8_t)volume);
-    ESP_LOGI(TAG, "speaker volume %d", volume);
+    load_settings();
+    const bool usb=!s_force_speaker.load() && (s_active_usb.load() ||
+        (!s_initialized.load() && s_output_mode.load()==AUDIO_OUTPUT_USB));
+    if (usb) {
+        s_usb_volume.store(volume);
+        usb_audio_output_set_volume(uint8_t(volume));
+    } else s_volume.store(volume);
+    save_u8(usb ? NVS_USB_VOLUME_KEY : NVS_SPK_VOLUME_KEY, (uint8_t)volume);
+    ESP_LOGI(TAG, "%s volume %d", usb ? "USB" : "speaker", volume);
     return ESP_OK;
 }
 
 int audio_radio_get_volume(void)
 {
-    return s_volume.load();
+    load_settings();
+    return !s_force_speaker.load() && (s_active_usb.load() ||
+        (!s_initialized.load() && s_output_mode.load()==AUDIO_OUTPUT_USB)) ? s_usb_volume.load() : s_volume.load();
 }
 
 esp_err_t audio_radio_set_output_mode(audio_output_mode_t mode)
@@ -1578,17 +1841,32 @@ esp_err_t audio_radio_set_output_mode(audio_output_mode_t mode)
     if (mode < AUDIO_OUTPUT_SPEAKER || mode > AUDIO_OUTPUT_AUTO) {
         return ESP_ERR_INVALID_ARG;
     }
-    if (mode == AUDIO_OUTPUT_USB) {
-        // Reserved for the later USB-headset implementation.
-        return ESP_ERR_NOT_SUPPORTED;
+    load_settings();
+    ensure_sync();
+    xSemaphoreTake(s_lock,portMAX_DELAY);
+    const int previous=s_output_mode.exchange(mode);
+    if (mode!=AUDIO_OUTPUT_SPEAKER) {
+        (void)ensure_usb_host();
+        if (mode==AUDIO_OUTPUT_USB && s_initialized.load())
+            usb_audio_output_wait_connected(1500);
     }
-    s_output_mode.store(mode);
-    save_u8(NVS_MODE_KEY, (uint8_t)mode);
-    return ESP_OK;
+    esp_err_t ret=ESP_OK;
+    if (s_initialized.load() && (s_worker || s_network_active.load())) {
+        std::lock_guard<std::mutex> pcm(s_pcm_mutex);
+        ret=select_sink_locked();
+        if (ret!=ESP_OK) { s_output_mode.store(previous); (void)select_sink_locked(); }
+    }
+    if (s_output_mode.load()==AUDIO_OUTPUT_SPEAKER) {
+        finish_usb_host();
+    }
+    xSemaphoreGive(s_lock);
+    if (ret==ESP_OK) save_u8(NVS_MODE_KEY, (uint8_t)mode);
+    return ret;
 }
 
 audio_output_mode_t audio_radio_get_output_mode(void)
 {
+    load_settings();
     return (audio_output_mode_t)s_output_mode.load();
 }
 
@@ -1604,17 +1882,42 @@ const char *audio_radio_get_output_mode_name(void)
 
 const char *audio_radio_get_active_output_name(void)
 {
-    return "SPK";
+    return s_active_usb.load() ? "USB" : "SPK";
 }
 
 bool audio_radio_usb_connected(void)
 {
-    return false;
+    return usb_audio_output_is_connected();
 }
 
 void audio_radio_service_output(void)
 {
-    // No headset sink to reconcile yet.
+    // Enumerate on the music/radio page, including before the first track. A
+    // charger connected at entry prevents OTG; retry only while USB/AUTO is set.
+    ensure_sync();
+    if (xSemaphoreTake(s_lock,0)!=pdTRUE) return;
+    const uint32_t now=uint32_t(esp_timer_get_time()/1000);
+    if (!s_force_speaker.load() && s_output_mode.load()!=AUDIO_OUTPUT_SPEAKER &&
+        (s_usb_retry_ms.load()==0 || now-s_usb_retry_ms.load()>=5000))
+        (void)ensure_usb_host();
+    if (s_initialized.load()) {
+        const bool connected=usb_audio_output_is_connected();
+        if (s_active_usb.load() && !connected && s_state.load()==AUDIO_PLAYBACK_PLAYING) {
+            s_usb_loss_pause.store(true); s_pause.store(true);
+            s_state.store(AUDIO_PLAYBACK_PAUSED);
+            pa_set(false);
+            ESP_LOGI(TAG,"USB unplugged: playback paused");
+        }
+        if (connected && !s_force_speaker.load() && s_output_mode.load()!=AUDIO_OUTPUT_SPEAKER) {
+            std::lock_guard<std::mutex> pcm(s_pcm_mutex);
+            // Driver disconnect may occur before the PCM sink sees it.
+            if (s_usb_loss_pause.load()) s_usb_streaming=false;
+            if (select_sink_locked()==ESP_OK && s_usb_loss_pause.exchange(false)) {
+                s_pause.store(false); s_state.store(AUDIO_PLAYBACK_PLAYING);
+            }
+        }
+    }
+    xSemaphoreGive(s_lock);
 }
 
 esp_err_t audio_radio_record_wav(const char *, uint32_t)
@@ -1624,7 +1927,9 @@ esp_err_t audio_radio_record_wav(const char *, uint32_t)
 
 void audio_radio_deinit(void)
 {
-    if (!s_initialized.exchange(false)) return;
+    if (!s_initialized.exchange(false)) {
+        finish_usb_host(); return;
+    }
     ensure_sync();
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (!join_worker_locked()) {
@@ -1646,6 +1951,10 @@ void audio_radio_deinit(void)
     }
     s_bt_ready.store(false);
     sink_deinit();
+    { std::lock_guard<std::mutex> pcm(s_pcm_mutex);
+      usb_audio_output_stop(); s_usb_streaming=false; s_active_usb.store(false);
+          s_source_pcm_bits=16; }
+    finish_usb_host();
     ESP_LOGI(TAG, "deinitialized");
 }
 
