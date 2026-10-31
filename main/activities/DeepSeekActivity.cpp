@@ -2,14 +2,13 @@
 #include "ui/ListFocus.h"
 #include "activities/DeepSeekImagePickerActivity.h"
 
-#include "activities/Activity.h"
+#include "activities/StatusBarActivity.h"
 #include "activities/ActivityManager.h"
 #include "activities/SettingActivity.h"
 #include "deepseek/DeepSeekClient.h"
 #include "deepseek/DeepSeekConfig.h"
 #include "deepseek/DeepSeekSessionStore.h"
 #include "ui/SystemFont.h"
-#include "ui/HeaderLayout.h"
 #include "ui/TextInputOverlay.h"
 #include "ui/UiLocale.h"
 #include "wifi/wifi_setting.h"
@@ -31,7 +30,7 @@
 namespace {
 
 constexpr const char *TAG = "DEEPSEEK_UI";
-constexpr int HEADER_H = header_layout::height;
+constexpr int HEADER_H = app_status_bar::height;
 constexpr int PAD = 20;
 constexpr int SESSION_TOP = HEADER_H;
 constexpr int SESSION_ROW_H = 104;
@@ -50,22 +49,6 @@ std::string image_label(const std::string &path)
 std::string display_session_title(const std::string &title)
 {
     return title == "New Chat" ? ui_locale::text(ui_locale::TextId::NewChat) : title;
-}
-
-void draw_header(const std::string &title)
-{
-    int width = M5.Display.width();
-    M5.Display.fillRect(0, 0, width, HEADER_H, TFT_WHITE);
-    system_font::draw_left(M5.Display, "<", 18, header_layout::text_y(), TFT_BLACK);
-    system_font::draw_center(M5.Display,
-                             system_font::ellipsize(title, width - 150),
-                             width / 2, header_layout::text_y(), TFT_BLACK);
-    header_layout::draw_separator(M5.Display);
-}
-
-bool header_back_hit(const TouchEvent &event)
-{
-    return event.type == TouchEventType::Tap && header_layout::left_hit(event.x, event.y, 110);
 }
 
 size_t utf8_char_bytes(const std::string &text, size_t pos)
@@ -146,7 +129,7 @@ void chat_task(void *argument)
     }
 }
 
-class DeepSeekActivity final : public Activity {
+class DeepSeekActivity final : public StatusBarActivity {
 public:
     bool can_standby() const override { return !_busy; }
     ~DeepSeekActivity() override
@@ -179,7 +162,12 @@ public:
         if (_view == View::Chat) {
             if (_open_input_after_image) {
                 _open_input_after_image = false;
+                // The input is an overlay and keeps the upper page visible.
+                // Replace the picker's header in the same refresh it submits.
+                M5.Display.startWrite();
+                draw_header(display_session_title(_session.title).c_str());
                 open_input();
+                M5.Display.endWrite();
                 return;
             }
             draw_chat(false);
@@ -199,9 +187,16 @@ public:
             begin_request(question, image);
             return;
         }
-        if (!_busy || !_event_queue || M5.Display.displayBusy()) return;
+        if (M5.Display.displayBusy()) return;
+        if (!_busy || !_event_queue) {
+            if (!_text_input.visible() && !_confirm_delete) refresh_header();
+            return;
+        }
         ChatTaskEvent *raw_event = nullptr;
-        if (xQueueReceive(_event_queue, &raw_event, 0) != pdTRUE) return;
+        if (xQueueReceive(_event_queue, &raw_event, 0) != pdTRUE) {
+            if (!_text_input.visible() && !_confirm_delete) refresh_header();
+            return;
+        }
         std::unique_ptr<ChatTaskEvent> event(raw_event);
         if (!event->complete) {
             if (!_exit_when_done) append_stream_chunk(event->chunk);
@@ -235,14 +230,15 @@ public:
     bool on_touch(const TouchEvent &event) override
     {
         if (_text_input.visible()) return _text_input.handle_touch(event);
+        if (status_bar_touch(event)) return true;
         if (_view == View::Sessions && _confirm_delete) {
-            if (event.type == TouchEventType::Back || header_back_hit(event)) {
+            if (event.type == TouchEventType::Back) {
                 cancel_session_delete();
                 return true;
             }
             return session_delete_touch(event);
         }
-        if (event.type == TouchEventType::Back || header_back_hit(event)) {
+        if (event.type == TouchEventType::Back) {
             go_back();
             return true;
         }
@@ -686,7 +682,7 @@ private:
         M5.Display.setDither(false);
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
-        draw_header(display_session_title(_session.title));
+        draw_header(display_session_title(_session.title).c_str());
 
         constexpr int toolbar_gap = 8;
         int toolbar_width = (width - PAD * 2 - toolbar_gap * 2) / 3;
@@ -970,7 +966,7 @@ private:
     }
 };
 
-class DeepSeekSetupGuideActivity final : public Activity {
+class DeepSeekSetupGuideActivity final : public StatusBarActivity {
 public:
     void on_create() override
     {
@@ -990,6 +986,7 @@ public:
 
     bool on_touch(const TouchEvent &event) override
     {
+        if (status_bar_touch(event)) return true;
         if (event.type == TouchEventType::Tap || event.type == TouchEventType::Back) {
             ActivityManager::instance().pop();
             return true;

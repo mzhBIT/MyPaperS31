@@ -451,6 +451,30 @@ static bool looks_like_footnote_marker(std::string text)
     return true;
 }
 
+static std::string image_footnote_content(
+    const std::unordered_map<std::string, std::string> &attrs)
+{
+    // These fields explicitly store note text. alt/title can instead describe
+    // the icon (Duokan EPUBs commonly use alt="note" with a real linked body).
+    for (const char *key : {"data-content", "data-note"}) {
+        std::string content = trim_copy(attr_value(attrs, key));
+        if (!content.empty()) return content;
+    }
+    for (const char *key : {"title", "alt"}) {
+        std::string content = trim_copy(attr_value(attrs, key));
+        std::string lower = content;
+        std::transform(lower.begin(), lower.end(), lower.begin(), [](unsigned char c) {
+            return static_cast<char>(std::tolower(c));
+        });
+        if (content.empty() || lower == "note" || lower == "footnote" ||
+            content == "注" || content == "注释" || content == "註" ||
+            content == "註釋" || content == "脚注" || content == "腳註" ||
+            looks_like_footnote_marker(content)) continue;
+        return content;
+    }
+    return std::string();
+}
+
 static bool is_footnote_backlink(const std::unordered_map<std::string, std::string> &attrs,
                                  const std::string &target)
 {
@@ -824,13 +848,11 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
                     std::string src = attr_value(attrs, "src");
                     if (src.empty()) src = attr_value(attrs, "href");
                     const std::string class_name = attr_value(attrs, "class");
-                    std::string note_content = attr_value(attrs, "alt");
-                    if (note_content.empty()) note_content = attr_value(attrs, "title");
-                    if (note_content.empty()) note_content = attr_value(attrs, "data-content");
-                    if (note_content.empty()) note_content = attr_value(attrs, "data-note");
+                    const std::string note_content = image_footnote_content(attrs);
                     const bool footnote_image = contains_footnote_token(class_name);
                     const bool linked_marker = active_link.active &&
-                        lower_name(src.substr(src.find_last_of("/\\") + 1)) == "note.png";
+                        (active_link.semantic || footnote_targets.count(active_link.target) ||
+                         lower_name(src.substr(src.find_last_of("/\\") + 1)) == "note.png");
                     if (footnote_image || linked_marker) {
                         const size_t marker_start = current.size();
                         append_normalized_text("[*]", &current);
