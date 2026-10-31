@@ -40,6 +40,7 @@
 #include <driver/i2s_std.h>
 #include <driver/uart.h>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
 #include <esp_rom_sys.h>
 #include <esp_timer.h>
 #include <esp_wifi.h>
@@ -81,6 +82,7 @@ constexpr size_t INPUT_CHUNK_BYTES = 8192;
 constexpr size_t OUTPUT_CHUNK_INITIAL = 16384;
 constexpr size_t OUTPUT_CHUNK_MAX = 512 * 1024;
 constexpr size_t WRITE_CHUNK_FRAMES = 512;
+constexpr size_t PCM_WORKSPACE_BYTES = WRITE_CHUNK_FRAMES * 2 * sizeof(int32_t);
 constexpr uint32_t WORKER_STACK_BYTES = 12288;
 constexpr UBaseType_t WORKER_PRIORITY = 5;
 // RadioActivity raises the UI task to 10. Decoding/resampling and the blocking
@@ -88,6 +90,8 @@ constexpr UBaseType_t WORKER_PRIORITY = 5;
 // DMA queue. The sink blocks on I2S regularly, leaving time for UI and IO.
 constexpr UBaseType_t NETWORK_AUDIO_PRIORITY = 12;
 constexpr size_t NETWORK_HTTP_BUFFER_BYTES = 128 * 1024;
+constexpr uint32_t LIVE_HTTP_PREROLL_BYTES = 32 * 1024;
+constexpr uint32_t LIVE_HTTP_REBUFFER_BYTES = 16 * 1024;
 // The BT/PA rail is switched on when the backend initializes, so the module
 // still has to boot before it accepts AT commands.  200 ms was demonstrably
 // too short (AT+RX=2 went unanswered); the reference board leaves the rail on
@@ -115,6 +119,7 @@ std::atomic<bool> s_force_speaker{false}, s_active_usb{false}, s_usb_loss_pause{
 std::atomic<uint32_t> s_active_rate{DEFAULT_OUTPUT_RATE};
 std::atomic<uint64_t> s_played_time_us{0};
 std::mutex s_pcm_mutex; // Format/conversion/write and route changes share this barrier.
+uint8_t *s_pcm_workspace=nullptr; // One PSRAM chunk, owned under s_pcm_mutex.
 uint8_t s_usb_channels = 2, s_usb_bits = 16;
 uint8_t s_source_pcm_bits=16, s_usb_preferred_bits=16; // Protected by s_pcm_mutex.
 bool s_usb_streaming = false; // Protected by s_pcm_mutex.
@@ -157,6 +162,18 @@ struct NetworkReadStats {
     }
 };
 NetworkReadStats s_http_read_stats, s_input_read_stats;
+struct NetworkHttpFetchStats {
+    NetworkReadStats read;
+    std::atomic<uint32_t> calls{0}, errors{0}, active{0}, last_done_ms{0};
+    void reset() { read.reset(); calls=0; errors=0; active=0; last_done_ms=0; }
+} s_http_fetch_stats;
+using NetworkSourceRead = decltype(esp_gmf_io_t{}.acquire_read);
+// All HTTP pool clones use the same SDK source callback. Constructors can run
+// on the HLS task while a different HTTP instance is reading, so use an atomic.
+std::atomic<NetworkSourceRead> s_http_source_read{nullptr};
+std::atomic<esp_gmf_io_handle_t> s_network_live_http{nullptr};
+std::atomic<bool> s_network_live_preview{false};
+bool s_network_live_primed = false; // Only the ASP consumer task uses this flag.
 using NetworkReadFilter = decltype(esp_gmf_io_cfg_t{}.buffer_cfg.read_filter);
 NetworkReadFilter s_input_read_filter = nullptr; // Set before run; cleared after task join.
 
@@ -518,8 +535,21 @@ bool i2s_write_all(const void *data, size_t bytes)
 // software volume (100 == full scale).
 bool write_pcm(const uint8_t *data, uint32_t frames, uint8_t pcm_bits=16)
 {
+    // Both callers hold s_pcm_mutex through conversion and the complete write.
+    // Do not put USB + speaker chunks on the GMF task's 8 KiB stack: debug
+    // builds reserve both branch arrays, requiring 8224 bytes in this function.
+    if (!s_pcm_workspace) {
+        s_pcm_workspace=static_cast<uint8_t *>(heap_caps_malloc(
+            PCM_WORKSPACE_BYTES,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT));
+        if (!s_pcm_workspace) {
+            ESP_LOGE(TAG,"PCM workspace allocation failed: %u PSRAM bytes",unsigned(PCM_WORKSPACE_BYTES));
+            return false;
+        }
+        ESP_LOGI(TAG,"PCM workspace ready: %u PSRAM bytes; task stack minimum free=%u bytes",
+                 unsigned(PCM_WORKSPACE_BYTES),unsigned(uxTaskGetStackHighWaterMark(nullptr)));
+    }
     if (s_active_usb.load()) {
-        uint8_t packed[WRITE_CHUNK_FRAMES*2*4];
+        uint8_t *packed=s_pcm_workspace;
         const uint8_t *samples=data;
         const int v=s_usb_volume.load();
         const int gain=usb_audio_output_uses_software_volume()
@@ -551,7 +581,7 @@ bool write_pcm(const uint8_t *data, uint32_t frames, uint8_t pcm_bits=16)
         return true;
     }
     if (pcm_bits!=16) return false; // Speaker converters always produce 16-bit stereo.
-    int32_t expanded[WRITE_CHUNK_FRAMES * 2];
+    auto *expanded=reinterpret_cast<int32_t *>(s_pcm_workspace);
     const auto *samples = reinterpret_cast<const int16_t *>(data);
     const int factor = volume_factor();
 
@@ -1105,6 +1135,66 @@ esp_gmf_err_t network_input_read_filter(esp_gmf_io_handle_t handle, void *payloa
     return result;
 }
 
+esp_gmf_err_t network_live_http_read_filter(esp_gmf_io_handle_t handle, void *payload, uint32_t wanted, int ticks)
+{
+    auto *io = static_cast<esp_gmf_io_t *>(handle);
+    // Only direct, unknown-length radio streams use this filter. Never wait
+    // for a live-stream threshold on a small finite file or HLS playlist.
+    const bool finite = io->attr.size > 0 && io->attr.size != UINT64_MAX;
+    uint32_t filled = 0;
+    esp_gmf_io_get_db_filled_size(handle, &filled);
+    if (!finite && (!s_network_live_primed || filled == 0)) {
+        const bool startup = !s_network_live_primed;
+        const uint32_t requested = startup ? LIVE_HTTP_PREROLL_BYTES : LIVE_HTTP_REBUFFER_BYTES;
+        const uint32_t capacity = uint32_t(io->io_cfg.buffer_cfg.buffer_size);
+        const uint32_t target = requested < capacity/2 ? requested : capacity/2;
+        const uint32_t limit_ms = startup ? 5000 : 2500;
+        const int64_t begin = esp_timer_get_time();
+        while (filled < target) {
+            if (s_stop.load() || !s_network_write_enabled.load() || io->_is_abort)
+                return static_cast<esp_gmf_err_t>(ESP_GMF_IO_ABORT);
+            if (io->_is_done || uint64_t(esp_timer_get_time()-begin) >= uint64_t(limit_ms)*1000)
+                break;
+            // The producer continues filling the existing compressed-data
+            // ring while the consumer sleeps. Check cancellation every 20 ms.
+            vTaskDelay(pdMS_TO_TICKS(20));
+            esp_gmf_io_get_db_filled_size(handle, &filled);
+        }
+        s_network_live_primed = true;
+        ESP_LOGI(TAG, "radio buffer: stage=%s queued=%u target=%u wait=%u ms ready=%u",
+                 startup ? "startup" : "rebuffer", unsigned(filled), unsigned(target),
+                 unsigned((esp_timer_get_time()-begin)/1000), unsigned(filled>=target));
+    }
+    return network_http_read_filter(handle, payload, wanted, ticks);
+}
+
+esp_gmf_err_io_t network_http_source_read(esp_gmf_io_handle_t handle, void *payload, uint32_t wanted, int ticks)
+{
+    const auto read = s_http_source_read.load();
+    if (!read) return ESP_GMF_IO_FAIL;
+    const int64_t begin = esp_timer_get_time();
+    s_http_fetch_stats.active.fetch_add(1);
+    const auto result = read(handle, payload, wanted, ticks);
+    const int64_t end = esp_timer_get_time();
+    auto *load = static_cast<esp_gmf_payload_t *>(payload);
+    // A 200 response can still contain an error page, or a live MP3 may start
+    // between frames. Capture a bounded prefix once, without consuming bytes.
+    if (result == ESP_GMF_IO_OK && load->buf && load->valid_size &&
+        handle == s_network_live_http.load() && !s_network_live_preview.exchange(true)) {
+        char prefix[16*3+1] = {};
+        const uint32_t n = load->valid_size < 16 ? load->valid_size : 16;
+        for (uint32_t i=0; i<n; ++i) std::snprintf(prefix+i*3,4,"%02X ",unsigned(load->buf[i]));
+        ESP_LOGI(TAG, "radio stream prefix: bytes=%u hex=%s", unsigned(load->valid_size), prefix);
+    }
+    s_http_fetch_stats.read.record(result == ESP_GMF_IO_OK ? load->valid_size : 0,
+                                  uint32_t(end-begin), 0);
+    s_http_fetch_stats.calls.fetch_add(1);
+    if (result < ESP_GMF_IO_OK) s_http_fetch_stats.errors.fetch_add(1);
+    s_http_fetch_stats.last_done_ms.store(uint32_t(end/1000));
+    s_http_fetch_stats.active.fetch_sub(1);
+    return result;
+}
+
 esp_gmf_err_t network_http_io_init(void *config, esp_gmf_obj_handle_t *object)
 {
     esp_gmf_io_handle_t handle=nullptr;
@@ -1114,12 +1204,86 @@ esp_gmf_err_t network_http_io_init(void *config, esp_gmf_obj_handle_t *object)
     // This SDK's HTTP initializer does not copy buffer_cfg.read_filter.
     // Install after init, and preserve it in pool clones (including HLS HTTP).
     io->io_cfg.buffer_cfg.read_filter=network_http_read_filter;
+    // Observe the producer after it reserves a writable ring-buffer block.
+    // Delegate unchanged to the SDK: gzip, EOF, reconnect and release ownership
+    // remain intact. Timing excludes waiting for space in a full ring buffer.
+    if (io->acquire_read) {
+        s_http_source_read.store(io->acquire_read);
+        io->acquire_read=network_http_source_read;
+    }
     io->parent.new_obj=network_http_io_init;
     *object=handle;
     return ESP_GMF_ERR_OK;
 }
 
 Converters s_network_sink_converter; // Only the ASP sink task uses it; closed after join.
+
+// These hooks belong to the single joined ASP task. Configure them before run;
+// never change the pool defaults used by P4 or local music.
+esp_gmf_job_func s_network_rate_open = nullptr, s_network_rate_process = nullptr;
+struct NetworkRateTiming {
+    uint32_t source = 0, destination = 0, blocks = 0;
+    uint64_t total_us = 0;
+    uint32_t max_us = 0, last_log_ms = 0, last_yield_ms = 0;
+} s_network_rate_timing;
+
+esp_gmf_job_err_t network_rate_open(void *self, void *context)
+{
+    auto *cfg = static_cast<esp_ae_rate_cvt_cfg_t *>(OBJ_GET_CFG(self));
+    // A continuous 44.1/48 -> 16 kHz stream must fit the BH1098G DMA budget.
+    // Keep the SDK's filtered resampler, with its least expensive filter and
+    // speed-oriented implementation. This also applies on a format reopen.
+    cfg->complexity = 1;
+    cfg->perf_type = ESP_AE_RATE_CVT_PERF_TYPE_SPEED;
+    const auto result = s_network_rate_open(self, context);
+    s_network_rate_timing.source = cfg->src_rate;
+    s_network_rate_timing.destination = cfg->dest_rate;
+    ESP_LOGI(TAG, "radio resampler: source=%u target=%u channels=%u bits=%u complexity=%u perf=speed result=%d",
+             unsigned(cfg->src_rate), unsigned(cfg->dest_rate), unsigned(cfg->channel),
+             unsigned(cfg->bits_per_sample), unsigned(cfg->complexity), int(result));
+    return result;
+}
+
+esp_gmf_job_err_t network_rate_process(void *self, void *context)
+{
+    const int64_t begin = esp_timer_get_time();
+    const auto result = s_network_rate_process(self, context);
+    const uint32_t elapsed = uint32_t(esp_timer_get_time() - begin);
+    auto &timing = s_network_rate_timing;
+    // The SDK can reopen internally when a station changes its source format.
+    auto *cfg = static_cast<esp_ae_rate_cvt_cfg_t *>(OBJ_GET_CFG(self));
+    timing.source = cfg->src_rate;
+    timing.destination = cfg->dest_rate;
+    ++timing.blocks;
+    timing.total_us += elapsed;
+    if (elapsed > timing.max_us) timing.max_us = elapsed;
+    return result;
+}
+
+void network_pcm_checkpoint()
+{
+    auto &timing = s_network_rate_timing;
+    uint32_t now = uint32_t(esp_timer_get_time() / 1000);
+    // A slow converter can keep I2S permanently underfilled: writes then return
+    // immediately, leaving priority-12 work runnable forever. Yield one tick
+    // after queuing PCM, outside s_pcm_mutex, at most four times per second.
+    // taskYIELD() alone does not allow the lower-priority IDLE0 task to run.
+    if (uint32_t(now - timing.last_yield_ms) >= 250) {
+        vTaskDelay(1);
+        now = uint32_t(esp_timer_get_time() / 1000);
+        timing.last_yield_ms = now;
+    }
+    if (timing.blocks && uint32_t(now - timing.last_log_ms) >= 5000) {
+        ESP_LOGI(TAG, "radio resample timing: source=%u target=%u blocks=%u avg=%u us max=%u us window=%u ms (includes input/output wait)",
+                 unsigned(timing.source), unsigned(timing.destination), unsigned(timing.blocks),
+                 unsigned(timing.total_us / timing.blocks), unsigned(timing.max_us),
+                 unsigned(now - timing.last_log_ms));
+        timing.blocks = 0;
+        timing.total_us = 0;
+        timing.max_us = 0;
+        timing.last_log_ms = now;
+    }
+}
 
 int network_write(uint8_t *data, int length, void *)
 {
@@ -1164,7 +1328,16 @@ int network_write(uint8_t *data, int length, void *)
                  unsigned(s_input_read_stats.bytes.exchange(0)),
                  unsigned(s_input_read_stats.max_wait_us.exchange(0)/1000),
                  unsigned(s_input_read_stats.buffer_before.load()));
+        const uint32_t last_read = s_http_fetch_stats.last_done_ms.load();
+        const uint32_t log_now = uint32_t(esp_timer_get_time()/1000);
+        ESP_LOGW(TAG, "radio HTTP producer: window=%u ms read_bytes=%u reads=%u read_max=%u ms errors=%u active=%u since_done=%u ms",
+                 unsigned(window_ms), unsigned(s_http_fetch_stats.read.bytes.exchange(0)),
+                 unsigned(s_http_fetch_stats.calls.exchange(0)),
+                 unsigned(s_http_fetch_stats.read.max_wait_us.exchange(0)/1000),
+                 unsigned(s_http_fetch_stats.errors.exchange(0)), unsigned(s_http_fetch_stats.active.load()),
+                 unsigned(last_read ? log_now-last_read : 0));
     }
+    if (ok) network_pcm_checkpoint();
     s_network_last_pcm_ms.store(uint32_t(esp_timer_get_time() / 1000));
     return ok ? length : -1;
 }
@@ -1175,6 +1348,12 @@ int network_prepare(esp_asp_handle_t *handle, void *)
     s_network_last_pcm_ms.store(0);
     s_network_gap_log_ms = uint32_t(esp_timer_get_time()/1000);
     s_network_gap_count = 0;
+    s_network_rate_timing = {};
+    s_network_rate_timing.last_log_ms = s_network_gap_log_ms;
+    s_network_rate_timing.last_yield_ms = s_network_gap_log_ms;
+    s_network_live_http.store(nullptr);
+    s_network_live_preview.store(false);
+    s_network_live_primed = false;
     // The ASP callback passes its opaque handle directly (same API as P4).
     esp_gmf_pipeline_handle_t pipeline = nullptr;
     esp_gmf_element_handle_t rate = nullptr, channel = nullptr, bits = nullptr;
@@ -1183,12 +1362,25 @@ int network_prepare(esp_asp_handle_t *handle, void *)
         esp_gmf_pipeline_get_el_by_name(pipeline, "aud_rate_cvt", &rate) != ESP_GMF_ERR_OK || !rate ||
         esp_gmf_pipeline_get_el_by_name(pipeline, "aud_ch_cvt", &channel) != ESP_GMF_ERR_OK || !channel ||
         esp_gmf_pipeline_get_el_by_name(pipeline, "aud_bit_cvt", &bits) != ESP_GMF_ERR_OK || !bits) return -1;
+    auto *rate_element = static_cast<esp_gmf_element_t *>(rate);
+    if (!OBJ_GET_CFG(rate) || !rate_element->ops.open || !rate_element->ops.process) return -1;
+    if (rate_element->ops.open != network_rate_open) {
+        s_network_rate_open = rate_element->ops.open;
+        rate_element->ops.open = network_rate_open;
+    }
+    if (rate_element->ops.process != network_rate_process) {
+        s_network_rate_process = rate_element->ops.process;
+        rate_element->ops.process = network_rate_process;
+    }
     esp_gmf_io_handle_t input=nullptr;
     if (esp_gmf_pipeline_get_in(pipeline,&input)==ESP_GMF_ERR_OK && input) {
         auto *io=static_cast<esp_gmf_io_t *>(input);
         if (std::strcmp(OBJ_GET_TAG(input),"io_hls")==0 && io->io_cfg.buffer_cfg.read_filter) {
             s_input_read_filter=io->io_cfg.buffer_cfg.read_filter;
             io->io_cfg.buffer_cfg.read_filter=network_input_read_filter;
+        } else if (std::strcmp(OBJ_GET_TAG(input),"io_http")==0) {
+            s_network_live_http.store(input);
+            io->io_cfg.buffer_cfg.read_filter=network_live_http_read_filter;
         }
     }
     // BH1098G owns the hardware clock: upsample low-rate stations too, rather
@@ -1197,8 +1389,9 @@ int network_prepare(esp_asp_handle_t *handle, void *)
         esp_gmf_rate_cvt_set_dest_rate(rate, s_network_pcm_rate.load()) != ESP_GMF_ERR_OK ||
         esp_gmf_ch_cvt_set_dest_channel(channel, 2) != ESP_GMF_ERR_OK ||
         esp_gmf_bit_cvt_set_dest_bits(bits, 16) != ESP_GMF_ERR_OK) return -1;
-    ESP_LOGI(TAG, "radio PCM target: %u Hz stereo 16 bit -> BH1098G",
-             (unsigned)s_output_rate.load());
+    ESP_LOGI(TAG, "radio pipeline PCM: %u Hz stereo 16 bit -> %s",
+             unsigned(s_network_pcm_rate.load()),
+             s_active_usb.load() ? "USB sink (format conversion at output)" : "BH1098G speaker");
     return 0;
 }
 
@@ -1263,6 +1456,7 @@ bool stop_network_locked()
     }
     if (esp_audio_simple_player_destroy(s_network_player) != ESP_GMF_ERR_OK) return false;
     s_network_player = nullptr;
+    s_network_live_http.store(nullptr); // All source tasks have now been joined.
     s_input_read_filter = nullptr;
     // ASP unregisters the shared decoder registry when its last player dies.
     s_decoders_registered = false;
@@ -1284,6 +1478,7 @@ bool create_network_locked()
     }
     s_http_read_stats.reset();
     s_input_read_stats.reset();
+    s_http_fetch_stats.reset(); // Previous ASP/HTTP/HLS tasks have been joined.
     esp_asp_cfg_t config = {};
     config.out.cb = network_write;
     config.task_prio = NETWORK_AUDIO_PRIORITY;
@@ -1352,7 +1547,7 @@ bool join_worker_locked()
     s_worker = nullptr;
     { std::lock_guard<std::mutex> pcm(s_pcm_mutex);
       usb_audio_output_stop(); s_usb_streaming=false; s_active_usb.store(false);
-          s_source_pcm_bits=16; }
+      s_source_pcm_bits=16; }
     s_stop.store(false);
     s_pause.store(false);
     return true;
@@ -1953,7 +2148,8 @@ void audio_radio_deinit(void)
     sink_deinit();
     { std::lock_guard<std::mutex> pcm(s_pcm_mutex);
       usb_audio_output_stop(); s_usb_streaming=false; s_active_usb.store(false);
-          s_source_pcm_bits=16; }
+      s_source_pcm_bits=16;
+      heap_caps_free(s_pcm_workspace); s_pcm_workspace=nullptr; }
     finish_usb_host();
     ESP_LOGI(TAG, "deinitialized");
 }

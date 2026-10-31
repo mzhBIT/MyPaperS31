@@ -12,6 +12,7 @@ constexpr const char *TAG = "S31_USB_AUDIO";
 constexpr uint8_t registers[] = {0x0a,0x0b,0x0c,0x0d,0x16,0x18};
 uint8_t saved[sizeof(registers)]{};
 bool owned = false, ready = false;
+uint32_t last_blocked_state=0xffffffff;
 std::mutex lock;
 bool read(uint8_t reg, uint8_t &value) {
     return m5::In_I2C.readRegister(mypaper::board::s31::charger_address, reg, &value, 1, 100000);
@@ -43,14 +44,37 @@ extern "C" esp_err_t s31_usb_audio_port_acquire() {
     std::lock_guard<std::mutex> guard(lock);
     if (owned && ready) return ESP_OK;
     if (owned && !restore()) return ESP_FAIL;
-    uint8_t status = 0;
+    uint8_t status = 0, control1 = 0, control3 = 0;
     if (!read(0x1e,status)) return ESP_ERR_NOT_FOUND;
-    // VBUS type 1..5 means an external source is attached. Do not feed boost
-    // power into a PC/charger. Type 7 is OTG; do not steal another owner's role.
-    if ((status & 7) != 0) return ESP_ERR_INVALID_STATE;
+    if (!read(0x16,control1) || !read(0x18,control3)) return ESP_FAIL;
+    // Charger registers survive an MCU-only reset. In normal application mode
+    // this module is the board's only OTG owner (MSC is a separate device boot).
+    // A confirmed OTG source can therefore be reclaimed after a reset. Keep
+    // blocking all external/ambiguous states; never force boost into an input.
+    const bool retained_otg=(status & 7)==7 && (control3 & 0x40);
+    if (!retained_otg && ((status & 7) != 0 || (control3 & 0x40))) {
+        const uint32_t state=(uint32_t(status)<<16) | (uint32_t(control1)<<8) | control3;
+        if (state!=last_blocked_state) {
+            ESP_LOGW(TAG,"Host power blocked: STATUS1=0x%02x VBUS_type=%u CTRL1=0x%02x CTRL3=0x%02x OTG_enabled=%u",
+                     status,unsigned(status&7),control1,control3,unsigned((control3>>6)&1));
+            last_blocked_state=state;
+        }
+        return ESP_ERR_INVALID_STATE;
+    }
+    last_blocked_state=0xffffffff;
     for (unsigned i=0;i<sizeof(registers);++i)
         if (!read(registers[i],saved[i])) return ESP_FAIL;
-    if (saved[5] & 0x40) return ESP_ERR_INVALID_STATE;
+    if (bool(saved[5] & 0x40)!=retained_otg) {
+        ESP_LOGW(TAG,"Host power state changed during acquisition: CTRL3=0x%02x",saved[5]);
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (retained_otg) {
+        // The pre-reset owner already disabled charging. Restore the reference
+        // board's normal charge-enabled state when this new session releases.
+        saved[4] |= 0x20;
+        ESP_LOGI(TAG,"Reclaiming retained OTG: STATUS1=0x%02x CTRL1=0x%02x CTRL3=0x%02x",
+                 status,control1,control3);
+    }
     owned = true; // All rollback data is valid before the first register write.
     // Reference CX25601N sequence: charge/HIZ/watchdog off, 5040 mV, 1000 mA,
     // then EN_OTG. Preserve all other charger fields.

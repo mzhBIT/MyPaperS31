@@ -586,6 +586,27 @@ struct TextInputOverlay::Impl {
         }
     }
 
+    void submit()
+    {
+        if (!shown || !keyboard) return;
+        if (chinese && !active_composition().empty()) commit_candidate(0);
+        else if (!chinese) committed=keyboard->text();
+        const std::string result=committed+options.fixed_suffix;
+        if (options.validate) {
+            message=options.validate(result);
+            if (!message.empty()) { draw(); return; }
+        }
+        shown=false;
+        auto callback=std::move(submit_callback);
+        cancel_callback={};
+        keyboard.reset();
+        nine_keyboard.reset();
+        engine.set_composition("");
+        nine_engine.clear();
+        committed.clear();
+        if (callback) callback(result);
+    }
+
     void draw()
     {
         if (!shown || !keyboard) return;
@@ -677,21 +698,7 @@ bool TextInputOverlay::handle_touch(const TouchEvent &event)
         if (!submit_button) {
             cancel();
         } else {
-            if (_impl->chinese && !_impl->active_composition().empty()) {
-                _impl->commit_candidate(0);
-            } else if (!_impl->chinese) {
-                _impl->committed = _impl->keyboard->text();
-            }
-            const std::string result = _impl->committed + _impl->options.fixed_suffix;
-            _impl->shown = false;
-            auto callback = std::move(_impl->submit_callback);
-            _impl->cancel_callback = {};
-            _impl->keyboard.reset();
-            _impl->nine_keyboard.reset();
-            _impl->engine.set_composition("");
-            _impl->nine_engine.clear();
-            _impl->committed.clear();
-            if (callback) callback(result);
+            _impl->submit();
         }
         return true;
     }
@@ -749,21 +756,7 @@ bool TextInputOverlay::handle_key(int key)
         }
         _impl->draw();
     } else if (key == APP_KEY_OK) {
-        if (_impl->chinese && !_impl->active_composition().empty()) {
-            _impl->commit_candidate(0);
-        } else if (!_impl->chinese) {
-            _impl->committed = _impl->keyboard->text();
-        }
-        const std::string result = _impl->committed + _impl->options.fixed_suffix;
-        _impl->shown = false;
-        auto callback = std::move(_impl->submit_callback);
-        _impl->cancel_callback = {};
-        _impl->keyboard.reset();
-        _impl->nine_keyboard.reset();
-        _impl->engine.set_composition("");
-        _impl->nine_engine.clear();
-        _impl->committed.clear();
-        if (callback) callback(result);
+        _impl->submit();
     }
     return true;
 }

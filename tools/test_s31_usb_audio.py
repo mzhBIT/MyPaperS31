@@ -28,6 +28,7 @@ using esp_err_t=int;
 constexpr int ESP_OK=0,ESP_FAIL=-1,ESP_ERR_NOT_FOUND=-2,ESP_ERR_INVALID_STATE=-3,ESP_ERR_NOT_SUPPORTED=-4;
 #define ESP_LOGI(...) ((void)0)
 #define ESP_LOGE(...) ((void)0)
+#define ESP_LOGW(...) ((void)0)
 #define pdMS_TO_TICKS(x) (x)
 void vTaskDelay(int){}
 namespace mypaper::board::s31 { constexpr uint8_t charger_address=0x6b; bool hs=false; void usb_analog_switch_set(bool v){hs=v;} }
@@ -136,6 +137,19 @@ int main(){
         m5::In_I2C.regs[0x1e]=source; const int writes=m5::In_I2C.writes;
         assert(s31_usb_audio_port_acquire()==ESP_ERR_INVALID_STATE && m5::In_I2C.writes==writes);
     }
+    // A reset can leave our charger in OTG while the MCU ownership flag clears.
+    m5::In_I2C.regs[0x1e]=7;m5::In_I2C.regs[0x18]|=0x40;m5::In_I2C.regs[0x16]&=~0x20;
+    uint8_t reclaimed[256];memcpy(reclaimed,m5::In_I2C.regs,256);
+    reclaimed[0x18]&=~0x40;reclaimed[0x16]|=0x20;
+    assert(s31_usb_audio_port_acquire()==ESP_OK && mypaper::board::s31::hs);
+    s31_usb_audio_port_release();
+    assert(s31_usb_audio_port_is_released() && !memcmp(reclaimed,m5::In_I2C.regs,256));
+    for(uint8_t external=1;external<=6;++external) {
+        m5::In_I2C.regs[0x1e]=external;m5::In_I2C.regs[0x18]|=0x40;
+        const int writes=m5::In_I2C.writes;
+        assert(s31_usb_audio_port_acquire()==ESP_ERR_INVALID_STATE && m5::In_I2C.writes==writes);
+    }
+    memcpy(m5::In_I2C.regs,initial,256);
     m5::In_I2C.regs[0x1e]=0;
     for(int reg : {0x16,0x0a,0x0b,0x0c,0x0d,0x18}) {
         m5::In_I2C.fail_reg=reg;

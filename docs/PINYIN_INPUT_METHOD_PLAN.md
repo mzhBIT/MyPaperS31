@@ -22,7 +22,10 @@
    - Remains the reusable key hit-test and drawing component.
    - Gains an explicit Chinese/English mode key and UTF-8-safe committed text handling.
 4. `activities/TextInputActivity`
-   - Presents committed text, pinyin composition, candidates, keyboard, cancel, and submit.
+   - Hosts the same `ui/TextInputOverlay` used by file rename and search, retaining the existing Activity push/pop API.
+   - Shares 26-key / nine-key switching and the saved `text_input/cn_layout` preference; RSS names and other Activity-based inputs no longer use a separate older keyboard.
+   - URL/key fields still start in English according to `TextInputOptions`; switching to Chinese exposes the shared layout switch.
+   - Optional validation stays in the editor on error for both touch and physical-key submission. Completion/pop is deferred to the Activity loop so RSS name-to-address transitions retain their existing lifecycle.
    - Returns the submitted string through a completion callback.
 5. `FileBrowserActivity`
    - Long press opens Rename/Delete/Cancel.

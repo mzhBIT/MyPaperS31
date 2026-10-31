@@ -16,7 +16,7 @@
 
 `main/boards/MyPaperS31/UsbAudioPort.cpp` 管理 Host 的板级资源：
 
-1. 读取 CX25601N（I²C 0x6b）0x1e 的 VBUS 状态，已有外部电源或其他 OTG 所有者时拒绝启动。
+1. 读取 CX25601N（I²C 0x6b）0x1e 的 VBUS 状态及 OTG 开关，已有外部电源或状态含糊时拒绝启动。芯片明确报告 VBUS_type=7 且 EN_OTG=1 时，可接管主控重启后遗留的 OTG 状态；正常应用中只有音频模块控制 OTG，USB U盘是独立 Device 启动模式。该恢复会在退出时关闭 OTG 并恢复充电开启。
 2. 保存 0x0a～0x0d、0x16、0x18 相关配置；按参考项目的 OTG 流程停充电、退出 HIZ、关闭充电芯片 watchdog，设置 5040 mV / 1000 mA，然后开启 EN_OTG，等待 30 ms。
 3. GPIO36 `ANA_SW` 拉低，将 Type-C 数据切到 HS UTMI，安装 Host。
 4. 关闭时先完整停止 UAC / Host，再关闭 OTG，恢复改动的充电字段及 GPIO36 高电平。寄存器失败执行回滚，恢复失败保留所有权以便重试，待机检查也会拒绝放行。

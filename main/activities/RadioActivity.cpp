@@ -233,7 +233,15 @@ public:
                 return;
             }
         }
-        if (_switching) return;
+        if (_switching) {
+#if CONFIG_IDF_TARGET_ESP32S31
+            // ASP run() returns before HTTP/HLS has opened. Keep S31 Host
+            // enumeration/retry alive while waiting for the first PCM, so a
+            // transient VBUS state at entry does not pin startup to speaker.
+            if (_play_task == nullptr) audio_radio_service_output();
+#endif
+            return;
+        }
         // Process the completed station transition first, so USB maintenance
         // can never leave the screen stuck on "Starting station...". The
         // shared service is rate-limited and uses a lock-free connection

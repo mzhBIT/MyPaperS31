@@ -1341,7 +1341,9 @@ private:
     bool _pending_feed_url=false;
     app_status_bar::State _status_bar;
     const char* status_title()const {
-        return ui_locale::text(_view==View::Feeds ? ui_locale::TextId::RssFeeds :
+        if (_view==View::Feeds) return ui_locale::text(ui_locale::TextId::RssFeeds);
+        if (!_current_feed_title.empty()) return _current_feed_title.c_str();
+        return ui_locale::text(
             _current_feed_is_bing ? ui_locale::TextId::FeedBingWallpaper : ui_locale::TextId::RssNews);
     }
 
@@ -1477,6 +1479,7 @@ private:
     bool _external_article = false;
     bool _wifi_ok = false;
     bool _current_feed_is_bing = false;
+    std::string _current_feed_title;
     bool _confirm_wallpaper_save = false;
     int _wallpaper_save_choice = 0;
     int _feed_focus = 0;
@@ -2375,6 +2378,8 @@ private:
         }
         RssFeed feed = g_feeds[g_focus];
         _current_feed_is_bing = feed.url == "https://rsshub.app/bing";
+        _current_feed_title = feed.title;
+        _view = View::Items;
         draw_status(feed.title.c_str(), ui_locale::text(ui_locale::TextId::Fetching));
         // The status frame must be physically complete before DNS/HTTP starts.
         // RNDIS data activity and an EPD full refresh otherwise overlap on the
@@ -2398,7 +2403,6 @@ private:
         } else {
             g_status.clear();
         }
-        _view = View::Items;
         g_focus = 0;
         g_scroll = 0;
         redraw_list();
