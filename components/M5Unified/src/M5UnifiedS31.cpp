@@ -116,6 +116,6 @@ int S31Power::getBatteryLevel() {
 }
 int S31Power::getBatteryVoltage() { return getBatteryLevel() >= 0 ? voltage_ : 0; }
 int S31Power::getBatteryCurrent() { return getBatteryLevel() >= 0 ? current_ : 0; }
-bool S31Power::isCharging() { return getBatteryLevel() >= 0 && current_ > 5 && level_ < 100; }
+bool S31Power::isCharging() { return getBatteryLevel() >= 0 && current_ > 5; }
 }
 m5::M5Unified M5;

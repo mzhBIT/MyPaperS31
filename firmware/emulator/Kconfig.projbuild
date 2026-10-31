@@ -1,0 +1,8 @@
+menu "S31 independent emulator"
+    config MYPAPER_S31_TOUCH_MIRROR_X
+        bool "Mirror portrait touch X"
+        default n
+    config MYPAPER_S31_TOUCH_MIRROR_Y
+        bool "Mirror portrait touch Y"
+        default n
+endmenu

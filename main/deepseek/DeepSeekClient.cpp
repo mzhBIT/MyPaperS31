@@ -6,6 +6,11 @@
 #include <esp_err.h>
 #include <esp_http_client.h>
 #include <esp_log.h>
+#include <esp_heap_caps.h>
+#include <esp_timer.h>
+#include <esp_wifi.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 #include <algorithm>
 #include <cctype>
@@ -28,6 +33,142 @@ class WifiShutdownGuard {
 public:
     ~WifiShutdownGuard() { wifi_setting_release(); }
 };
+
+class WifiRequestPowerGuard {
+public:
+    WifiRequestPowerGuard() {
+#if CONFIG_IDF_TARGET_ESP32S31
+        // MAC power save is separate from the user's Always On / On Demand
+        // radio lifetime. Keep it awake only while this request is in flight.
+        if (esp_wifi_get_ps(&_previous) == ESP_OK && _previous != WIFI_PS_NONE) {
+            _restore = esp_wifi_set_ps(WIFI_PS_NONE) == ESP_OK;
+            ESP_LOGI(TAG, "request Wi-Fi wake: previous_ps=%d applied=%d", _previous, _restore);
+        }
+#endif
+    }
+    ~WifiRequestPowerGuard() {
+#if CONFIG_IDF_TARGET_ESP32S31
+        if (_restore) {
+            const auto err = esp_wifi_set_ps(_previous);
+            ESP_LOGI(TAG, "request Wi-Fi restore: ps=%d result=%s", _previous, esp_err_to_name(err));
+        }
+#endif
+    }
+private:
+#if CONFIG_IDF_TARGET_ESP32S31
+    wifi_ps_type_t _previous = WIFI_PS_NONE;
+    bool _restore = false;
+#endif
+};
+
+struct ConnectionTrace {
+    const char *operation = "";
+    unsigned attempt = 0;
+    int64_t begin_us = 0;
+    bool connected = false;
+};
+
+esp_err_t connection_event(esp_http_client_event_t *event)
+{
+    auto *trace = static_cast<ConnectionTrace *>(event->user_data);
+    if (trace && event->event_id == HTTP_EVENT_ON_CONNECTED) {
+        trace->connected = true;
+        ESP_LOGI(TAG, "%s connected: attempt=%u DNS/TCP/TLS=%lld ms", trace->operation,
+                 trace->attempt, static_cast<long long>((esp_timer_get_time()-trace->begin_us)/1000));
+    }
+    return ESP_OK;
+}
+
+struct TransportFailure {
+    int tls = 0, flags = 0, socket_error = 0;
+};
+
+TransportFailure log_transport_failure(esp_http_client_handle_t client, esp_err_t error,
+                                       const ConnectionTrace &trace, const char *stage)
+{
+    TransportFailure failure;
+    failure.socket_error = esp_http_client_get_errno(client);
+    const auto tls_error = esp_http_client_get_and_clear_last_tls_error(client, &failure.tls,
+                                                                       &failure.flags);
+    ESP_LOGW(TAG, "%s failed: stage=%s attempt=%u time=%lld ms connected=%d error=%s tls_error=0x%x tls=%d flags=0x%x errno=%d",
+             trace.operation, stage, trace.attempt,
+             static_cast<long long>((esp_timer_get_time()-trace.begin_us)/1000), trace.connected,
+             esp_err_to_name(error), unsigned(tls_error), failure.tls, failure.flags, failure.socket_error);
+    return failure;
+}
+
+bool retryable_connect(esp_err_t error, const TransportFailure &failure)
+{
+    // No retry for trust/verification, allocation or protocol errors. EOF,
+    // close-notify and timeout can result from a transient CDN/link disconnect.
+    return failure.flags == 0 &&
+        (failure.tls == -0x7280 || failure.tls == -0x7880 || failure.tls == -0x6800 ||
+         (failure.tls == 0 && (error == ESP_ERR_HTTP_CONNECT || error == ESP_ERR_TIMEOUT ||
+                              error == ESP_ERR_HTTP_WRITE_DATA)));
+}
+
+esp_http_client_handle_t open_connection(const DeepSeekConfig &config, const char *url,
+                                         esp_http_client_method_t method, size_t body_bytes,
+                                         const volatile bool *cancel, ConnectionTrace *trace,
+                                         DeepSeekClientResult *result)
+{
+    constexpr unsigned attempts = 2;
+    for (unsigned attempt = 1; attempt <= attempts; ++attempt) {
+        if (cancel && *cancel) { result->canceled = true; result->error = "Canceled"; return nullptr; }
+        trace->attempt = attempt;
+        trace->begin_us = esp_timer_get_time();
+        trace->connected = false;
+        wifi_ap_record_t ap{};
+        wifi_ps_type_t ps = WIFI_PS_NONE;
+        const auto sta = esp_wifi_sta_get_ap_info(&ap);
+        const auto ps_error = esp_wifi_get_ps(&ps);
+        ESP_LOGI(TAG, "%s connect: attempt=%u/%u IPv4 TLS1.2 HTTP/1.1 STA=%s rssi=%d ps=%d/%s internal=%u largest=%u PSRAM=%u",
+                 trace->operation, attempt, attempts, esp_err_to_name(sta), int(ap.rssi), int(ps),
+                 esp_err_to_name(ps_error), unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                 unsigned(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL)),
+                 unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+        esp_http_client_config_t http_config = {};
+        http_config.url = url;
+        http_config.method = method;
+        http_config.timeout_ms = 30000;
+        http_config.crt_bundle_attach = esp_crt_bundle_attach;
+        http_config.user_agent = "MyPaper DeepSeek";
+        http_config.addr_type = HTTP_ADDR_TYPE_INET;
+        http_config.tls_version = ESP_HTTP_CLIENT_TLS_VER_TLS_1_2;
+#if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_MBEDTLS_SSL_ALPN
+        static const char *protocols[] = {"http/1.1", nullptr};
+        http_config.alpn_protos = protocols;
+#endif
+        http_config.buffer_size = 4096;
+        http_config.buffer_size_tx = 4096;
+        http_config.event_handler = connection_event;
+        http_config.user_data = trace;
+        auto client = esp_http_client_init(&http_config);
+        if (!client) { result->error = "Failed to create HTTPS client"; return nullptr; }
+        const std::string authorization = "Bearer " + config.api_key;
+        esp_http_client_set_header(client, "Authorization", authorization.c_str());
+        esp_http_client_set_header(client, "Connection", "close");
+        if (method == HTTP_METHOD_POST) {
+            esp_http_client_set_header(client, "Content-Type", "application/json");
+            esp_http_client_set_header(client, "Accept", "text/event-stream");
+        }
+        const auto err = esp_http_client_open(client, static_cast<int>(body_bytes));
+        if (err == ESP_OK) { result->error.clear(); return client; }
+        const auto failure = log_transport_failure(client, err, *trace,
+                                                   trace->connected ? "request-headers" : "connect/TLS");
+        result->error = std::string("HTTPS request failed: ") + esp_err_to_name(err);
+        esp_http_client_cleanup(client);
+        if (attempt == attempts || !retryable_connect(err, failure)) return nullptr;
+        // open() only connects and sends headers; the chat body is sent by the
+        // caller after this succeeds. Never replay a body or an active stream.
+        ESP_LOGW(TAG, "%s reconnecting once before request body; no chat replay", trace->operation);
+        for (unsigned waited=0; waited<300; waited+=20) {
+            if (cancel && *cancel) { result->canceled=true; result->error="Canceled"; return nullptr; }
+            vTaskDelay(pdMS_TO_TICKS(20));
+        }
+    }
+    return nullptr;
+}
 
 std::string json_escape(const std::string &value)
 {
@@ -124,7 +265,7 @@ bool build_request(DeepSeekModel model, bool thinking,
     size_t used = 320;
     for (auto it = messages.rbegin(); it != messages.rend(); ++it) {
         if (!it->image_path.empty() && model != DeepSeekModel::Flash) {
-            *error = "Image understanding requires V4 Flash";
+            *error = "Image understanding requires Flash";
             return false;
         }
         std::string item;
@@ -300,27 +441,17 @@ DeepSeekClientResult DeepSeekClient::validate(const DeepSeekConfig &config)
         return result;
     }
 
-    esp_http_client_config_t http_config = {};
-    http_config.url = MODELS_URL;
-    http_config.method = HTTP_METHOD_GET;
-    http_config.timeout_ms = 20000;
-    http_config.crt_bundle_attach = esp_crt_bundle_attach;
-    http_config.user_agent = "MyPaperP4 DeepSeek";
-    esp_http_client_handle_t client = esp_http_client_init(&http_config);
-    if (!client) {
-        result.error = "Failed to create HTTPS client";
-        return result;
-    }
-    std::string authorization = "Bearer " + config.api_key;
-    esp_http_client_set_header(client, "Authorization", authorization.c_str());
-    esp_http_client_set_header(client, "Connection", "close");
-    esp_err_t err = esp_http_client_open(client, 0);
-    if (err != ESP_OK) {
-        result.error = std::string("HTTPS request failed: ") + esp_err_to_name(err);
+    WifiRequestPowerGuard power_guard;
+    ConnectionTrace trace;
+    trace.operation = "models";
+    auto client = open_connection(config, MODELS_URL, HTTP_METHOD_GET, 0, nullptr, &trace, &result);
+    if (!client) return result;
+    if (esp_http_client_fetch_headers(client) < 0) {
+        log_transport_failure(client, ESP_FAIL, trace, "response-headers");
+        result.error = "DeepSeek response was interrupted";
         esp_http_client_cleanup(client);
         return result;
     }
-    esp_http_client_fetch_headers(client);
     result.http_status = esp_http_client_get_status_code(client);
     char buffer[1024];
     std::string body;
@@ -329,8 +460,14 @@ DeepSeekClientResult DeepSeekClient::validate(const DeepSeekConfig &config)
         if (count <= 0) break;
         body.append(buffer, std::min<size_t>(count, 16 * 1024 - body.size()));
     }
+    const bool complete = esp_http_client_is_complete_data_received(client);
+    if (!complete) log_transport_failure(client, ESP_FAIL, trace, "models-body");
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
+    if (!complete) {
+        result.error = "DeepSeek response was interrupted";
+        return result;
+    }
     if (result.http_status < 200 || result.http_status >= 300) {
         std::string api_error;
         result.error = json_string_value(body, "message", &api_error)
@@ -338,14 +475,19 @@ DeepSeekClientResult DeepSeekClient::validate(const DeepSeekConfig &config)
                            : "DeepSeek HTTP error " + std::to_string(result.http_status);
         return result;
     }
-    bool flash = body.find("deepseek-v4-flash") != std::string::npos;
-    bool pro = body.find("deepseek-v4-pro") != std::string::npos;
+    // /models lists the current ID, not necessarily the legacy aliases that
+    // chat requests still accept. Match quoted IDs to avoid prefix matches.
+    const bool flash = body.find("\"deepseek-flash\"") != std::string::npos ||
+                       body.find("\"deepseek-v4-flash\"") != std::string::npos;
+    const bool pro = body.find("\"deepseek-v4-pro\"") != std::string::npos;
+    ESP_LOGI(TAG, "model discovery: flash=%d pro=%d bytes=%u", flash, pro,
+             static_cast<unsigned>(body.size()));
     if (!flash || !pro) {
         result.error = "API key is valid, but Flash or Pro is unavailable";
         return result;
     }
     result.success = true;
-    result.content = "API key valid: V4 Flash and V4 Pro available";
+    result.content = "API key valid: Flash and Pro available";
     return result;
 }
 
@@ -380,46 +522,40 @@ DeepSeekClientResult DeepSeekClient::chat(const DeepSeekConfig &config,
         return result;
     }
 
+    WifiRequestPowerGuard power_guard;
     std::string request;
     if (!build_request(model, thinking, messages, &request, &result.error)) return result;
-    esp_http_client_config_t http_config = {};
-    http_config.url = CHAT_URL;
-    http_config.method = HTTP_METHOD_POST;
-    http_config.timeout_ms = 30000;
-    http_config.crt_bundle_attach = esp_crt_bundle_attach;
-    http_config.user_agent = "MyPaperP4 DeepSeek";
-    esp_http_client_handle_t client = esp_http_client_init(&http_config);
-    if (!client) {
-        result.error = "Failed to create HTTPS client";
-        return result;
-    }
-
-    std::string authorization = "Bearer " + config.api_key;
-    esp_http_client_set_header(client, "Authorization", authorization.c_str());
-    esp_http_client_set_header(client, "Content-Type", "application/json");
-    esp_http_client_set_header(client, "Accept", "text/event-stream");
-    esp_http_client_set_header(client, "Connection", "close");
-
-    esp_err_t err = esp_http_client_open(client, request.size());
-    if (err == ESP_OK) {
-        int offset = 0;
-        while (offset < static_cast<int>(request.size())) {
-            int written = esp_http_client_write(client, request.data() + offset,
-                                                request.size() - offset);
-            if (written <= 0) {
-                err = ESP_FAIL;
-                break;
-            }
-            offset += written;
+    ConnectionTrace trace;
+    trace.operation = "chat";
+    auto client = open_connection(config, CHAT_URL, HTTP_METHOD_POST, request.size(),
+                                  cancel_requested, &trace, &result);
+    if (!client) return result;
+    size_t offset = 0;
+    while (offset < request.size()) {
+        if (cancel_requested && *cancel_requested) {
+            result.canceled = true;
+            result.error = "Canceled";
+            esp_http_client_cleanup(client);
+            return result;
         }
+        const int written = esp_http_client_write(client, request.data() + offset,
+                                                  request.size() - offset);
+        if (written <= 0) {
+            log_transport_failure(client, ESP_FAIL, trace, "request-body");
+            result.error = std::string("HTTPS request failed: ") + esp_err_to_name(ESP_FAIL);
+            esp_http_client_cleanup(client);
+            return result;
+        }
+        offset += static_cast<size_t>(written);
     }
-    if (err != ESP_OK) {
-        result.error = std::string("HTTPS request failed: ") + esp_err_to_name(err);
+    ESP_LOGI(TAG, "chat body sent: bytes=%u time=%lld ms; awaiting response",
+             unsigned(offset), static_cast<long long>((esp_timer_get_time()-trace.begin_us)/1000));
+    if (esp_http_client_fetch_headers(client) < 0) {
+        log_transport_failure(client, ESP_FAIL, trace, "response-headers");
+        result.error = "DeepSeek response was interrupted";
         esp_http_client_cleanup(client);
         return result;
     }
-
-    esp_http_client_fetch_headers(client);
     result.http_status = esp_http_client_get_status_code(client);
     ESP_LOGI(TAG, "response status=%d model=%s", result.http_status,
              deepseek_model_id(model));
@@ -433,7 +569,11 @@ DeepSeekClientResult DeepSeekClient::chat(const DeepSeekConfig &config,
     while (!stream_done && !stream_delivery_failed &&
            !(cancel_requested && *cancel_requested)) {
         int count = esp_http_client_read(client, buffer, sizeof(buffer));
-        if (count <= 0) break;
+        if (count <= 0) {
+            if (count < 0 || !esp_http_client_is_complete_data_received(client))
+                log_transport_failure(client, ESP_FAIL, trace, "stream-read");
+            break;
+        }
         if (result.http_status >= 200 && result.http_status < 300) {
             pending.append(buffer, count);
             size_t newline = 0;

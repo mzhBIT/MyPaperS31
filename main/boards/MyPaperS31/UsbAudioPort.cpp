@@ -1,6 +1,7 @@
 #include "UsbAudioPort.h"
 #include "UsbSwitch.h"
 #include "Pins.h"
+#include "ChargerState.h"
 #include <M5Unified.h>
 #include <esp_log.h>
 #include <freertos/FreeRTOS.h>
@@ -38,6 +39,36 @@ bool restore() {
     owned = !ok;
     return ok;
 }
+}
+
+extern "C" esp_err_t s31_charger_restore_at_boot() {
+    std::lock_guard<std::mutex> guard(lock);
+    if (owned) return ESP_ERR_INVALID_STATE;
+    using namespace mypaper::board::s31::charger;
+    State before{}, after{};
+    bool ok = false;
+    for (int attempt=0; attempt<3 && !ok; ++attempt) {
+        ok = recover_for_boot([](uint8_t reg, uint8_t &value) { return read(reg,value); },
+                              [](uint8_t reg, uint8_t value) { return write(reg,value); },
+                              before, after);
+        if (!ok) vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    if (!ok) {
+        ESP_LOGE("S31_CHARGER", "boot charge recovery failed: CTRL1=0x%02x CTRL3=0x%02x; charging not confirmed",
+                 after.control1, after.control3);
+        return ESP_FAIL;
+    }
+    ESP_LOGI("S31_CHARGER", "boot charge enabled: CTRL1=0x%02x->0x%02x CTRL3=0x%02x->0x%02x STATUS1=0x%02x VBUS_type=%u charge_state=%u",
+             before.control1,after.control1,before.control3,after.control3,after.status,
+             unsigned(after.status&7),unsigned((after.status>>3)&3));
+    uint8_t limits[6]{};
+    bool limits_ok = true;
+    for (unsigned i=0;i<6;++i) limits_ok = read(2+i,limits[i]) && limits_ok;
+    if (limits_ok)
+        ESP_LOGI("S31_CHARGER", "preserved limits: VREG=%u mV ICHG=%u mA IINDPM=%u mA (no voltage/current override)",
+                 voltage_mv(limits[2],limits[3]),charge_ma(limits[0],limits[1]),input_ma(limits[4],limits[5]));
+    else ESP_LOGW("S31_CHARGER", "charge limits read failed");
+    return ESP_OK;
 }
 
 extern "C" esp_err_t s31_usb_audio_port_acquire() {

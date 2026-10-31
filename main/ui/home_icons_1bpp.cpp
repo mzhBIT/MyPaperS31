@@ -1,4 +1,5 @@
 #include "ui/home_icons_1bpp.h"
+#include "ui/emulator_icon_1bpp.h"
 
 namespace {
 
@@ -2936,6 +2937,7 @@ const uint8_t *home_icon_1bpp_data(HomeIconId id)
     case HomeIconId::Phone: return icon_phone_data;
     case HomeIconId::Stocks: return icon_stocks_data;
     case HomeIconId::Calculator: return icon_calculator_data;
+    case HomeIconId::Emulator: return icon_emulator_data;
     default: return nullptr;
     }
 }

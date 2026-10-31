@@ -65,6 +65,9 @@ inline void draw_battery() {
     M5.Display.drawRect(x, 29, 40, 22, TFT_BLACK);
     M5.Display.fillRect(x+42, 36, 5, 8, TFT_BLACK);
     battery_status::draw_fill(x+4, 33, 32, 14);
+    // The right margin leaves room beside the cap without covering the fill.
+    M5.Display.fillRect(x+51, 28, 17, 24, TFT_WHITE);
+    if (battery_status::charging()) battery_status::draw_charging_mark(x+52, 30);
 }
 inline std::string draw() {
     const auto clock = clock_text();

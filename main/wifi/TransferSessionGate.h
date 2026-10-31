@@ -1,8 +1,8 @@
 #pragma once
 #include <atomic>
 
-// Prevent a UI protocol switch from tearing down an active HTTP operation.
-// The owner still stops/joins the HTTP server before releasing the activity.
+// Reject new HTTP operations during shutdown and avoid status-bar refreshes
+// during a transfer. The owner joins the server before releasing the activity.
 class TransferSessionGate {
 public:
     class Request {

@@ -17,6 +17,7 @@
 *.log
 
 # Build artifacts and directories
+/build-s31-emulator/
 **/build/
 build/
 /build-p4/

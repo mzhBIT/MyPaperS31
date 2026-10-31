@@ -14,7 +14,7 @@ idf_component_register(
     INCLUDE_DIRS "../../.." "../../../ui" "../../../parser" "../../../renderer"
                  "../../../storage" "../../../activities" "../../../input"
                  "../../../wifi" "../../../usb" "../../../modem"
-    REQUIRES M5GFX M5Unified freetype fatfs sdmmc esp_driver_sdmmc esp_driver_gpio esp_driver_ledc
+    REQUIRES app_update M5GFX M5Unified freetype fatfs sdmmc esp_driver_sdmmc esp_driver_gpio esp_driver_ledc
              esp_driver_i2s esp_driver_uart
              nvs_flash esp_common esp_system esp_psram esp_hw_support log freertos
              esp_wifi esp_event esp_netif esp_http_client esp_http_server esp-tls

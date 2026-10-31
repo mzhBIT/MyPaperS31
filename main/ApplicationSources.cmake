@@ -1,5 +1,7 @@
 set(srcs
     "main.cpp"
+    "boot/firmware_switch.cpp"
+    "activities/EmulatorActivity.cpp"
     "boards/Board.cpp"
     "boards/MyPaperP4/BoardP4.cpp"
     "usb/usb_transfer_boot.c"

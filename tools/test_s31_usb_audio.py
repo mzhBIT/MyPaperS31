@@ -24,6 +24,7 @@ program = r'''
 #include <initializer_list>
 #include <mutex>
 #include "audio/S31UsbPcm.h"
+#include "boards/MyPaperS31/ChargerState.h"
 using esp_err_t=int;
 constexpr int ESP_OK=0,ESP_FAIL=-1,ESP_ERR_NOT_FOUND=-2,ESP_ERR_INVALID_STATE=-3,ESP_ERR_NOT_SUPPORTED=-4;
 #define ESP_LOGI(...) ((void)0)
@@ -122,6 +123,12 @@ void test(){
 }
 }
 int main(){
+    // Real boot entry must recover retained OTG before any Host owner starts.
+    m5::In_I2C.regs[0x16]=0x1f;
+    m5::In_I2C.regs[0x18]=0xc4;
+    m5::In_I2C.regs[0x1e]=7;
+    assert(s31_charger_restore_at_boot()==ESP_OK);
+    assert(m5::In_I2C.regs[0x16]==0x2c && m5::In_I2C.regs[0x18]==0x84);
     uint8_t initial[256];
     for(unsigned i=0;i<256;++i) m5::In_I2C.regs[i]=uint8_t(i*3);
     m5::In_I2C.regs[0x18]&=~0x40;m5::In_I2C.regs[0x1e]=0;

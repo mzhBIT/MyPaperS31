@@ -9,6 +9,9 @@ extern "C" {
 esp_err_t s31_usb_audio_port_acquire(void);
 void s31_usb_audio_port_release(void);
 bool s31_usb_audio_port_is_released(void);
+// Call once at board boot before any USB Host owner can be created. Recover
+// charging after MCU-only reset, including USB Device / emulator transitions.
+esp_err_t s31_charger_restore_at_boot(void);
 #ifdef __cplusplus
 }
 #endif

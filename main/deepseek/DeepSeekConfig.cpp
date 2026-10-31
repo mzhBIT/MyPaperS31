@@ -69,12 +69,14 @@ bool deepseek_config_has_api_key()
 
 const char *deepseek_model_id(DeepSeekModel model)
 {
-    return model == DeepSeekModel::Pro ? "deepseek-v4-pro" : "deepseek-v4-flash";
+    // Flash is now a rolling model ID. The enum/NVS values stay unchanged,
+    // and old meta.tsv Flash names still load as DeepSeekModel::Flash.
+    return model == DeepSeekModel::Pro ? "deepseek-v4-pro" : "deepseek-flash";
 }
 
 const char *deepseek_model_label(DeepSeekModel model)
 {
-    return model == DeepSeekModel::Pro ? "V4 Pro" : "V4 Flash";
+    return model == DeepSeekModel::Pro ? "V4 Pro" : "Flash";
 }
 
 DeepSeekModel deepseek_model_toggle(DeepSeekModel model)

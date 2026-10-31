@@ -2,6 +2,7 @@
 #include "Display.h"
 #include "Pins.h"
 #include "UsbSwitch.h"
+#include "UsbAudioPort.h"
 #include "storage/storage_sdcard.h"
 #include "storage/app_paths.h"
 #include "frontlight/frontlight.h"
@@ -54,6 +55,10 @@ HardwareInitResult initialize_hardware(bool usb_transfer_mode) {
 
     const bool display_ready = s31::display().init_without_reset(false);
     M5.Rtc.begin();
+    // CX25601N registers survive esp_restart(). Normal UI and USB Device boots
+    // must restore charging before optional audio Host can take ownership.
+    if (s31_charger_restore_at_boot() != ESP_OK)
+        ESP_LOGW("BOARD", "S31 charger recovery failed; inspect S31_CHARGER log");
 
     const esp_err_t sd_status = usb_transfer_mode
         ? storage_sdcard_init_usb_medium() : storage_sdcard_mount();

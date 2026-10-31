@@ -5,37 +5,77 @@
       "label": "编译 MyPaperP4 Debug",
       "type": "process",
       "command": "powershell.exe",
-      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "& 'C:\\Espressif\\tools\\Microsoft.v5.3.5.PowerShell_profile.ps1'; & './scripts/build-board.ps1' -Board MyPaperP4 -Profile Debug"],
-      "options": {"cwd": "${workspaceFolder}"},
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "& 'C:\\Espressif\\tools\\Microsoft.v5.3.5.PowerShell_profile.ps1'; & './scripts/build-board.ps1' -Board MyPaperP4 -Profile Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
       "group": "build",
-      "problemMatcher": ["$gcc"]
+      "problemMatcher": [
+        "$gcc"
+      ]
     },
     {
       "label": "编译 MyPaperP4 Release",
       "type": "process",
       "command": "powershell.exe",
-      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "& 'C:\\Espressif\\tools\\Microsoft.v5.3.5.PowerShell_profile.ps1'; & './scripts/build-board.ps1' -Board MyPaperP4 -Profile Release"],
-      "options": {"cwd": "${workspaceFolder}"},
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "& 'C:\\Espressif\\tools\\Microsoft.v5.3.5.PowerShell_profile.ps1'; & './scripts/build-board.ps1' -Board MyPaperP4 -Profile Release"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
       "group": "build",
-      "problemMatcher": ["$gcc"]
+      "problemMatcher": [
+        "$gcc"
+      ]
     },
     {
       "label": "编译 MyPaperS31 Debug",
       "type": "process",
       "command": "powershell.exe",
-      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "& 'C:\\Espressif\\tools\\Microsoft.v6.1.PowerShell_profile.ps1'; & './scripts/build-board.ps1' -Board MyPaperS31 -Profile Debug"],
-      "options": {"cwd": "${workspaceFolder}"},
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "& 'C:\\Espressif\\tools\\Microsoft.v6.1.PowerShell_profile.ps1'; & './scripts/build-board.ps1' -Board MyPaperS31 -Profile Debug"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
       "group": "build",
-      "problemMatcher": ["$gcc"]
+      "problemMatcher": [
+        "$gcc"
+      ]
     },
     {
       "label": "编译 MyPaperS31 Release",
       "type": "process",
       "command": "powershell.exe",
-      "args": ["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", "& 'C:\\Espressif\\tools\\Microsoft.v6.1.PowerShell_profile.ps1'; & './scripts/build-board.ps1' -Board MyPaperS31 -Profile Release"],
-      "options": {"cwd": "${workspaceFolder}"},
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "& 'C:\\Espressif\\tools\\Microsoft.v6.1.PowerShell_profile.ps1'; & './scripts/build-board.ps1' -Board MyPaperS31 -Profile Release"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
       "group": "build",
-      "problemMatcher": ["$gcc"]
+      "problemMatcher": [
+        "$gcc"
+      ]
     },
     {
       "label": "编译 MyPaperP4",
@@ -43,7 +83,8 @@
       "command": "powershell.exe",
       "args": [
         "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
+        "-ExecutionPolicy",
+        "Bypass",
         "-Command",
         "& 'C:\\Espressif\\tools\\Microsoft.v5.3.5.PowerShell_profile.ps1'; & './scripts/build-board.ps1' -Board MyPaperP4"
       ],
@@ -51,7 +92,9 @@
         "cwd": "${workspaceFolder}"
       },
       "group": "build",
-      "problemMatcher": ["$gcc"]
+      "problemMatcher": [
+        "$gcc"
+      ]
     },
     {
       "label": "编译 MyPaperS31",
@@ -59,15 +102,65 @@
       "command": "powershell.exe",
       "args": [
         "-NoProfile",
-        "-ExecutionPolicy", "Bypass",
+        "-ExecutionPolicy",
+        "Bypass",
         "-Command",
         "& 'C:\\Espressif\\tools\\Microsoft.v6.1.PowerShell_profile.ps1'; & './scripts/build-board.ps1' -Board MyPaperS31"
       ],
       "options": {
         "cwd": "${workspaceFolder}"
       },
-      "group": {"kind": "build", "isDefault": true},
-      "problemMatcher": ["$gcc"]
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
+      "label": "Build S31 emulator",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "& 'C:\\Espressif\\tools\\Microsoft.v6.1.PowerShell_profile.ps1'; & './scripts/build-emulator.ps1' -Action build"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [
+        "$gcc"
+      ]
+    },
+    {
+      "label": "Flash S31 emulator",
+      "type": "process",
+      "command": "powershell.exe",
+      "args": [
+        "-NoProfile",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        "& 'C:\\Espressif\\tools\\Microsoft.v6.1.PowerShell_profile.ps1'; & './scripts/build-emulator.ps1' -Action flash -Port '${input:emulatorPort}'"
+      ],
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "problemMatcher": [
+        "$gcc"
+      ]
+    }
+  ],
+  "inputs": [
+    {
+      "id": "emulatorPort",
+      "type": "promptString",
+      "description": "Emulator serial port",
+      "default": "COM5"
     }
   ]
 }

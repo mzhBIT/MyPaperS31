@@ -89,6 +89,9 @@ try {
         if (-not (Test-Path -LiteralPath $manifestPath)) { throw "Build $Board $Profile first: missing $manifestPath" }
         $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
         if ($manifest.extra_esptool_args.chip -ne $target) { throw 'Flash manifest target does not match the selected board.' }
+        if ($manifest.app.file -ne "$Board.bin" -or $manifest.app.offset -ne '0x10000') {
+            throw 'This is not a system firmware flash manifest. Build the system firmware first.'
+        }
         $flashArgs = @()
         foreach ($entry in $manifest.flash_files.PSObject.Properties) {
             $binaryPath = Join-Path $flashDir $entry.Value
@@ -102,7 +105,7 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "Flash failed (exit $LASTEXITCODE)." }
         return
     }
-    & python $idfScript -B $buildDir "-DMYPAPER_BOARD=$Board" "-DIDF_TARGET=$target" `
+    & python $idfScript -B $buildDir "-DMYPAPER_BOARD=$Board" '-DMYPAPER_FIRMWARE=System' "-DIDF_TARGET=$target" `
         "-DSDKCONFIG=$configPath" "-DSDKCONFIG_DEFAULTS=$defaults" @portArgs $Action
     if ($LASTEXITCODE -ne 0) { throw "Build failed for $Board (exit $LASTEXITCODE)." }
 } finally {

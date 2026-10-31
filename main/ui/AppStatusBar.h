@@ -23,6 +23,7 @@ class State {
     std::string _clock;
     uint32_t _last_draw=0,_last_check=0;
     bool _wifi=false;
+    bool _charging=false;
     bool _separator=false;
 public:
     explicit State(bool separator=false) : _separator(separator) {}
@@ -38,6 +39,7 @@ public:
             app_status_bar_layout::pixels,TFT_BLACK,TFT_WHITE);
         if (_separator) M5.Display.drawFastHLine(0,height-1,M5.Display.width(),TFT_BLACK);
         _wifi=wifi_setting_is_enabled();
+        _charging=battery_status::charging();
         _last_draw=_last_check=lgfx::millis();
     }
     void refresh(const char* title) {
@@ -45,7 +47,7 @@ public:
         if(uint32_t(now-_last_check)<1000 || M5.Display.displayBusy() || touch_input_needs_fast_poll())return;
         _last_check=now;
         if(uint32_t(now-_last_draw)<60000 && _clock==status_clock::text() &&
-            _wifi==wifi_setting_is_enabled())return;
+            _wifi==wifi_setting_is_enabled() && _charging==battery_status::charging())return;
         const auto previous=M5.Display.getEpdMode();
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_text);

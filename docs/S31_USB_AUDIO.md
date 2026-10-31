@@ -23,6 +23,11 @@
 
 配置不覆盖充电电压、充电电流等其他设置。1000 mA 是参考项目的 OTG 限流配置，不表示耳机实际消耗 1000 mA。
 
+正常启动另执行 `s31_charger_restore_at_boot()`，在 Host 尚未创建时关闭跨 MCU 重启
+保留的 OTG，并恢复 EN_CHG、清 HIZ/充电 watchdog；主系统和 MSC 均覆盖。
+日志 `S31_CHARGER` 打印使能读回、充电状态及实际电压/电流限制。具体边界和验证
+见 `S31_FULL_APPLICATION.md` 的 CX25601N 章节。运行中的 Host 不会被周期性恢复打断。
+
 USB U盘仍是独立重启模式，运行 TinyUSB Device，不启动音频 Host。测试耳机时先拔掉连接电脑/充电器的 Type-C 线，再连接数字耳机；已有外部 VBUS 会被上述检查拦截。
 
 ## USB 组件与 P4 隔离

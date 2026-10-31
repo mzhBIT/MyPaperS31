@@ -162,6 +162,7 @@ class BookshelfActivity final : public Activity {
     bool keyboard_focus = false;
     std::string last_clock;
     uint32_t last_status_ms = 0;
+    bool last_charging = false;
     using Pixels = std::unique_ptr<uint8_t,decltype(&heap_caps_free)>;
     std::array<Pixels,9> cover_pixels{{
         {nullptr,heap_caps_free},{nullptr,heap_caps_free},{nullptr,heap_caps_free},
@@ -332,6 +333,7 @@ class BookshelfActivity final : public Activity {
     }
     void status() {
         last_clock=shelf_status_bar::draw();
+        last_charging=battery_status::charging();
         last_status_ms=lgfx::millis();
     }
     void header() {
@@ -484,11 +486,13 @@ public:
             press_tracker.cancel(); // No allocation retry loop while held.
         }
         if(wanted>=0 || feedback_slot>=0) return;
+        if(touch_input_needs_fast_poll()) return;
         char clock[24]="--:--";
         if(time_basis_system_clock_valid()) time_basis_format_clock(std::time(nullptr),clock,sizeof(clock));
-        // One synchronous status-bar update per minute. Wi-Fi changes wait
-        // until this update; use elapsed time too when the clock is not synced.
-        if(last_clock==clock && uint32_t(lgfx::millis()-last_status_ms)<60000) return;
+        // Keep the minute cadence, but react to measured charging changes.
+        // Redraw the whole status strip together, not independent icon updates.
+        if(last_clock==clock && uint32_t(lgfx::millis()-last_status_ms)<60000 &&
+           last_charging==battery_status::charging()) return;
         const auto previous_mode=M5.Display.getEpdMode();
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_text);

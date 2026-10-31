@@ -186,8 +186,13 @@ static bool is_image_file(const char *n) {
 
 // ─── Drawing ───────────────────────────────────────────────────────
 
+static std::string g_status_clock;
+static uint32_t g_status_draw_ms=0;
+static bool g_status_charging=false;
 static void draw_status() {
-    shelf_status_bar::draw();
+    g_status_clock=shelf_status_bar::draw();
+    g_status_charging=battery_status::charging();
+    g_status_draw_ms=lgfx::millis();
 }
 static void draw_nav() {
     reading_navigation::draw(reading_navigation::Tab::Files);
@@ -350,6 +355,7 @@ static bool hit_back(int tx, int ty) {
 class FileBrowserActivity : public Activity {
     bool m_initial_hd = false;
     bool m_initial_show = true;
+    uint32_t m_status_check_ms = 0;
     bool m_transfer_menu = false;
     int m_transfer_choice = 0;
     bool m_action_menu = false;
@@ -408,6 +414,24 @@ public:
         draw_list();
         M5.Display.display();
         M5.Display.endWrite();
+    }
+
+    void loop() override {
+        const uint32_t now=lgfx::millis();
+        if(uint32_t(now-m_status_check_ms)<1000 || M5.Display.displayBusy() ||
+           touch_input_needs_fast_poll() || m_transfer_menu || m_action_menu ||
+           m_confirm_delete || !m_notice.empty() || m_text_input.visible()) return;
+        m_status_check_ms=now;
+        if(uint32_t(now-g_status_draw_ms)<60000 && g_status_clock==status_clock::text() &&
+           g_status_charging==battery_status::charging()) return;
+        const auto previous=M5.Display.getEpdMode();
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(epd_mode_t::epd_text);
+        M5.Display.fillRect(0,0,M5.Display.width(),shelf_status_bar::height,TFT_WHITE);
+        draw_status();
+        M5.Display.display(0,0,M5.Display.width(),shelf_status_bar::height);
+        M5.Display.endWrite();
+        M5.Display.setEpdMode(previous);
     }
 
     std::string selected_path() const {

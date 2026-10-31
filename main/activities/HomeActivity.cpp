@@ -10,6 +10,7 @@
 #include "activities/PhoneActivity.h"
 #include "activities/StocksActivity.h"
 #include "activities/CalculatorActivity.h"
+#include "activities/EmulatorActivity.h"
 #include "activities/PlaceholderActivity.h"
 #include "activities/RadioActivity.h"
 #include "activities/SettingActivity.h"
@@ -79,6 +80,9 @@ static void go_sms()     { launch_sms(); }
 static void go_phone()   { launch_phone(); }
 static void go_stocks()  { launch_stocks(); }
 static void go_calculator() { launch_calculator(); }
+#if CONFIG_IDF_TARGET_ESP32S31
+static void go_emulator() { launch_emulator(); }
+#endif
 
 static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
     {
@@ -99,7 +103,11 @@ static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
         {ui_locale::TextId::Messages, go_sms},
         {ui_locale::TextId::Phone, go_phone},
         {ui_locale::TextId::Stocks, go_stocks}, {ui_locale::TextId::Calculator, go_calculator},
+#if CONFIG_IDF_TARGET_ESP32S31
+        {ui_locale::TextId::Emulator, go_emulator}, {ui_locale::TextId::Count, nullptr},
+#else
         {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
+#endif
         {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
         {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
         {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
@@ -133,7 +141,12 @@ static const HomeIconId g_icons[HOME_PAGE_CNT][MENU_CNT] = {
     },
     {
         HomeIconId::Messages, HomeIconId::Phone,
-        HomeIconId::Stocks, HomeIconId::Calculator, HomeIconId::Count,
+        HomeIconId::Stocks, HomeIconId::Calculator,
+#if CONFIG_IDF_TARGET_ESP32S31
+        HomeIconId::Emulator,
+#else
+        HomeIconId::Count,
+#endif
         HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
         HomeIconId::Count, HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
     },
@@ -486,6 +499,7 @@ class HomeActivity : public Activity {
     bool m_clock_24_hour = true;
     bool m_wifi_enabled = false;
     bool m_battery_available = false;
+    bool m_battery_charging = false;
 
 public:
     void on_create() override {
@@ -529,15 +543,17 @@ public:
         const bool hour24 = time_basis_use_24_hour();
         const bool wifi_enabled = wifi_setting_is_enabled();
         const bool battery_available = battery_status::available();
+        const bool battery_charging = battery_status::charging();
         if (minute == m_clock_minute && offset == m_clock_offset &&
             hour24 == m_clock_24_hour && wifi_enabled == m_wifi_enabled &&
-            battery_available == m_battery_available) return;
+            battery_available == m_battery_available && battery_charging == m_battery_charging) return;
         if (M5.Display.displayBusy()) return;
         m_clock_minute = minute;
         m_clock_offset = offset;
         m_clock_24_hour = hour24;
         m_wifi_enabled = wifi_enabled;
         m_battery_available = battery_available;
+        m_battery_charging = battery_charging;
         M5.Display.startWrite();
         M5.Display.setDither(false);
         M5.Display.setEpdMode(epd_mode_t::epd_text);
@@ -635,6 +651,7 @@ private:
         m_clock_24_hour = time_basis_use_24_hour();
         m_wifi_enabled = wifi_setting_is_enabled();
         m_battery_available = battery_status::available();
+        m_battery_charging = battery_status::charging();
     }
     static int menu_count(int page) {
         int count = 0;

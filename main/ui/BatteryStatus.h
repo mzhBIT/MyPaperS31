@@ -10,6 +10,20 @@ inline bool available() {
     return false;
 #endif
 }
+inline bool charging() {
+#if CONFIG_IDF_TARGET_ESP32S31
+    // Use the gauge's measured net charging current, not merely USB power or
+    // the charger's enable bit. Full/idle and a discharging battery get no mark.
+    return M5.Power.isCharging();
+#else
+    return false;
+#endif
+}
+// Solid 12x20 lightning bolt; independent of font coverage and UI text size.
+inline void draw_charging_mark(int x, int y) {
+    M5.Display.fillTriangle(x+7, y, x, y+11, x+7, y+11, TFT_BLACK);
+    M5.Display.fillTriangle(x+5, y+8, x+12, y+8, x+3, y+20, TFT_BLACK);
+}
 // Fill only the existing icon interior; no percentage text or independent
 // refresh/timer. P4 keeps its original placeholder until a gauge is adapted.
 inline void draw_fill(int x, int y, int width, int height) {

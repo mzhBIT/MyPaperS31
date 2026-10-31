@@ -39,6 +39,7 @@ public:
         _sequence = touch_input_contact().sequence;
         _previous_mode = M5.Display.getEpdMode();
         _battery_level = read_battery();
+        _battery_charging = battery_status::charging();
         _free_psram_kb = read_free_psram();
         _free_sram_kb = read_free_sram();
         _last_battery_check = lgfx::millis();
@@ -126,6 +127,8 @@ public:
             _last_battery_check = lgfx::millis();
             const int level = read_battery();
             if (level != _battery_level) { _battery_level = level; _dirty |= BATTERY_DIRTY; }
+            const bool charging = battery_status::charging();
+            if (charging != _battery_charging) { _battery_charging = charging; _dirty |= BATTERY_DIRTY; }
             const size_t free_psram = read_free_psram();
             const size_t free_sram = read_free_sram();
             if (free_psram != _free_psram_kb || free_sram != _free_sram_kb) {
@@ -160,6 +163,7 @@ private:
     uint32_t _sequence = 0, _last_draw = 0;
     uint32_t _last_battery_check = 0;
     int _battery_level = -1;
+    bool _battery_charging = false;
     size_t _free_psram_kb = 0;
     size_t _free_sram_kb = 0;
     static constexpr unsigned BATTERY_DIRTY = 1u << 2;
@@ -195,6 +199,9 @@ private:
         system_font::draw_left(M5.Display, ui_locale::text(ui_locale::TextId::BatteryLevel), 24, battery_y()+8);
         const std::string label = _battery_level >= 0 ? std::to_string(_battery_level)+"%" : "--%";
         system_font::draw_right(M5.Display, label, M5.Display.width()-24, battery_y()+8);
+        if (_battery_charging) battery_status::draw_charging_mark(
+            M5.Display.width()-24-system_font::measure(label)-24,
+            battery_y()+8+(system_font::line_height()-20)/2);
     }
     void draw_psram() {
         M5.Display.fillRect(0, psram_y(), M5.Display.width(), battery_height(), TFT_WHITE);
