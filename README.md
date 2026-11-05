@@ -1,303 +1,218 @@
-# MyPaperP4
+# MyPaperS31
 
-MyPaperP4 是一套面向自定义 **ESP32-P4 单色墨水屏设备**的阅读、通信与音频固件。项目以本地阅读为核心，同时集成 SD 卡文件管理、Wi-Fi/USB 传输、本地音乐、网络收音机、在线内容，以及通过 ML307A 实现的 4G、短信和电话功能，并针对 1216 × 684 墨水屏、PSRAM、ESP32-C6 Hosted Wi-Fi 和 ES8311 音频链路做了适配与性能优化。
+本项目完美适配 **无名科技 4.7 寸墨水屏设备 Metalio-E-INK4-Plus**。
 
-> 本项目与具体硬件连接紧密耦合，并不是通用 ESP32-P4 开发板示例。直接移植到其他硬件前，需要重新配置屏幕总线、电源、触摸、SDMMC、Wi-Fi 协处理器和音频引脚。
+面向 **ESP32-S31 墨水屏设备**的阅读与多应用固件。以本地书籍阅读为核心，提供书架、文件管理、音乐、网络收音机、RSS、微信读书、DeepSeek、在线/离线地图、股票和计算器，并支持重启切换到独立的 GB 模拟器固件。
 
-## 主要功能
+当前默认构建目标为 **MyPaperS31 / ESP-IDF 6.1**。同一仓库保留 MyPaperP4 支持，P4 的硬件、4G 通信和构建方式见 [README_P4.md](README_P4.md)。仓库目录即使仍叫 `MyPaperP4`，也不影响选择 S31 构建。
 
-### 计算器
-
-- 主页第二页计算器入口，支持四则优先级、小数、正负号、百分比、退格及连续运算。
-- 五行四列大按键，三语言界面；最近20条计算历史保存在RAM，重启清空，无网络及SD卡写入。
-- 页眉切换科学模式：括号、乘方/平方/立方、根号、对数/指数、三角/反三角函数、π/e、绝对值、倒数和DEG/RAD，切换保留算式及结果。
-- 结果区域局刷，定期Quality清理；详见 [计算器设计](docs/CALCULATOR_APPLICATION_DESIGN.md)。
-
-### 股票行情
-
-- 主页 Stocks/股票入口，支持 A 股、美股自选列表与报价详情，最多20只自选，配置保存在NVS。
-- 通过腾讯网页行情接口批量获取价格、涨跌幅和报价时间，无需API Key；后台请求、手动刷新，失败保留旧报价。
-- 此接口没有公开稳定性承诺，行情可能延迟，仅供个人查看，不作为交易依据。见 [股票应用设计](docs/STOCKS_APPLICATION_DESIGN.md)。
-
-### 阅读
-
-- 系统界面使用固件内置 TTF 字符子集；设置中可切换 SD 卡 TTF/OTF 系统字体与 24～48 px 字号（默认 28 px），独立于正文字号，支持 NVS 持久化。见 [系统字体说明](docs/SYSTEM_FONT.md)。
-
-- TXT、Markdown、EPUB、FB2、DOCX 与无 DRM MOBI/PRC/AZW/AZW3 阅读。
-- DOCX 正文、标题目录、粗体/斜体、列表、嵌入图片与脚注/尾注重排；表格线性化阅读，不还原 Word 原始分页布局，不支持加密 DOCX。
-- ZIP/CBZ 图片漫画阅读：支持 JPG/JPEG、PNG、BMP 和子目录，按文件名自然排序，每张图片一页，复用图片预解码、居中显示、阅读进度及计时，不需整包解压；不支持加密 ZIP、ZIP64 或 RAR/CBR。
-- TXT 支持 UTF-8、UTF-16LE、GBK 和 Latin-1 回退。
-- EPUB2/EPUB3 目录、封面、正文图片和阅读进度。
-- EPUB ZIP 索引与元数据持久化缓存，加快再次打开速度。
-- MOBI6/KF7 支持无压缩、PalmDOC 与 HUFF/CDIC 文本，按记录流式读取并缓存解析索引。
-- AZW3/KF8 支持 FDST 主内容流与 SKEL/FRAG 章节重建；不支持 KFX、Print Replica 和 DRM 内容。
-- 书架按最近打开顺序展示书籍，并支持 EPUB/MOBI/FB2 封面缩略图缓存。
-- 共用分页与排版框架：
-  - 字号与行距
-  - 首行缩进字符数
-  - 段间距
-  - 左右页边距
-  - CJK 标点避头尾与两端排版
-  - 图片显示开关
-- TTF、OTF 和 EDCBook `.bin` 字体切换。
-- `fastest`、`fast`、`text`、`hd`、`quality` 五种墨水屏刷新模式；阅读器支持下一页排版和图片预取。
-
-### 音频
-
-- 从 SD 卡递归扫描并播放 MP3、FLAC、WAV、M4A、AAC、Ogg Vorbis 和 Opus。
-- 顺序播放、随机播放、单曲循环、上一首、下一首、暂停与音量调节。
-- 雪花省电模式可冻结歌词与进度条的周期刷新，不影响播放控制和界面交互。
-- 播放进度、已播放时间和总时长显示。
-- 封面、滚动歌词和歌曲列表三视图，可在内容区左右滑动切换。
-- 支持 FLAC PICTURE、ID3 APIC/PIC、M4A `covr` 内嵌封面，以及同目录封面图片；封面会生成适合硬解显示的方形缩略图。
-- 支持 ES8311 扬声器、UAC 1.0 与 UAC 2.0 USB 耳机/DAC 输出，以及 Speaker、USB、Auto 动态切换。
-- 扬声器输出最高 48 kHz；USB 输出按 DAC 描述符动态协商，设备支持时可保持高于 48 kHz 的原始采样率及 16/24/32-bit 位深。
-- 相邻歌曲采样率相同时避免重复配置 I²S/Codec。
-- 支持 ID3 `SYLT`、`USLT`/`TXXX`、Vorbis Comment 和 M4A `©lyr` 中的同步歌词。
-- 没有可用内嵌歌词时，自动查找音频同目录下的同名 `.lrc` 文件。
-- 外置 LRC 支持 UTF-8、UTF-16 和 GBK。
-- 内置 CNR HLS 网络电台，支持顺序或随机切台。
-
-### 网络与内容
-
-- ESP32-C6 作为 ESP-Hosted Wi-Fi 协处理器，通过 SDIO 与 ESP32-P4 通信。
-- 可在设置中选择 Wi-Fi 或 ML307A 4G 数据网络；模组通过 USB RNDIS 接入，AT 通道负责控制。
-- 离开网络功能后可停止 Wi-Fi、关闭 C6 电源，降低待机功耗。
-- RSS 源列表、新闻列表、正文分页和文章图片缓存。
-- Bing 每日壁纸浏览与保存。
-- 微信读书书架与正文阅读、DeepSeek 对话及图片提问、高德在线地图和 SD 卡离线分块地图（自动选包）。
-- 在线地图支持 32 MiB 多视口 LRU 缓存，重访优先读缓存，点击页眉地图标题可强制更新；地图缓存清理不影响离线地图包。
-- 地图支持联网地点搜索、结果列表和选中定位标记；离线地图使用坐标转换后定位，搜索本身仍需要网络和高德 Key。
-- 地图支持 IP 城市粗定位（确认后跳转）和中心点地址查询，离线底图的地址查询会转换坐标后联网获取。
-- 地图支持手动选择起终点的驾车、步行、骑行路线规划，显示距离、预计时长、分步说明及在线/离线底图路线；规划仍需网络和高德 Key。
-- 地图来源支持纯在线、纯离线和混合模式；混合模式 Z16 及以下使用离线包，Z17–Z19 使用高德在线地图（优先在线缓存），缩回后恢复离线底图；在线请求层级按 PC 实测倍率校正。
-- 浏览器上传与管理 SD 卡文件；USB MSC 模式可由电脑直接访问 SD 卡，进入该模式前需确保设备与电脑不会同时挂载文件系统。
-
-### 短信与电话
-
-- ML307A 短信收发，按号码归并为对话；中文短信使用 UCS-2 PDU，发件记录保存在 SD 卡。
-- 电话拨打、来电接听、挂断、通话中 DTMF 按键，以及通话计时和本地通话记录。
-- 可从 SD 卡选择来电铃声，短铃声循环播放；通话音频使用已连接的模组模拟音频引脚。
-- 设置中的时间基准默认为北京时间（UTC+8）；可调整显示时区和模组时钟解释方式。此 ML307A 的 `AT+CCLK?` 数字实测为 UTC，虽附带 `+32` 标记，默认按 UTC 数字处理；短信接收时间仍按短信自身的时区字段解析。
-
-### 文件与交互
-
-- SD 卡文件浏览器可打开书籍、图片、字体和音频。
-- JPG、PNG、BMP 图片浏览。
-- 电容触摸：点击、长按、上下左右滑动和边缘返回手势。
-- 五键 ADC 键盘：返回、上、下、确认和扩展功能。
-- 墨水屏局部脏区刷新，减少无关区域刷新和闪烁。
-
-## 当前界面状态
-
-- 支持全局下拉控制中心，提供亮度、色温连续调节，以及电量和剩余 PSRAM 显示；状态栏 Wi-Fi 图标显示信号强度。
-- S31 普通联网与传输默认采用 5 dBm 发射功率上限、b/g/n/ax 自动协商，传输页提供协议、功率和吞吐诊断；本地音乐与网络电台接入 BH1098G 音频输出。
-- 系统 UI 字体跨字号共享 TTF 流缓存，字形池按需增长并设置共享预算；阅读标签切换释放旧页面。阅读目录显式分配 PSRAM，当前仍有临时元数据限制，详见 [目录内存说明](docs/BOOK_METADATA_MEMORY.md)。
-
-| 入口 | 状态 |
-| --- | --- |
-| Book | 按最近打开顺序展示的书架与阅读器 |
-| Files / Images | SD 卡文件与图片浏览 |
-| Music | 本地音乐、歌词与播放控制 |
-| Radio | 网络收音机 |
-| News | RSS 与 Bing 壁纸 |
-| WeRead / DeepSeek / Map | 在线阅读、对话和在线/离线地图 |
-| Messages / Phone | ML307A 短信对话与电话 |
-| Transfer | Wi-Fi 网页传输与手动进入 USB U 盘模式 |
-| Setting | 网络、前光、API 密钥、EPD 诊断和时间基准等设置 |
-| Clock | 当前仍为占位界面 |
-
-## 硬件与构建配置
+## S31 硬件
 
 | 项目 | 配置 |
 | --- | --- |
-| 主控 | ESP32-P4，最低芯片版本 1.0 |
-| CPU | 360 MHz |
-| Flash | 32 MB |
-| PSRAM | 200 MHz Hex PSRAM |
-| 屏幕 | 1216 × 684 单色 EPD |
-| 触摸 | GT911 兼容触摸链路 |
-| 存储 | 4-bit SDMMC |
-| Wi-Fi | ESP32-C6 + ESP-Hosted SDIO |
-| 4G / 通话 | ML307A，经 USB RNDIS 与 AT 通道连接；通话音频使用模组模拟音频 |
-| 音频 | ES8311 + I²S + PA |
-| USB | HS 端口按功能在 Host 与 Device 模式间切换 |
-| SDK | ESP-IDF 5.3.5 |
+| 主控 | ESP32-S31，原生 Wi-Fi |
+| Flash | 16 MiB，DIO / 80 MHz |
+| PSRAM | 16 MiB Octal PSRAM，当前默认 250 MHz |
+| 屏幕 | 1216 × 684 墨水屏，常用竖屏界面为 684 × 1216 |
+| 触摸 | FT6336U |
+| 存储 | SD 卡，4-bit SDMMC |
+| 外放 | BH1098G，UART 控制、I²S 音频及功放控制 |
+| USB | Type-C 数据通路切换，支持 USB MSC 与 USB 数字耳机 |
+| 前光 | 冷暖双通道 PWM，亮度和色温可调 |
+| 时钟与电源 | PCF8563 RTC、BQ27220 电池计、CX25601N 充电管理 |
+| SDK | ESP-IDF 6.1，目标 `esp32s31` |
 
-主要外设引脚如下：
+这是与具体硬件连接配套的固件。外设引脚见 [S31 Pins.h](main/boards/MyPaperS31/Pins.h)，显示与电源驱动位于定制 M5GFX 中。其他板卡或硬件批次应核对引脚、电源和 PSRAM 时钟配置。
 
-| 外设 | 引脚 |
+## 主要功能
+
+### 本地阅读与书架
+
+- 支持 TXT、Markdown、EPUB、FB2、DOCX，以及无 DRM 的 MOBI / PRC / AZW / AZW3。
+- 支持 ZIP / CBZ 图片漫画，包含 JPG、JPEG、PNG、BMP，可带子目录；按文件名自然排序，每张图片一页，无需整包解压。
+- 支持 EPUB 目录、封面、正文图片，MOBI6 / KF7 文本和 AZW3 / KF8 章节重建。
+- 支持横排、竖排、ruby 小字、行内批注与链接脚注；具体呈现取决于原书标记。
+- 正文字体支持 SD 卡 TTF / OTF 和 EDCBook BIN；可调整字号、字间距、行距、段间距、页边距、首行缩进与图片显示。
+- 支持简繁转换、阅读背景及封面配置。简繁转换需准备相应字典资源，见 [简繁转换说明](docs/CHINESE_SCRIPT_CONVERSION_DESIGN.md)。
+- 自动翻页间隔 5～300 秒，每次递增 5 秒；翻页动画可选关闭、快、慢，支持点击区域及滑动方向判定。
+- 下一页排版、字形、图片和独立缓冲预绘制，减少翻页时的正文绘制等待。
+- 阅读进度与累计阅读时长在退出阅读时保存，阅读时长按分钟展示。
+- 独立阅读首页、最近阅读、多种书架风格及文件标签页；封面优先使用无压缩 4bpp BIN 缓存，缺失时从图片生成。
+
+刷新模式包括 `epd_fastest`、`epd_fast`、`epd_text`、`epd_hd` 和 `epd_quality`。正文默认 `epd_text`、默认显示图片；书架使用 `epd_hd`，从书架首次打开书籍使用一次 `epd_quality`。主系统使用共用 2D 刷新引擎及驱动帧流水线。
+
+### 文件管理与传输
+
+- 浏览 SD 卡目录，打开书籍、图片、字体与音频；支持文件操作、重命名（含扩展名）和图片设为待机壁纸。
+- 文件页右上角“+”提供传输入口，系统主页也有独立传输应用。
+- Wi-Fi 网页传输：连接路由器，或开启设备热点，通过浏览器上传和管理文件。
+- USB U 盘模式：重启后将 SD 卡交给电脑独占，退出前应先在电脑上安全弹出磁盘。
+- 全局文本输入框支持移动光标，中文输入可切换九宫格。
+
+### 音乐与网络收音机
+
+- 本地音乐支持 MP3、FLAC、WAV、M4A、AAC、Ogg Vorbis 和 Opus；提供列表、封面、歌词视图及播放控制。
+- 支持内嵌封面和歌词，也可读取音频同目录、同名的 `.lrc` 歌词文件。
+- 音乐与收音机均接入 BH1098G 外放，以及 UAC 1.0 / UAC 2.0 Type-C 数字耳机；输出可选 `SPK / USB / AUTO`。
+- 外放按 BH1098G 实际时钟重采样；USB 按耳机描述符协商格式，不能直接套用 P4 外放采样率。
+- 收音机支持 HLS 与 MP3 电台，使用后台网络缓冲降低断流影响。第三方电台可用性仍取决于网络和源站。
+
+USB 输出仅支持带 DAC 的数字耳机，不支持被动模拟 Type-C 转接头。三字节 24-bit 等扩展格式需对应耳机实测，详见 [S31 USB 音频](docs/S31_USB_AUDIO.md)。
+
+### 网络应用
+
+| 应用 | 功能 |
 | --- | --- |
-| SDMMC CLK/CMD/D0/D1/D2/D3 | GPIO43/44/39/40/41/42 |
-| Audio I²C SDA/SCL | GPIO7/8 |
-| I²S MCLK/SCLK/DOUT/LRCK/DIN | GPIO13/12/11/10/9 |
-| Audio PA | GPIO53 |
-| ESP32-C6 Reset/Enable | GPIO54 |
-| ADC keys | GPIO1 / ADC1_CH0 |
+| 新闻 | RSS 订阅源增删改、新闻列表、图文分页、图片缓存，以及 Bing 壁纸浏览与保存 |
+| 微信读书 | 登录、书架、章节阅读与评论；联网失败时使用已有缓存离线阅读 |
+| DeepSeek | 对话及图片提问，在设置中配置 API 信息 |
+| 地图 | 高德在线地图、SD 卡离线分块地图、地点搜索、起终点路线规划与出行方式缓存 |
+| 股票 | A 股、美股自选和报价详情，腾讯网页行情接口，无需 API Key |
+| 计算器 | 普通 / 科学模式、DEG / RAD、计算历史 |
 
-屏幕数据总线、电源管理和触摸配置位于仓库内定制的 M5GFX/M5Unified 实现中。
+地图支持混合来源：Z16 及以下使用离线包，Z17～Z19 使用在线地图。搜索、地址查询和路线规划仍需网络及高德 Key，离线包制作见 [离线地图格式与工具](docs/OFFLINE_MAP_PACK.md)。
+
+微信读书离线模式只读取已有缓存，不等同于自动缓存整本；部分内容需要有效账号权限。S31 不提供 P4 的 ML307A 4G、短信和电话功能，对应主页入口已隐藏。时钟应用目前仍为占位入口，状态栏时间与 RTC 功能可用。
+
+### 系统设置与控制中心
+
+- 简体中文、繁体中文、英文界面。
+- 内置 TTF 字符子集；可选择 SD 卡系统字体，系统字号 24～48 px，默认 28 px，与正文字号独立。
+- Wi-Fi 常开 / 按需两种生命周期；S31 默认 b/g/n/ax 自动协商、5 dBm 发射功率上限。
+- 亮度与色温连续滑条；全局顶部下拉控制中心还显示电量百分比、充电状态、剩余 PSRAM / SRAM，并提供软件关机。
+- 日期与时间设置：RTC 初始化、离线设置日期时间、网络校时、时区和 12 / 24 小时制；开机后首次联网自动尝试一次校时。
+- 电源键待机 / 唤醒、长按关机，待机关闭前光，可选择待机壁纸；音量键可调节播放音量。
+- 恢复默认设置带确认，清除保存的 Wi-Fi 凭据和 DeepSeek / 高德 API 配置；具体保留范围见 [恢复默认设置](docs/RESTORE_DEFAULT_SETTINGS.md)。
+
+内置 UI 字体只包含界面所需字符。阅读正文、任意书名、文件名和歌词建议安装完整字体；系统字体的共享缓存及内存预算见 [系统字体说明](docs/SYSTEM_FONT.md)。
+
+### 独立 GB 模拟器
+
+模拟器是 **仅供 S31 使用的独立固件**，通过重启与主系统切换，采用 Paperboy 式独立连续行扫描，不使用主系统的 2D 刷新通路。
+
+- ROM 放在 SD 卡 `/roms/`，支持普通 GB 和具有 DMG 兼容模式的 `.gbc`，不支持 CGB-only 或 GBA。
+- 提供触摸游戏按键、物理按键、暂停菜单、卡带存档与手动状态存档。
+- 暂停菜单选择“返回主系统”后保存并自动重启；正常返回不需要按 BOOT。
+- 已接入独立 BH1098G 外放，游戏兼容性与音频效果仍需逐项实机验证。
+
+安装及操作见 [独立模拟器固件](docs/DUAL_FIRMWARE_EMULATOR.md)。
 
 ## 构建与烧录
 
-### 1. 准备环境
+### 主系统
 
-安装 ESP-IDF 5.3.5，并加载 ESP-IDF 环境。仓库已经包含当前使用的 M5GFX、M5Unified、FreeType，以及经过项目适配的部分 managed components。
-
-```bash
-git clone https://github.com/mzhBIT/MyPaperP4.git
-cd MyPaperP4
-idf.py set-target esp32p4
-idf.py build
-```
-
-如果仓库中已有正确的 `sdkconfig`，通常可以跳过 `set-target`，直接构建。
-
-### 2. 烧录与串口监视
-
-Windows：
+安装并激活 **ESP-IDF 6.1** 环境，然后在仓库根目录执行。使用其他 IDF 版本或只激活普通 Python 环境不能替代对应的 IDF 环境。
 
 ```powershell
-idf.py -p COM5 flash monitor
+git clone https://github.com/mzhBIT/MyPaperS31.git
+cd MyPaperS31
+
+# 先在当前终端激活本机的 ESP-IDF 6.1 环境
+./scripts/build-board.ps1 -Board MyPaperS31 -Action build
+./scripts/build-board.ps1 -Board MyPaperS31 -Action flash -Port COM5
+./scripts/build-board.ps1 -Board MyPaperS31 -Action monitor -Port COM5
 ```
 
-Linux/macOS：
+`COM5` 改为实际串口。烧录默认 921600 baud，可追加 `-Baud 460800` 降速；串口监视为 115200 baud，`Ctrl-]` 退出。烧录前关闭占用端口的串口监视器。
 
-```bash
-idf.py -p /dev/ttyUSB0 flash monitor
+| 配置 | 构建目录 | 构建参数 |
+| --- | --- | --- |
+| Current | `build-s31` | 默认配置 |
+| Debug | `build-s31-debug` | `-Profile Debug` |
+| Release | `build-s31-release` | `-Profile Release` |
+
+不同 Profile 使用独立配置和产物；烧录时应指定与构建相同的 `-Profile`。`-Action flash` 只烧录已有产物，不重新编译。主固件路径为对应目录下的 `MyPaperS31.bin`。
+
+VS Code 工作区默认指向 S31，可使用 ESP-IDF Build 或仓库的“编译 MyPaperS31”任务。本仓库 `.vscode` 中的 SDK、Python 和串口路径需按本机安装修改，不要使用 C/C++ 的“编译当前文件”任务构建固件。
+
+### 模拟器固件（可选）
+
+先构建并烧录主系统，使设备具备双固件分区表，再执行：
+
+```powershell
+./scripts/build-emulator.ps1 -Action build
+./scripts/build-emulator.ps1 -Action flash -Port COM5
 ```
 
-串口监视默认波特率为 115200。退出 ESP-IDF monitor 使用 `Ctrl-]`。
+构建产物为 `build-s31-emulator/MyPaperEmulatorS31.bin`。安装脚本核对设备真实分区表和镜像身份，仅写入模拟器槽；完成后从主系统主页第二页进入“模拟器”。
 
-自定义分区表位于 [`partitions.csv`](partitions.csv)，当前 factory app 分区大小为 8 MB。
+### Flash 分区
+
+以 [S31 分区表](configs/mypapers31/partitions.csv) 为准：
+
+| 分区 | 地址 | 大小 |
+| --- | --- | --- |
+| NVS | `0x9000` | 24 KiB |
+| PHY | `0xF000` | 4 KiB |
+| 主系统 factory | `0x10000` | 8 MiB |
+| 模拟器 emulator | `0x810000` | 4 MiB |
+| 启动选择 otadata | `0xC10000` | 8 KiB |
+
+这是两个用途不同的固件槽，不是主系统 A/B OTA 升级布局。SDK 可能提示主系统镜像放不进 4 MiB 模拟器槽；应同时检查主系统的 factory 容量检查，真正超出所属槽才是溢出。
 
 ## SD 卡准备
 
-建议使用 FAT32，并在卡根目录准备以下结构。应用会在需要时创建大部分目录：
+建议使用 FAT32。电脑看到的是卡根目录，设备日志会在这些路径前加 `/sdcard`：
 
 ```text
-/books/                 TXT、Markdown、EPUB、MOBI、PRC、AZW、AZW3、FB2
-/images/                JPG、JPEG、PNG、BMP
-/fonts/                 TTF、OTF、EDCBook BIN 字体
-/music/                 MP3、FLAC、WAV、M4A、AAC、OGG、OPUS
-/ringtone/              可选的来电铃声音频
-/rss.txt                自定义 RSS 源
-/.reader/               自动生成的应用数据与缓存
+/books/       TXT、MD、EPUB、FB2、DOCX、MOBI、PRC、AZW、AZW3、ZIP、CBZ
+/fonts/       完整 TTF / OTF / EDCBook BIN 字体
+/images/      JPG、JPEG、PNG、BMP 图片与壁纸
+/music/       音乐及同名 LRC 歌词
+/map/         离线地图包与 catalog.mpc（在地图应用中选择）
+/roms/        GB ROM 与模拟器存档
+/rss.txt      可选的自定义 RSS 源
+/.reader/     自动生成的阅读记录、封面和应用缓存
 ```
 
-歌词文件与音频保持同目录、同文件名：
-
-```text
-/music/林俊杰 - 江南.flac
-/music/林俊杰 - 江南.lrc
-```
-
-### Wi-Fi 配置
-
-在主页进入 `Setting > WiFi`，设备会扫描附近网络。选择网络后可通过屏幕虚拟键盘输入密码；只有连接验证成功，SSID 和密码才会写入 NVS。`Setting > Network` 可选择在线功能使用 Wi-Fi 或 ML307A 4G 流量。
-
-扫描、验证以及网络功能退出后会停止 Wi-Fi 并关闭 ESP32-C6，避免设置页面或阅读场景持续耗电。Wi-Fi 密码存放在 NVS；如产品需要更高安全等级，应同时启用 Flash Encryption 与 NVS Encryption。
-
-### RSS 配置
-
-`/sdcard/rss.txt` 每行一个源，可使用 `标题|URL`：
+RSS 可在应用内通过右下角“+”添加，长按修改或删除；也可编辑 `/rss.txt`，每行 `名称|URL`，例如：
 
 ```text
 IT之家|https://www.ithome.com/rss
-Bing Wallpaper|https://rsshub.app/bing
 ```
 
-空行和以 `#` 开头的行会被忽略。没有配置文件或没有有效条目时，应用使用内置 RSS 源。
+仅在配置及备份都不存在时启用内置源；删除全部订阅后会保持空列表，见 [RSS 源管理](docs/RSS_FEED_MANAGEMENT.md)。
 
-## 文件传输
+### 首次使用
 
-Transfer 提供 Wi-Fi 网页传输和独立的 USB MSC 传输模式。USB 模式会重启并将 SD 卡交给电脑独占；退出前请先在电脑上安全弹出磁盘，再返回正常模式。使用 USB Device 时还需确保电脑的 VBUS 与板载 5 V 电源不会对灌。
+1. 在设置中选择语言、系统字体和前光，在“网络”中配置 Wi-Fi。
+2. 将书籍和完整字体复制到 SD 卡，通过文件页打开书籍，之后可从书架或最近阅读继续。
+3. 网页传输时访问设备屏幕显示的地址；热点模式需先连接屏幕显示的 SSID，默认热点密码为 `12345678`。
+4. 配置 DeepSeek / 高德 Key 后使用相应在线应用；微信读书按界面完成登录。
 
-### Wi-Fi 网页传输
+Type-C 口用于 U 盘或数字耳机时会切换数据通路，不能同时使用同一个端口的 USB Serial/JTAG 日志。切换功能前注意电脑挂载及耳机输出状态。
 
-打开主页的 **Transfer**：
-
-1. 设备优先尝试连接已配置的路由器。
-2. 连接成功后，屏幕显示设备 IP 地址。
-3. 若 STA 连接失败，设备回退到 AP 模式；默认 AP 密码为 `12345678`。
-4. 手机或电脑访问屏幕显示的 HTTP 地址。
-5. 选择一个或多个支持的文件并上传。
-
-上传文件会自动分类：
-
-| 文件类型 | 目标目录 |
-| --- | --- |
-| TXT、Markdown、EPUB、MOBI、PRC、AZW、AZW3、FB2 | `/sdcard/books` |
-| JPG、JPEG、PNG、BMP | `/sdcard/images` |
-| TTF、OTF、BIN | `/sdcard/fonts` |
-| 支持的音频格式 | `/sdcard/music` |
-
-## 缓存与持久化数据
-
-应用数据保存在 `/sdcard/.reader/`：
+## 开发与资料
 
 ```text
-recent_books             书架记录（按最近打开顺序）
-reader_style             阅读排版设置
-reader_font              当前字体
-txtprogress/             TXT 阅读进度
-epubprogress/            EPUB 阅读进度
-epub_tmp/                EPUB 图片按需解压缓存
-epub_meta/               EPUB ZIP 索引与元数据缓存
-mobi_progress/           MOBI 阅读进度
-mobi_tmp/                MOBI 图片按需提取缓存
-mobi_meta/               MOBI 记录、章节与目录元数据缓存
-fb2progress/             FB2 阅读进度
-fb2_tmp/                 FB2 内嵌图片按需解码缓存
-rss_img/                 RSS 图片缓存
-music_cover/             音频封面与方形缩略图缓存
-sms/sent.tsv             本机发送的短信记录
-calls.tsv                本机通话记录
+main/                  共用应用、阅读器、系统服务及分板硬件后端
+components/            定制 M5GFX / M5Unified、FreeType、USB Host 等
+managed_components/    项目依赖，部分包含适配修改
+firmware/emulator/     S31 独立模拟器及第三方核心
+configs/               S31 / P4 默认配置、分区表与日志 Profile
+scripts/               分板构建、烧录及模拟器安装入口
+tools/                 字体子集、图标、地图转换与 PC 验证工具
+docs/                  功能设计、实现边界及验证记录
 ```
 
-缓存文件可以删除，应用会在下次使用时重新生成；删除进度文件会丢失对应阅读位置。
+- [P4 设备说明](README_P4.md)
+- [源码模块说明](main/README.md)
+- [系统字体与新增文案的字符覆盖检查](docs/SYSTEM_FONT.md)
+- [书架](docs/PICO_BOOKSHELF.md) / [阅读首页](docs/READING_HOME.md) / [文件管理](docs/FILE_BROWSER_UI.md)
+- [DOCX](docs/DOCX_READING.md) / [ZIP 漫画](docs/ZIP_COMIC_READING.md) / [竖排与批注](docs/VERTICAL_ANNOTATED_READER_DESIGN.md)
+- [2D 波形与驱动帧](docs/EPD_2D_WAVEFORM_ENGINE.md) / [正文预绘制](docs/READER_PAGE_BUFFER.md)
+- [S31 USB U 盘](docs/S31_USB_MASS_STORAGE_DESIGN.md) / [收音机](docs/S31_RADIO_PLAYBACK.md) / [Wi-Fi 功率测试](docs/S31_WIFI_POWER_RESULTS.md)
 
-## 项目结构
+设计文档中可能保留阶段性方案与历史验证记录；当前默认参数以源码、`configs` 及实际构建目录的 `sdkconfig` 为准。修改 defaults 不会自动覆盖已有 sdkconfig 中的值。
 
-```text
-MyPaperP4/
-├─ main/
-│  ├─ activities/        页面与交互逻辑
-│  ├─ audio/             本地音乐、收音机、Codec 与歌词
-│  ├─ input/             触摸与 ADC 按键
-│  ├─ modem/             ML307A AT 短信与通话控制
-│  ├─ time/              NVS 时间基准与时区换算
-│  ├─ usb/               USB Host、模组识别及 MSC 模式
-│  ├─ parser/            TXT、EPUB、MOBI、FB2、HTML 与编码解析
-│  ├─ renderer/          分页、文字、图片与封面缩略图
-│  ├─ storage/           SD 卡和应用路径
-│  ├─ ui/                字体、样式和位图图标
-│  └─ wifi/              ESP-Hosted Wi-Fi 生命周期
-├─ components/           定制 M5GFX、M5Unified、FreeType、USB Host 与 UAC2 Host
-├─ managed_components/   项目使用并做过适配的 Espressif 组件
-├─ Assets/               SVG 设计与图标源文件
-├─ tools/                图标转换等开发工具
-├─ sdkconfig.defaults
-└─ partitions.csv
-```
+新增界面文案后，应执行 `python tools/subset_system_font.py --check`，缺字时重新生成并提交内置字体子集。第三方库、字体、图标和模拟器核心应保留各自授权及声明；模拟器来源见 [vendor NOTICE](firmware/emulator/vendor/NOTICE.md)。
 
-应用内部采用 `Activity`/`ActivityManager` 管理页面。更详细的源码模块说明见 [`main/README.md`](main/README.md)。
-USB Audio Host 的架构、实时性和验证基线见 [`docs/USB_AUDIO_OUTPUT_DESIGN.md`](docs/USB_AUDIO_OUTPUT_DESIGN.md)。
+## 已知边界
 
-## 注意事项
+- 不支持 DRM 书籍、KFX、Print Replica、旧版 DOC；DOCX 为重排阅读，不还原 Word 分页。漫画不支持 RAR / CBR、加密 ZIP 或 ZIP64。
+- 内置 UI 字体不覆盖任意文本；缺字应安装合适的完整字体。
+- S31 的 16 MiB PSRAM 需要同时容纳驱动帧、字体、图片与网络缓存，大文件仍可能触及内存限制。
+- 快速墨水屏刷新可能残影；动画、图片灰阶及刷新间隔需按实际面板效果选择。
+- 网络电台、RSS、行情及在线接口可能变更；股票报价可能延迟，不保证接口长期可用。
 
-- 本项目不会在 SD 卡挂载失败时自动格式化存储卡。
-- 网络电台地址和 RSS 服务可能因第三方服务变化而失效。
-- 墨水屏快速局刷会产生一定残影；Music、Radio 等页面首次进入时使用高质量模式清屏。
-- Progressive JPEG 解码设有内存预算，大分辨率图片会优先缩放或使用紧凑解码路径。
-- 单扬声器设备最终听到的声道由硬件布线决定；软件音频管线当前使用双声道 I²S 格式输出。
-- `managed_components/` 中包含项目级修订，升级 ESP-IDF 或组件版本时需要重新核对这些改动。
-
-## 开发状态
-
-项目仍在持续开发中。提交问题时建议附上：
-
-- 使用的提交版本
-- ESP-IDF 版本
-- 完整串口日志
-- 触发问题的文件格式与操作步骤
-- 是否同时启用了 EPD、SD、Wi-Fi 或音频
+反馈问题时请附提交版本、IDF 版本、完整日志、硬件型号，以及触发文件和操作步骤。

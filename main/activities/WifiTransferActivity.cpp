@@ -3,6 +3,7 @@
 #include "activities/ActivityManager.h"
 #include "activities/SettingActivity.h"
 #include "activities/recent_books.h"
+#include "boards/Board.h"
 #include "audio/audio_file_formats.h"
 #include "storage/app_paths.h"
 #include "storage/storage_sdcard.h"
@@ -94,7 +95,7 @@ static void log_transfer_link(const char* stage) {
 
 static const char FILE_MANAGER_HTML[] = R"HTML(<!doctype html>
 <html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>MyPaperP4 Transfer</title><style>
+<title>MyPaper Transfer</title><style>
 body{font-family:system-ui,-apple-system,Segoe UI,sans-serif;margin:20px auto;max-width:850px;padding:0 12px;color:#111}
 h1{font-size:26px}.tabs{display:flex;gap:8px}.tabs button{flex:1}.box{border:1px solid #bbb;padding:16px;margin:14px 0}
 button,input{font-size:15px;box-sizing:border-box}button{padding:10px;background:#111;color:#fff;border:0;border-radius:3px}
@@ -102,7 +103,7 @@ button.alt{background:#fff;color:#111;border:1px solid #777}.muted{color:#666;fo
 pre{white-space:pre-wrap;background:#f3f3f3;padding:12px}.toolbar{display:flex;gap:8px;flex-wrap:wrap;margin:12px 0}
 .toolbar button{width:auto}.path{font-family:monospace;overflow-wrap:anywhere}.row{display:grid;grid-template-columns:1fr auto;gap:8px;padding:10px 2px;border-top:1px solid #ddd;align-items:center}
 .actions{display:flex;gap:6px}.actions button{padding:6px 9px}.hidden{display:none}.upload{padding:10px;background:#111;color:#fff;border-radius:3px;cursor:pointer}
-</style></head><body><h1>MyPaperP4 <span data-i18n="WifiTransfer"></span></h1>
+</style></head><body><h1><span id="deviceName"></span> <span data-i18n="WifiTransfer"></span></h1>
 <div class="tabs"><button onclick="tab('smart')" data-i18n="WebSmartUpload"></button><button class="alt" onclick="tab('manager')" data-i18n="WebFileManager"></button></div>
 <section id="smart" class="box"><div class="muted" data-i18n="WebSortHint"></div>
 <p><input id="smartFiles" type="file" multiple></p><button onclick="uploadFiles('smartFiles','')" data-i18n="WebUploadSort"></button></section>
@@ -113,7 +114,7 @@ pre{white-space:pre-wrap;background:#f3f3f3;padding:12px}.toolbar{display:flex;g
 <p><progress id="bar" value="0" max="100"></progress></p><pre id="log" data-i18n="WebReady"></pre>
 <script>
 const translations=__UI_LOCALE__;const t=key=>translations[key]||key;
-document.documentElement.lang=translations.lang;document.title='MyPaperP4 '+t('WifiTransfer');
+document.documentElement.lang=translations.lang;const deviceName=translations.deviceName||'MyPaper';document.getElementById('deviceName').textContent=deviceName;document.title=deviceName+' '+t('WifiTransfer');
 document.querySelectorAll('[data-i18n]').forEach(el=>el.textContent=t(el.dataset.i18n));
 let currentPath='/';const $=id=>document.getElementById(id);const log=t=>$('log').textContent=t;
 function tab(id){$('smart').classList.toggle('hidden',id!=='smart');$('manager').classList.toggle('hidden',id!=='manager');if(id==='manager')reload()}
@@ -889,6 +890,7 @@ private:
         const char *language = ui_locale::get() == ui_locale::Language::SimplifiedChinese ? "zh-Hans"
                              : ui_locale::get() == ui_locale::Language::TraditionalChinese ? "zh-Hant" : "en";
         std::string translations = std::string("{\"lang\":\"") + language + "\"";
+        translations += std::string(",\"deviceName\":\"") + json_escape(mypaper::board::profile().name) + "\"";
         for (const auto &label : labels) {
             translations += std::string(",\"") + label.key + "\":\"" +
                             json_escape(ui_locale::text(label.id)) + "\"";

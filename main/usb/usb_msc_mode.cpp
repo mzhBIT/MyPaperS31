@@ -132,7 +132,10 @@ void draw_page()
 
     system_font::draw_center(M5.Display, state_text(s_state.load(std::memory_order_acquire)),
                              w / 2, 170, TFT_BLACK);
-    system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::DeviceSdCard), w / 2, 240, TFT_BLACK);
+    char device_label[64] = {};
+    std::snprintf(device_label, sizeof(device_label), ui_locale::text(ui_locale::TextId::DeviceSdCard),
+                  MYPAPER_USB_MANUFACTURER);
+    system_font::draw_center(M5.Display, device_label, w / 2, 240, TFT_BLACK);
     if (s_exit_confirmation.load(std::memory_order_acquire)) {
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::UsbNotSafelyEjected),
                                  w / 2, 350, TFT_BLACK);

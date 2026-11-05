@@ -529,7 +529,7 @@ constexpr Translation kText[] = {
     {"USB storage error", "USB 存储错误", "USB 儲存錯誤"},
     {"SD card mount error (%d)", "SD 卡挂载错误（%d）", "SD 卡掛載錯誤（%d）"},
     {"USB start failed: %s", "USB 启动失败：%s", "USB 啟動失敗：%s"},
-    {"MyPaperP4 SD Card", "MyPaperP4 SD 卡", "MyPaperP4 SD 卡"},
+    {"%s SD Card", "%s SD 卡", "%s SD 卡"},
     {"The computer has not safely ejected the drive.", "电脑尚未安全弹出磁盘。", "電腦尚未安全退出磁碟。"},
     {"Tap Exit again to force a restart.", "再次点击退出将强制重启。", "再次點選離開將強制重新啟動。"},
     {"Safely eject the drive on your computer", "请先在电脑上安全弹出磁盘", "請先在電腦上安全退出磁碟"},

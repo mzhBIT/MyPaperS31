@@ -1,5 +1,6 @@
 #include "storage/settings_reset.h"
 #include "storage/app_paths.h"
+#include "wifi/wifi_setting.h"
 #include <nvs.h>
 #include <esp_log.h>
 #include <cerrno>
@@ -24,6 +25,35 @@ esp_err_t clear_preferences(const char *name, const char *key = nullptr)
     if (result != ESP_OK) ESP_LOGE(TAG, "reset %s failed: %s", name, esp_err_to_name(result));
     return result;
 }
+
+esp_err_t verify_key_erased(const char *name, const char *key)
+{
+    nvs_handle_t handle;
+    esp_err_t result = nvs_open(name, NVS_READONLY, &handle);
+    if (result == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
+    if (result != ESP_OK) return result;
+    size_t size = 0;
+    result = nvs_get_str(handle, key, nullptr, &size);
+    nvs_close(handle);
+    if (result == ESP_ERR_NVS_NOT_FOUND) return ESP_OK;
+    ESP_LOGE(TAG, "reset verification failed: namespace=%s key=%s result=%s", name, key,
+             esp_err_to_name(result));
+    return result == ESP_OK ? ESP_FAIL : result;
+}
+
+esp_err_t verify_credentials_erased()
+{
+    static constexpr const char *keys[][2] = {
+        {"wifi_cfg", "ssid"}, {"wifi_cfg", "password"},
+        {"ds_chat", "api_key"}, {"amap", "api_key"},
+    };
+    for (const auto &entry : keys) {
+        const esp_err_t result = verify_key_erased(entry[0], entry[1]);
+        if (result != ESP_OK) return result;
+    }
+    ESP_LOGI(TAG, "reset verified: saved Wi-Fi credentials and DeepSeek/AMap API keys absent");
+    return ESP_OK;
+}
 }
 
 esp_err_t settings_restore_defaults()
@@ -44,9 +74,15 @@ esp_err_t settings_restore_defaults()
             return ESP_FAIL;
         }
     }
+    // wifi_cfg belongs to this application, while the SDK can retain older
+    // station config separately. Shut down Wi-Fi and clear both layers.
+    const esp_err_t wifi_result = wifi_setting_reset_driver_config();
+    if (wifi_result != ESP_OK) return wifi_result;
     for (const char *name : names) {
         const esp_err_t result = clear_preferences(name);
         if (result != ESP_OK) return result;
     }
-    return clear_preferences("phone", "ringtone");
+    const esp_err_t ringtone_result = clear_preferences("phone", "ringtone");
+    if (ringtone_result != ESP_OK) return ringtone_result;
+    return verify_credentials_erased();
 }

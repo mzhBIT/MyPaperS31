@@ -48,11 +48,22 @@ constexpr int PAD = 20;
 constexpr int SETTINGS_ROW_Y = HEADER_H;
 constexpr int SETTINGS_ROW_H = 110;
 constexpr int SETTINGS_ROW_GAP = 0;
+enum SettingItemIndex {
+    SETTINGS_LANGUAGE,
+    SETTINGS_SYSTEM_FONT,
+    SETTINGS_NETWORK,
 #if CONFIG_IDF_TARGET_ESP32S31
-constexpr int SETTINGS_ITEM_COUNT = 11;
-#else
-constexpr int SETTINGS_ITEM_COUNT = 10;
+    SETTINGS_STANDBY_WALLPAPER,
 #endif
+    SETTINGS_FRONTLIGHT,
+    SETTINGS_APPS,
+    SETTINGS_EPD_DIAGNOSTICS,
+    SETTINGS_RSS_CACHE,
+    SETTINGS_DATE_TIME,
+    SETTINGS_HOME_ICON_FRAMES,
+    SETTINGS_RESTORE_DEFAULTS,
+    SETTINGS_ITEM_COUNT,
+};
 constexpr int SETTINGS_VISIBLE_ROWS = 9;
 
 constexpr int SCAN_TOP = HEADER_H;
@@ -1784,17 +1795,19 @@ private:
 
     void open_focused()
     {
-        if (_focus == 0) ActivityManager::instance().push(new LanguageSettingsActivity());
-        else if (_focus == 1) ActivityManager::instance().push(new NetworkSettingsActivity());
-        else if (_focus == 2) ActivityManager::instance().push(new FrontlightSettingsActivity());
-        else if (_focus == 3) ActivityManager::instance().push(new AppSettingsActivity());
-        else if (_focus == 4) launch_epd_diagnostics();
-        else if (_focus == 5) ActivityManager::instance().push(new RssCacheSettingsActivity());
-        else if (_focus == 6) ActivityManager::instance().push(new DateTimeSettingsActivity());
-        else if (_focus == 8) ActivityManager::instance().push(new RestoreDefaultsActivity());
-        else if (_focus == 9) launch_system_font_settings();
-        else if (_focus == 10) launch_standby_wallpaper_picker();
-        else if (_focus == 7) {
+        if (_focus == SETTINGS_LANGUAGE) ActivityManager::instance().push(new LanguageSettingsActivity());
+        else if (_focus == SETTINGS_SYSTEM_FONT) launch_system_font_settings();
+        else if (_focus == SETTINGS_NETWORK) ActivityManager::instance().push(new NetworkSettingsActivity());
+#if CONFIG_IDF_TARGET_ESP32S31
+        else if (_focus == SETTINGS_STANDBY_WALLPAPER) launch_standby_wallpaper_picker();
+#endif
+        else if (_focus == SETTINGS_FRONTLIGHT) ActivityManager::instance().push(new FrontlightSettingsActivity());
+        else if (_focus == SETTINGS_APPS) ActivityManager::instance().push(new AppSettingsActivity());
+        else if (_focus == SETTINGS_EPD_DIAGNOSTICS) launch_epd_diagnostics();
+        else if (_focus == SETTINGS_RSS_CACHE) ActivityManager::instance().push(new RssCacheSettingsActivity());
+        else if (_focus == SETTINGS_DATE_TIME) ActivityManager::instance().push(new DateTimeSettingsActivity());
+        else if (_focus == SETTINGS_RESTORE_DEFAULTS) ActivityManager::instance().push(new RestoreDefaultsActivity());
+        else if (_focus == SETTINGS_HOME_ICON_FRAMES) {
             const bool enabled = !home_icon_frames_enabled();
             const esp_err_t result = home_set_icon_frames_enabled(enabled);
             if (result != ESP_OK) {
@@ -1837,35 +1850,35 @@ private:
         using ui_locale::text;
         draw_header(text(TextId::Settings));
         const wifi_setting_network_mode_t network_mode = wifi_setting_get_network_mode();
-        draw_item(0, text(TextId::Language), ui_locale::native_name(ui_locale::get()));
-        draw_item(1, text(TextId::Network), network_mode == WIFI_SETTING_NETWORK_CELLULAR
+        draw_item(SETTINGS_LANGUAGE, text(TextId::Language), ui_locale::native_name(ui_locale::get()));
+        draw_item(SETTINGS_SYSTEM_FONT, text(TextId::SystemFont), std::to_string(system_font::pixel_size()) + " px");
+        draw_item(SETTINGS_NETWORK, text(TextId::Network), network_mode == WIFI_SETTING_NETWORK_CELLULAR
                                       ? text(TextId::CellularData)
                                       : std::string(text(TextId::Wifi)) + " / " +
                                             text(wifi_setting_get_power_mode() == WIFI_SETTING_POWER_ALWAYS_ON
                                                  ? TextId::WifiAlwaysOn : TextId::WifiOnDemand));
-        draw_item(2, text(TextId::Frontlight), std::to_string(frontlight_get_percent()) + "%");
-        draw_item(3, text(TextId::AppSettings),
+#if CONFIG_IDF_TARGET_ESP32S31
+        std::string wallpaper = standby_wallpaper_path();
+        const auto slash = wallpaper.find_last_of('/');
+        if (slash != std::string::npos) wallpaper = wallpaper.substr(slash+1);
+        draw_item(SETTINGS_STANDBY_WALLPAPER, text(TextId::StandbyWallpaper), wallpaper.empty()
+            ? text(TextId::StandbyKeepScreen) : wallpaper);
+#endif
+        draw_item(SETTINGS_FRONTLIGHT, text(TextId::Frontlight), std::to_string(frontlight_get_percent()) + "%");
+        draw_item(SETTINGS_APPS, text(TextId::AppSettings),
                   std::string(text(TextId::DeepSeek)) + " / " + text(TextId::Map));
-        draw_item(4, text(TextId::EpdDiagnostics), text(TextId::EpdDiagnosticsDetail));
+        draw_item(SETTINGS_EPD_DIAGNOSTICS, text(TextId::EpdDiagnostics), text(TextId::EpdDiagnosticsDetail));
         RssCacheInfo rss_cache = rss_cache_info();
         char rss_detail[64] = {};
         std::snprintf(rss_detail, sizeof(rss_detail), "%u %s, %s",
                       static_cast<unsigned>(rss_cache.files),
                       text(TextId::FilesUnit),
                       format_cache_bytes(rss_cache.bytes).c_str());
-        draw_item(5, text(TextId::ClearRssCache), rss_detail);
-        draw_item(6, text(TextId::DateAndTime), time_basis_label());
-        draw_item(7, text(TextId::HomeIconFrames),
+        draw_item(SETTINGS_RSS_CACHE, text(TextId::ClearRssCache), rss_detail);
+        draw_item(SETTINGS_DATE_TIME, text(TextId::DateAndTime), time_basis_label());
+        draw_item(SETTINGS_HOME_ICON_FRAMES, text(TextId::HomeIconFrames),
                   home_icon_frames_enabled() ? text(TextId::On) : text(TextId::Off), false);
-        draw_item(8, text(TextId::RestoreDefaults), text(TextId::RestoreDefaultsDetail));
-        draw_item(9, text(TextId::SystemFont), std::to_string(system_font::pixel_size()) + " px");
-#if CONFIG_IDF_TARGET_ESP32S31
-        std::string wallpaper = standby_wallpaper_path();
-        const auto slash = wallpaper.find_last_of('/');
-        if (slash != std::string::npos) wallpaper = wallpaper.substr(slash+1);
-        draw_item(10, text(TextId::StandbyWallpaper), wallpaper.empty()
-            ? text(TextId::StandbyKeepScreen) : wallpaper);
-#endif
+        draw_item(SETTINGS_RESTORE_DEFAULTS, text(TextId::RestoreDefaults), text(TextId::RestoreDefaultsDetail));
         M5.Display.display();
         M5.Display.endWrite();
     }

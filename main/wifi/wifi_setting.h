@@ -65,6 +65,9 @@ bool wifi_setting_load_credentials(char *ssid,
                                    size_t password_size);
 esp_err_t wifi_setting_save_credentials(const char *ssid, const char *password);
 esp_err_t wifi_setting_clear_credentials(void);
+// Restore SDK Wi-Fi configuration without starting STA or connecting. Used
+// during confirmed settings reset, before clearing/verifying wifi_cfg in NVS.
+esp_err_t wifi_setting_reset_driver_config(void);
 esp_err_t wifi_setting_deinit(bool power_down_c6);
 bool wifi_setting_background_busy(void);
 esp_err_t wifi_setting_resume_saved_async(void);

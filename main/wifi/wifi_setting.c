@@ -884,3 +884,44 @@ esp_err_t wifi_setting_deinit(bool power_down_c6)
     wifi_setting_log_heap("after-deinit");
     return first_error;
 }
+
+esp_err_t wifi_setting_reset_driver_config(void)
+{
+    const wifi_setting_power_mode_t previous_power = s_power_mode;
+    wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
+    esp_err_t result;
+    esp_err_t cleanup_result;
+    // Prevent the ordinary always-on path from starting another connection
+    // while the confirmed reset clears persistent settings.
+    s_power_mode = WIFI_SETTING_POWER_ON_DEMAND;
+    result = wifi_setting_deinit(true); // Joins the existing always-on worker.
+    if (result != ESP_OK) {
+        s_power_mode = previous_power;
+        return result;
+    }
+    // No full-partition erase on NVS errors: login/calibration data is kept.
+    result = nvs_flash_init();
+    if (result != ESP_OK) goto cleanup;
+    result = wifi_setting_network_stack_init();
+    if (result != ESP_OK) goto cleanup;
+    result = wifi_setting_c6_power_on();
+    if (result != ESP_OK) goto cleanup;
+    // Initialize only the driver. Do not start STA, connect with old config,
+    // create a station netif or trigger boot-time network time synchronization.
+    result = esp_wifi_init(&cfg);
+    if (result != ESP_OK) goto cleanup;
+    s_wifi_initialized = true;
+    result = esp_wifi_set_storage(WIFI_STORAGE_FLASH);
+    if (result == ESP_OK) result = esp_wifi_restore();
+    if (result == ESP_OK) result = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+cleanup:
+    cleanup_result = wifi_setting_deinit(true);
+    if (result == ESP_OK) result = cleanup_result;
+    if (result != ESP_OK) {
+        s_power_mode = previous_power;
+        ESP_LOGE(TAG, "Wi-Fi driver defaults reset failed: %s", esp_err_to_name(result));
+    } else {
+        ESP_LOGI(TAG, "Wi-Fi driver defaults restored; radio off");
+    }
+    return result;
+}
