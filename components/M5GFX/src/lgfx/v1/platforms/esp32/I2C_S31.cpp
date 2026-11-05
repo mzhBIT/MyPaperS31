@@ -59,7 +59,8 @@ cpp::result<void, error_t> transactionWriteRead(int n, int addr,
   if (n < 0 || n >= SOC_I2C_NUM || !ports[n].bus) return checked(ESP_ERR_INVALID_STATE);
   auto& p = ports[n];
   if (xSemaphoreTake(p.lock, pdMS_TO_TICKS(100)) != pdTRUE) {
-    if (addr == 0x20) ESP_LOGW("I2C_S31", "port=%d addr=20 bus lock timeout (100 ms)", n);
+    if (addr == 0x20 || addr == 0x68)
+      ESP_LOGW("I2C_S31", "port=%d addr=%02x bus lock timeout (100 ms)", n, addr);
     return checked(ESP_ERR_TIMEOUT);
   }
   i2c_device_config_t c = {};
@@ -75,17 +76,18 @@ cpp::result<void, error_t> transactionWriteRead(int n, int addr,
     else e = ESP_ERR_INVALID_ARG;
     i2c_master_bus_rm_device(dev);
   }
-  if (e != ESP_OK && addr == 0x20) {
-    // TCA is required by display/power/keys. Log the real IDF status rather
-    // than only the generic LGFX connection_lost; avoid flooding key polling.
-    static TickType_t last_error = 0;
-    static bool reported = false;
+  if (e != ESP_OK && (addr == 0x20 || addr == 0x68)) {
+    // Include TPS failures so a missing supply/ACK can be distinguished from
+    // bus contention. Rate limit each device separately to keep key logs quiet.
+    static TickType_t last_error[2] = {};
+    static bool reported[2] = {};
+    const unsigned device = addr == 0x68 ? 1 : 0;
     const TickType_t now = xTaskGetTickCount();
-    if (!reported || TickType_t(now-last_error) >= pdMS_TO_TICKS(1000)) {
-      ESP_LOGW("I2C_S31", "port=%d addr=20 reg=%02x stage=%s write=%u read=%u error=%s (0x%x)",
-               n, wn && w ? w[0] : 0xff, stage, unsigned(wn), unsigned(rn),
+    if (!reported[device] || TickType_t(now-last_error[device]) >= pdMS_TO_TICKS(1000)) {
+      ESP_LOGW("I2C_S31", "port=%d addr=%02x reg=%02x stage=%s write=%u read=%u error=%s (0x%x)",
+               n, addr, wn && w ? w[0] : 0xff, stage, unsigned(wn), unsigned(rn),
                esp_err_to_name(e), unsigned(e));
-      last_error = now; reported = true;
+      last_error[device] = now; reported[device] = true;
     }
   }
   xSemaphoreGive(p.lock); return checked(e);

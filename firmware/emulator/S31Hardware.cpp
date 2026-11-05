@@ -22,7 +22,7 @@ bool S31Hardware::write(i2c_master_dev_handle_t dev, uint8_t reg, uint8_t value)
     return dev && i2c_master_transmit(dev, bytes, sizeof(bytes), 100) == ESP_OK;
 }
 bool S31Hardware::update(uint8_t port, uint8_t mask, uint8_t value) {
-    if (!output_lock_ || xSemaphoreTake(output_lock_, portMAX_DELAY) != pdTRUE)
+    if (!output_lock_ || xSemaphoreTake(output_lock_, pdMS_TO_TICKS(100)) != pdTRUE)
         return false;
     uint8_t old;
     const bool ok =
@@ -65,14 +65,15 @@ bool S31Hardware::init() {
     }
     // Preserve all unrelated outputs. Screen rail P05, touch reset P12;
     // VCOM/PWRUP/WAKE P00..02, PG P07; physical buttons P10/P11/P17.
-    // Start PA P04 and BT/PA rail P14 off, without touching other latches.
-    if (!ok || !update(0, 0x37, 0x20) || !update(1, 0x14, 0) ||
+    // P14 is also the reference board's VOUT rail for TPS. Keep it powered
+    // while display/firmware handoff is in use; mute the amplifier via P04.
+    if (!ok || !update(0, 0x37, 0x20) || !update(1, 0x14, 0x10) ||
         !write(io_, 6, (cfg0 & ~0x37) | 0x80) || !write(io_, 7, (cfg1 & ~0x14) | 0x83))
         return false;
     vTaskDelay(pdMS_TO_TICKS(10));
     if (!update(1, 0x04, 0x04))
         return false;
-    vTaskDelay(pdMS_TO_TICKS(50));
+    vTaskDelay(pdMS_TO_TICKS(80)); // Let restored P14/VOUT settle before TPS IO.
     // Polling touch: no interrupt pin ownership and no main application tasks.
     if (!write(touch_, 0xa4, 0))
         ESP_LOGW(TAG, "touch polling mode write failed");
@@ -164,8 +165,8 @@ bool S31Hardware::input(Contact contacts[2], unsigned &count, uint8_t &port1) {
 void S31Hardware::shutdown_outputs() {
     power(false);
 }
-bool S31Hardware::audio_power(bool on) {
-    return update(1, 0x10, on ? 0x10 : 0);
+bool S31Hardware::enable_audio_power() {
+    return update(1, 0x10, 0x10);
 }
 bool S31Hardware::amplifier(bool on) {
     return update(0, 0x10, on ? 0x10 : 0);

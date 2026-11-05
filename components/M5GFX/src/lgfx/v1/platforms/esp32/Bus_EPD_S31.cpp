@@ -52,7 +52,10 @@ bool Bus_EPD_S31::init() {
   if (_init_attempted) return false; // fail closed after partial initialization
   _init_attempted = true;
   if (!i2c::init(1, 0, 1).has_value()) return false;
-  // Preserve unrelated outputs: P05 supplies the screen, P12 resets touch.
+  // Restore the board rails after a warm firmware switch: emulator audio
+  // shutdown lowers P14 and the TCA retains that latch across esp_restart().
+  // The reference board also restores P14 (VOUT) before waking TPS65185.
+  // Preserve all unrelated outputs: P05 supplies the screen, P12 resets touch.
   uint8_t cfg0, cfg1;
   bool config_ready = false;
   // Read-only startup handshake: allow a brief rail/bus settling interval.
@@ -69,12 +72,24 @@ bool Bus_EPD_S31::init() {
     ESP_LOGE(TAG, "TCA startup handshake failed after 3 attempts; panel init aborted");
     return false;
   }
-  if (!updateIo(0, 0x27, 0x20) || !updateIo(1, 0x04, 0)
+  if (!updateIo(0, 0x27, 0x20) || !updateIo(1, 0x14, 0x10)
       || !writeReg(IO_ADDR, 6, (cfg0 & ~0x27) | 0x80)
-      || !writeReg(IO_ADDR, 7, cfg1 & ~0x04)) return false;
+      || !writeReg(IO_ADDR, 7, cfg1 & ~0x14)) return false;
   delay(10);
   if (!updateIo(1, 0x04, 0x04)) return false;
-  delay(50);
+  // Match the reference board's rail settling time; no high-voltage enables
+  // are asserted yet. Touch has also been released from reset by this point.
+  delay(80);
+  uint8_t out0, out1, dir0, dir1;
+  if (!readReg(IO_ADDR, 2, out0) || !readReg(IO_ADDR, 3, out1)
+      || !readReg(IO_ADDR, 6, dir0) || !readReg(IO_ADDR, 7, dir1)) return false;
+  if ((out0 & 0x27) != 0x20 || (out1 & 0x14) != 0x14
+      || (dir0 & 0x27) != 0 || (dir1 & 0x14) != 0) {
+    ESP_LOGE(TAG, "boot rail restore failed: OUT0=%02x OUT1=%02x CFG0=%02x CFG1=%02x",
+             out0, out1, dir0, dir1);
+    return false;
+  }
+  ESP_LOGI(TAG, "boot rails restored: P05=1 P14=1 touch_reset=1 (settled 80 ms)");
   const int pins[] = {_config.pin_oe, _config.pin_pwr, 37, _config.pin_spv};
   for (int pin : pins) {
     gpio_set_direction(static_cast<gpio_num_t>(pin), GPIO_MODE_OUTPUT);

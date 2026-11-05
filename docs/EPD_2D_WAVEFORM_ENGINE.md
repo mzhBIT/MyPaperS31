@@ -61,6 +61,15 @@ drive = waveform[phase][new_gray][old_gray]
 1. `display()` 只提交矩形、模式和当前 draw framebuffer 的可见性信息。
 2. 后台任务收到请求后，先合并队列中尚未开始的请求。
 3. 开始批次前把 draw framebuffer 复制到 target snapshot。
+   UI 的最外层 `startWrite()` / `endWrite()` 与后台复制共用绘图互斥锁。
+   后台先等当前绘图完成，再合并待处理请求并复制，避免快速输入期间读到
+   “已涂白但文字尚未画完”的半成品。复制结束立即释放锁，后续波形生成、
+   上电和扫描均不持有绘图锁，UI 可继续处理下一次输入。
+   `dispatch summary` 的 `draw_wait` 单独记录等待绘图事务的微秒数，
+   `snapshot` 仍只计缓存同步与复制时间。该同步不改变刷新模式或波形，
+   不引入按键次数触发的 Quality 全刷。
+   若调用者在绘图事务内显式执行 `display()` 后 `waitDisplay()`，等待期间临时
+   释放绘图锁，完成后重新获取，避免同步刷新与后台截图互相等待。
 4. 从第一相位到最后一相位期间，physical 和 target 都保持不变。
 5. 新绘图请求在当前批次运行时进入下一批队列，不允许中途重定向当前波形。
 6. 全部相位扫描且断电成功后，才把 target 对应区域提交为新的 physical 状态。

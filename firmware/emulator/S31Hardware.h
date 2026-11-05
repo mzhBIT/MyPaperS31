@@ -15,7 +15,7 @@ class S31Hardware {
     bool power(bool on);
     bool input(Contact contacts[2], unsigned &count, uint8_t &port1);
     void shutdown_outputs();
-    bool audio_power(bool on);
+    bool enable_audio_power();
     bool amplifier(bool on);
 
   private:

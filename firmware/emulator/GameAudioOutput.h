@@ -11,7 +11,8 @@ class GameAudioOutput {
     bool begin(S31Hardware &hardware);
     bool play();
     bool pause();
-    void shutdown();
+    // False leaves worker-owned resources intact until it exits or MCU resets.
+    bool shutdown();
     void submit(const int16_t *stereo, size_t frames);
     void volume(int value) {
         volume_.store(std::max(0, std::min(100, value)));

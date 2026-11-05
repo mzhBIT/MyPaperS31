@@ -26,6 +26,8 @@ namespace lgfx
     ~Panel_EPD_2D(void) override;
 
     bool init(bool use_reset) override;
+    void beginTransaction(void) override;
+    void endTransaction(void) override;
     void waitDisplay(void) override;
     bool displayBusy(void) override;
     bool setPageTurnAnimation(int direction, int speed = 1) override;
@@ -103,6 +105,10 @@ namespace lgfx
     size_t _du4_active_group_capacity_2d = 0;
     uint8_t* _physical_buf = nullptr;
     uint8_t* _target_buf = nullptr;
+    // UI drawing transactions and the scan task's target snapshot share this
+    // mutex. Scanout itself uses _target_buf and never holds the draw mutex.
+    SemaphoreHandle_t _draw_mutex_2d = nullptr;
+    bool _draw_locked_2d = false; // Owned only by the UI drawing thread.
     SemaphoreHandle_t _stats_mutex = nullptr;
     uint64_t _physical_generation = 0;
     struct {

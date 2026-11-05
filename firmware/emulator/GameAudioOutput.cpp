@@ -119,7 +119,7 @@ bool GameAudioOutput::command(const char *text, uint32_t wait_ms) {
     return true;
 }
 bool GameAudioOutput::boot_codec() {
-    if (!hardware_->amplifier(false) || !hardware_->audio_power(true))
+    if (!hardware_->amplifier(false) || !hardware_->enable_audio_power())
         return false;
     uart_config_t config{};
     config.baud_rate = 115200;
@@ -374,8 +374,9 @@ void GameAudioOutput::cleanup() {
         uart_driver_delete(UART_NUM_1);
         uart_ = false;
     }
-    if (hardware_)
-        hardware_->audio_power(false);
+    // P14 also supplies the board's TPS/VOUT path. Cutting it here leaves the
+    // main firmware unable to wake TPS after esp_restart(), or breaks the
+    // emulator display if audio initialization fails. PA was muted above.
 }
 bool GameAudioOutput::pause() {
     playing_.store(false);
@@ -421,11 +422,19 @@ void GameAudioOutput::submit(const int16_t *stereo, size_t frames) {
         dropped_.fetch_add(1);
     xSemaphoreGive(queue_lock_);
 }
-void GameAudioOutput::shutdown() {
+bool GameAudioOutput::shutdown() {
     playing_.store(false);
     stopping_.store(true);
     if (task_) {
-        xSemaphoreTake(exited_, portMAX_DELAY);
+        if (xSemaphoreTake(exited_, pdMS_TO_TICKS(2000)) != pdTRUE) {
+            failed_.store(true);
+            if (hardware_)
+                hardware_->amplifier(false);
+            // The worker may still be inside an SDK I2S teardown call. Do not
+            // delete it or free its DMA/queue/semaphores underneath that call.
+            ESP_LOGE(TAG, "audio shutdown timed out; retaining worker resources for restart");
+            return false;
+        }
         task_ = nullptr;
     } else
         cleanup();
@@ -448,5 +457,6 @@ void GameAudioOutput::shutdown() {
         vSemaphoreDelete(exited_);
         exited_ = nullptr;
     }
+    return true;
 }
 } // namespace emulator

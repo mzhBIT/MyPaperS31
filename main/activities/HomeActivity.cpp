@@ -76,8 +76,10 @@ static void go_images()  { launch_file_browser("/sdcard"); }
 static void go_deepseek(){ launch_deepseek(); }
 static void go_weread()  { launch_weread(); }
 static void go_map()     { launch_map(); }
+#if !CONFIG_IDF_TARGET_ESP32S31
 static void go_sms()     { launch_sms(); }
 static void go_phone()   { launch_phone(); }
+#endif
 static void go_stocks()  { launch_stocks(); }
 static void go_calculator() { launch_calculator(); }
 #if CONFIG_IDF_TARGET_ESP32S31
@@ -100,8 +102,10 @@ static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
         {ui_locale::TextId::WeRead, go_weread},
     },
     {
+#if !CONFIG_IDF_TARGET_ESP32S31
         {ui_locale::TextId::Messages, go_sms},
         {ui_locale::TextId::Phone, go_phone},
+#endif
         {ui_locale::TextId::Stocks, go_stocks}, {ui_locale::TextId::Calculator, go_calculator},
 #if CONFIG_IDF_TARGET_ESP32S31
         {ui_locale::TextId::Emulator, go_emulator}, {ui_locale::TextId::Count, nullptr},
@@ -111,6 +115,9 @@ static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
         {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
         {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
         {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
+#if CONFIG_IDF_TARGET_ESP32S31
+        {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
+#endif
     },
 };
 static int g_page = 0;
@@ -140,7 +147,9 @@ static const HomeIconId g_icons[HOME_PAGE_CNT][MENU_CNT] = {
         HomeIconId::WeChatReading,
     },
     {
+#if !CONFIG_IDF_TARGET_ESP32S31
         HomeIconId::Messages, HomeIconId::Phone,
+#endif
         HomeIconId::Stocks, HomeIconId::Calculator,
 #if CONFIG_IDF_TARGET_ESP32S31
         HomeIconId::Emulator,
@@ -149,6 +158,9 @@ static const HomeIconId g_icons[HOME_PAGE_CNT][MENU_CNT] = {
 #endif
         HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
         HomeIconId::Count, HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
+#if CONFIG_IDF_TARGET_ESP32S31
+        HomeIconId::Count, HomeIconId::Count,
+#endif
     },
 };
 

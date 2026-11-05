@@ -498,6 +498,7 @@ class Application {
         buttons_ = 0;
     }
     void return_system(bool discard = false, bool scan_failed = false) {
+        ESP_LOGI(TAG, "return: saving game");
         audio_.pause();
         if (!discard && !save_battery()) {
             if (!scan_failed) {
@@ -507,22 +508,61 @@ class Application {
         }
         const esp_err_t result = firmware_switch::select_system();
         if (result != ESP_OK) {
+            ESP_LOGE(TAG, "return: system selection failed: %s", esp_err_to_name(result));
             message_ = "System image validation failed";
             if (!scan_failed)
                 draw_menu();
             return;
         }
+        // Check the strap before blanking and dismantling the UI. A held or
+        // electrically low BOOT must not leave the user staring at white forever.
+        const auto boot_pin = gpio_num_t(mypaper::board::s31::boot_button);
+        if (gpio_get_level(boot_pin) == 0) {
+            ESP_LOGW(TAG, "return: BOOT GPIO%d low; release the key", int(boot_pin));
+            if (!scan_failed) {
+                canvas_.fillScreen(White);
+                text("Release BOOT to return", 72, 550);
+                show();
+            }
+            const int64_t deadline = esp_timer_get_time() + 3000000;
+            while (gpio_get_level(boot_pin) == 0 && esp_timer_get_time() < deadline)
+                vTaskDelay(pdMS_TO_TICKS(20));
+            if (gpio_get_level(boot_pin) == 0) {
+                ESP_LOGW(TAG, "return: BOOT still low; restart cancelled");
+                message_ = "BOOT held; release and retry";
+                if (!scan_failed) {
+                    if (rom_)
+                        draw_menu();
+                    else
+                        draw_browser();
+                }
+                return;
+            }
+        }
         if (!scan_failed) {
+            ESP_LOGI(TAG, "return: clearing display");
             canvas_.fillScreen(White);
             show();
             display_.stop();
         }
-        audio_.shutdown();
+        ESP_LOGI(TAG, "return: stopping audio");
+        if (!audio_.shutdown())
+            ESP_LOGW(TAG, "return: audio worker did not exit; continuing to system restart");
+        ESP_LOGI(TAG, "return: unmounting SD");
         storage_.unmount();
         frontlight_set_suspended(true);
-        // BOOT is a strap pin: never restart into download mode while held.
-        while (gpio_get_level(gpio_num_t(mypaper::board::s31::boot_button)) == 0)
-            vTaskDelay(pdMS_TO_TICKS(20));
+        // Recheck in case BOOT was pressed during teardown. Never restart with
+        // the strap low, but provide a visible explanation instead of white.
+        if (gpio_get_level(boot_pin) == 0) {
+            ESP_LOGW(TAG, "return: BOOT pressed during teardown; waiting for release");
+            if (!scan_failed) {
+                canvas_.fillScreen(White);
+                text("Release BOOT to return", 72, 550);
+                show();
+            }
+            while (gpio_get_level(boot_pin) == 0)
+                vTaskDelay(pdMS_TO_TICKS(20));
+        }
         ESP_LOGI(TAG, "returning to MyPaper");
         vTaskDelay(pdMS_TO_TICKS(50));
         esp_restart();

@@ -6,6 +6,8 @@ import struct
 import subprocess
 import sys
 import tempfile
+import serial
+from esptool.reset import HardReset
 from esptool.util import FatalError
 
 OFFSET=0x810000
@@ -36,6 +38,27 @@ def check_image(path):
     if desc[48:80].split(b'\0',1)[0]!=b'MyPaperEmulatorS31':raise ValueError('This is not the emulator firmware.')
     image.verify()
 
+def reset_after_install(port):
+    # Writing/verifying has already succeeded. USB Serial/JTAG may disappear
+    # while RTS is toggled, which must not be reported as a failed flash write.
+    connection=serial.Serial(port=None,baudrate=115200,timeout=1)
+    connection.port=port
+    connection.dtr=False
+    connection.rts=False
+    reset_error=None
+    try:
+        connection.open()
+        HardReset(connection,uses_usb=True)()
+    except (OSError,serial.SerialException) as error:
+        reset_error=error
+    finally:
+        try:connection.close()
+        except (OSError,serial.SerialException) as error:
+            if reset_error is None:reset_error=error
+    if reset_error is not None:
+        print(f'WARNING: Flash write/verification succeeded, but automatic reset could not complete: {reset_error}',flush=True)
+        print('Release BOOT, then use the hardware RESET button or power-cycle the device. Do not hold BOOT to restart.',flush=True)
+
 def main():
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--image',type=Path,required=True)
@@ -46,7 +69,11 @@ def main():
     sdk=Path(os.environ['IDF_PATH'])/'components/partition_table'
     sys.path.insert(0,str(sdk))
     from gen_esp32part import PartitionTable
-    command=[sys.executable,'-m','esptool','--chip','esp32s31','--port',args.port,'--baud',str(args.baud)]
+    # Do not reset in esptool's unconditional command teardown: a reset error
+    # there can mask the actual write/verification exception. Leave the stub
+    # running between stages and request a boot reset only after successful IO.
+    command=[sys.executable,'-m','esptool','--chip','esp32s31','--port',args.port,'--baud',str(args.baud),
+             '--after','no-reset-stub']
     with tempfile.TemporaryDirectory(prefix='mypaper-emulator-') as temporary:
         table_path=Path(temporary)/'device-partitions.bin'
         subprocess.run(command+['read-flash','0x8000','0x1000',str(table_path)],check=True)
@@ -55,6 +82,8 @@ def main():
         check_table(table)
         print(f'Partition layout verified; writing ONLY emulator at {OFFSET:#x}.',flush=True)
         subprocess.run(command+['write-flash','--flash-size','keep',hex(OFFSET),str(args.image.resolve())],check=True)
+        print('Emulator flash write/verification completed successfully.',flush=True)
+    reset_after_install(args.port)
 
 if __name__=='__main__':
     try:main()

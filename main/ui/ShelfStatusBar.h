@@ -23,11 +23,15 @@ inline void draw_clock(const std::string& clock) {
 inline void draw_wifi(bool enabled) {
     constexpr int size = 28;
     const int cx = M5.Display.width() - 114;
+    if (!enabled) {
+        M5.Display.fillRect(cx-size/2, 40-size/2, size, size, TFT_WHITE);
+        return;
+    }
     const int step = (72 << 16) / size, half = step / 2 - (1 << 15);
     // Keep the existing status-strip refresh cadence; no extra radio polling
     // task or refresh is needed for signal strength.
     wifi_ap_record_t ap{};
-    const bool connected = enabled && esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
+    const bool connected = esp_wifi_sta_get_ap_info(&ap) == ESP_OK;
     const int level = !connected ? 0 : ap.rssi >= -60 ? 4 :
                                       ap.rssi >= -70 ? 3 : ap.rssi >= -80 ? 2 : 1;
     const auto* mask = pico_shelf_icons::wifi;
@@ -58,7 +62,6 @@ inline void draw_wifi(bool enabled) {
         }
         M5.Display.pushImage(cx-size/2, 40-size/2+y, size, 1, row);
     }
-    if (!enabled) M5.Display.drawLine(cx-12, 28, cx+12, 52, gray(96));
 }
 inline void draw_battery() {
     const int x = M5.Display.width() - 78;

@@ -1559,6 +1559,12 @@ namespace lgfx
 
     _stats_mutex = xSemaphoreCreateMutex();
     if (!_stats_mutex) return false;
+    _draw_mutex_2d = xSemaphoreCreateMutex();
+    if (!_draw_mutex_2d) {
+      vSemaphoreDelete(_stats_mutex);
+      _stats_mutex = nullptr;
+      return false;
+    }
     _update_queue_2d = xQueueCreate(8, sizeof(update_data_t));
     if (_update_queue_2d == nullptr) {
       ESP_LOGE(TAG_2D, "queue creation failed");
@@ -1686,11 +1692,38 @@ namespace lgfx
     return selected;
   }
 
+  void Panel_EPD_2D::beginTransaction(void)
+  {
+    // IPanel calls this only for the outermost startWrite(). The legacy EPD
+    // hook is empty, so it did not protect a clear/redraw from an async copy.
+    if (_draw_mutex_2d && !_draw_locked_2d) {
+      xSemaphoreTake(_draw_mutex_2d, portMAX_DELAY);
+      _draw_locked_2d = true;
+    }
+  }
+
+  void Panel_EPD_2D::endTransaction(void)
+  {
+    // endWrite() submits the finished frame before calling this hook. Let the
+    // worker copy it now; drawing may resume while the previous target scans.
+    if (_draw_locked_2d) {
+      _draw_locked_2d = false;
+      xSemaphoreGive(_draw_mutex_2d);
+    }
+  }
+
   void Panel_EPD_2D::waitDisplay(void)
   {
+    // An explicit display()+waitDisplay() inside startWrite()/endWrite()
+    // marks an intentional intermediate frame. Let the worker consume it;
+    // otherwise caller and snapshot task would wait on each other forever.
+    const bool resume_drawing = _draw_locked_2d && _draw_mutex_2d
+        && xSemaphoreGetMutexHolder(_draw_mutex_2d) == xTaskGetCurrentTaskHandle();
+    if (resume_drawing) endTransaction();
     while (displayBusy()) {
       vTaskDelay(1);
     }
+    if (resume_drawing) beginTransaction();
   }
 
   bool Panel_EPD_2D::displayBusy(void)
@@ -2071,67 +2104,77 @@ namespace lgfx
       // Coalesce everything already pending into one stable framebuffer batch.
       update_data_t pending;
       unsigned merged = 0;
-      while (xQueueReceive(me->_update_queue_2d, &pending, 0) == pdTRUE) {
-        const uint32_t left = std::min<uint32_t>(update.x, pending.x);
-        const uint32_t top = std::min<uint32_t>(update.y, pending.y);
-        const uint32_t right = std::max<uint32_t>(uint32_t(update.x) + update.w,
-                                                   uint32_t(pending.x) + pending.w);
-        const uint32_t bottom = std::max<uint32_t>(uint32_t(update.y) + update.h,
-                                                    uint32_t(pending.y) + pending.h);
-        update.x = left;
-        update.y = top;
-        update.w = right - left;
-        update.h = bottom - top;
-        if (pending.mode < update.mode) {
-          update.mode = pending.mode;
-        }
-        ++merged;
-      }
-      // Coalesced UI updates no longer describe one immutable page turn.
-      if (merged) {
-        update.animation_direction = 0;
-        // Mixed UI batches must retain normal waveform semantics.
-        update.changed_pixels_only = false;
-      }
-
-      if (!me->_physical_state_known) {
-        update.changed_pixels_only = false;
-        if (update.mode != epd_mode_t::epd_quality) {
-          ESP_LOGW(TAG_2D, "physical state unknown; promoting first update to Quality");
-        }
-        update.mode = epd_mode_t::epd_quality;
-        // Only recovery from unknown physical state requires a full refresh.
-        // GC16/HD otherwise honor the caller's dirty rectangle.
-        update.x = 0;
-        update.y = 0;
-        update.w = panel_w;
-        update.h = panel_h;
-      }
-
-      // Only explicit HD feedback may suppress same-gray drives. In particular,
-      // never alter normal HD, Quality recovery, or the tuned GC16 0->0 path.
-      update.changed_pixels_only = update.changed_pixels_only
-                               && update.mode == epd_mode_t::epd_hd;
-
-      // Write back the sprite rows this batch is about to consume. This has to
-      // precede the copy below so the PSRAM contents are coherent for anything
-      // that reads them without going through this core's cache.
-      //
-      // It used to run in display(), i.e. on the application's core (core 0 -
-      // the same one the USB host ISR and the usb_host task run on), and moved
-      // here to keep a 300 us PSRAM walk off that core. That move was tested and
-      // did NOT stop the "TX URB: 1/N packets skipped, first=0" reports, so the
-      // stall being chased is not this walk occupying core 0. It stays here
-      // anyway: the scan core is the better place for it, and the ordering
-      // requirement below is unchanged.
-      const int64_t snapshot_begin_us = esp_timer_get_time();
+      int64_t snapshot_us = 0;
+      const int64_t draw_wait_started = esp_timer_get_time();
+      xSemaphoreTake(me->_draw_mutex_2d, portMAX_DELAY);
+      const int64_t draw_wait_us = esp_timer_get_time() - draw_wait_started;
       {
-        const size_t wb_top = std::min<size_t>(update.y, panel_h);
-        const size_t wb_rows = std::min<size_t>(update.h, panel_h - wb_top);
-        cache_writeback_2d(me->_buf + wb_top * stride, wb_rows * stride);
-      }
-      memcpy(me->_target_buf, me->_buf, frame_bytes);
-      const int64_t snapshot_us = esp_timer_get_time() - snapshot_begin_us;
+        StatsLock draw_lock{me->_draw_mutex_2d};
+        // Wait until the current UI transaction is complete BEFORE coalescing:
+        // it may have queued another finished region while we waited. Never
+        // copy the white clear or partially rendered keyboard into _target_buf.
+        while (xQueueReceive(me->_update_queue_2d, &pending, 0) == pdTRUE) {
+          const uint32_t left = std::min<uint32_t>(update.x, pending.x);
+          const uint32_t top = std::min<uint32_t>(update.y, pending.y);
+          const uint32_t right = std::max<uint32_t>(uint32_t(update.x) + update.w,
+                                                     uint32_t(pending.x) + pending.w);
+          const uint32_t bottom = std::max<uint32_t>(uint32_t(update.y) + update.h,
+                                                      uint32_t(pending.y) + pending.h);
+          update.x = left;
+          update.y = top;
+          update.w = right - left;
+          update.h = bottom - top;
+          if (pending.mode < update.mode) {
+            update.mode = pending.mode;
+          }
+          ++merged;
+        }
+        // Coalesced UI updates no longer describe one immutable page turn.
+        if (merged) {
+          update.animation_direction = 0;
+          // Mixed UI batches must retain normal waveform semantics.
+          update.changed_pixels_only = false;
+        }
+
+        if (!me->_physical_state_known) {
+          update.changed_pixels_only = false;
+          if (update.mode != epd_mode_t::epd_quality) {
+            ESP_LOGW(TAG_2D, "physical state unknown; promoting first update to Quality");
+          }
+          update.mode = epd_mode_t::epd_quality;
+          // Only recovery from unknown physical state requires a full refresh.
+          // GC16/HD otherwise honor the caller's dirty rectangle.
+          update.x = 0;
+          update.y = 0;
+          update.w = panel_w;
+          update.h = panel_h;
+        }
+
+        // Only explicit HD feedback may suppress same-gray drives. In particular,
+        // never alter normal HD, Quality recovery, or the tuned GC16 0->0 path.
+        update.changed_pixels_only = update.changed_pixels_only
+                                 && update.mode == epd_mode_t::epd_hd;
+
+        // Write back the sprite rows this batch is about to consume. This has to
+        // precede the copy below so the PSRAM contents are coherent for anything
+        // that reads them without going through this core's cache.
+        //
+        // It used to run in display(), i.e. on the application's core (core 0 -
+        // the same one the USB host ISR and the usb_host task run on), and moved
+        // here to keep a 300 us PSRAM walk off that core. That move was tested and
+        // did NOT stop the "TX URB: 1/N packets skipped, first=0" reports, so the
+        // stall being chased is not this walk occupying core 0. It stays here
+        // anyway: the scan core is the better place for it, and the ordering
+        // requirement below is unchanged.
+        const int64_t snapshot_begin_us = esp_timer_get_time();
+        {
+          const size_t wb_top = std::min<size_t>(update.y, panel_h);
+          const size_t wb_rows = std::min<size_t>(update.h, panel_h - wb_top);
+          cache_writeback_2d(me->_buf + wb_top * stride, wb_rows * stride);
+        }
+        memcpy(me->_target_buf, me->_buf, frame_bytes);
+        snapshot_us = esp_timer_get_time() - snapshot_begin_us;
+      } // Release the drawing buffer before statistics, frame generation/power/scan.
       const selected_waveform_t selected = me->selectWaveform(update.mode);
       if (selected.phases == nullptr || selected.phases->luts == nullptr
        || selected.phases->phases <= 0) {
@@ -3486,8 +3529,8 @@ namespace lgfx
                  (unsigned)du4_prep.bytes, (unsigned)scan_ok, (unsigned)du4_prep.triple_prime);
       }
       ESP_LOGI(TAG_2D,
-               "dispatch summary (after refresh): queue_wait=%lld snapshot=%lld us merged=%u stats_cache=%u stats_miss=%u",
-               (long long)queue_wait_us, (long long)snapshot_us, merged,
+               "dispatch summary (after refresh): queue_wait=%lld draw_wait=%lld snapshot=%lld us merged=%u stats_cache=%u stats_miss=%u",
+               (long long)queue_wait_us, (long long)draw_wait_us, (long long)snapshot_us, merged,
                (unsigned)prepared_stats_hit, prepared_stats_miss);
     }
   }
