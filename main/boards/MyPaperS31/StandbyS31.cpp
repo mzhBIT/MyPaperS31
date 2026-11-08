@@ -8,6 +8,7 @@
 #include "ui/standby_wallpaper.h"
 #include "weread/WereadReadingSession.h"
 #include "wifi/wifi_setting.h"
+#include "modem/cellular_network.h"
 #include "lgfx/v1/platforms/esp32/Panel_EPD_2D.hpp"
 #include <M5Unified.h>
 #include <driver/gpio.h>
@@ -161,7 +162,10 @@ bool service() {
     }
     const bool wifi_enabled = wifi_setting_is_enabled();
     const bool wifi_connected = wifi_setting_is_connected();
-    esp_err_t ret = wifi_enabled ? wifi_setting_deinit(false) : ESP_OK;
+    // Join NT26 tasks and release UHCI/PM locks before light sleep. P14 stays
+    // high because it is shared with audio; modem GPIOs return to idle.
+    esp_err_t ret = cellular_network_suspend();
+    if (ret == ESP_OK && wifi_enabled) ret = wifi_setting_deinit(false);
     using Buffer = std::unique_ptr<uint8_t, decltype(&heap_caps_free)>;
     Buffer snapshot(nullptr, heap_caps_free);
     auto* panel = static_cast<lgfx::Panel_EPD_2D*>(M5.Display.panel());
@@ -207,6 +211,7 @@ bool service() {
         frontlight_set_suspended(false);
         touch_input_cancel_until_release();
         keys::resume_after_sleep();
+        cellular_network_resume();
         if (manager.current()) manager.current()->on_show();
         if (wifi_connected || wifi_setting_get_power_mode() == WIFI_SETTING_POWER_ALWAYS_ON)
             wifi_setting_resume_saved_async();
@@ -233,6 +238,7 @@ bool service() {
     frontlight_set_suspended(false);
     touch_input_cancel_until_release();
     keys::resume_after_sleep(); // Swallow the wake key until its release.
+    cellular_network_resume();
     activity->on_standby_resume();
     if (wifi_connected || wifi_setting_get_power_mode() == WIFI_SETTING_POWER_ALWAYS_ON)
         wifi_setting_resume_saved_async();

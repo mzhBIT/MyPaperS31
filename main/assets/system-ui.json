@@ -1,9 +1,9 @@
 {
   "source": "pingxianzhensong.ttf",
   "source_sha256": "a850d4dd746461c641a3ea7525e45d34ca47e2006c82b05ac6048dfeb70eebe9",
-  "requested": 1347,
-  "retained": 1348,
-  "bytes": 522656,
+  "requested": 1358,
+  "retained": 1359,
+  "bytes": 526644,
   "missing_codepoints": [],
   "license": "Source font retains its original license; redistribution rights must be verified before release."
 }

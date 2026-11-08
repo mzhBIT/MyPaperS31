@@ -1,0 +1,65 @@
+{
+  "schema": 1,
+  "board": "MyPaperS31",
+  "chip": "ESP32-S31",
+  "chipId": 32,
+  "flashBytes": 16777216,
+  "version": "2026.11.08-11bff9c-dirty",
+  "packagedAt": "2026-11-08T14:29:54+08:00",
+  "system": {
+    "project": "MyPaperS31",
+    "version": "11bff9c-dirty",
+    "time": "11:07:10",
+    "date": "Nov  7 2026",
+    "sdk": "v6.1.0"
+  },
+  "emulator": {
+    "project": "MyPaperEmulatorS31",
+    "version": "11bff9c-dirty",
+    "time": "14:21:04",
+    "date": "Nov  8 2026",
+    "sdk": "v6.1.0"
+  },
+  "files": [
+    {
+      "id": "bootloader",
+      "path": "firmware/bootloader.bin",
+      "address": 8192,
+      "size": 22304,
+      "sha256": "a196ad4df7542650be719eccb7ba69dfe463b7f1f8f07da101a0b43acf47d388",
+      "md5": "b1b155e4fefaf09665885a685255f86c"
+    },
+    {
+      "id": "partitions",
+      "path": "firmware/partition-table.bin",
+      "address": 32768,
+      "size": 3072,
+      "sha256": "46aa9bbcf26fc6067234370bde92a539443cb49cbfc74aec9ca90d9be0e3cd03",
+      "md5": "32c6dc34686c3e1fec42dfe96f19e5d5"
+    },
+    {
+      "id": "system",
+      "path": "firmware/MyPaperS31.bin",
+      "address": 65536,
+      "size": 5350448,
+      "sha256": "37bb7568893d560ee0487cc690b749a208b323609b5a10bc133309a119304ab7",
+      "md5": "02c159bf0eb9a3228eeed700eb82f46c"
+    },
+    {
+      "id": "emulator",
+      "path": "firmware/MyPaperEmulatorS31.bin",
+      "address": 8454144,
+      "size": 1094064,
+      "sha256": "8b2b7e34368e3511b777ccd8005bae9e2f5e6ad47a5d3d8671e22fc2f9ea3688",
+      "md5": "78c0fc5701bbb5daecfe700c462d71b9"
+    },
+    {
+      "id": "otadata",
+      "path": "firmware/ota_data_initial.bin",
+      "address": 12648448,
+      "size": 8192,
+      "sha256": "7d2c7ac4888bfd75cd5f56e8d61f69595121183afc81556c876732fd3782c62f",
+      "md5": "84d04c9d6cc8ef35bf825d51a5277699"
+    }
+  ]
+}

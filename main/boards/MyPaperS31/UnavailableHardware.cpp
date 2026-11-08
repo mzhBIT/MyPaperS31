@@ -1,4 +1,4 @@
-// Explicit boundaries until S31 USB / ML307 drivers are adapted.
+// P4 ML307 USB/SMS/voice API boundaries. S31 NT26 data lives in cellular/.
 // Do not silently run the P4 ES8311, GPIO54 C6 or USB-switch wiring here.
 // Speaker playback lives in audio/audio_radio_s31.cpp.
 #include "modem/ml307_sms.h"

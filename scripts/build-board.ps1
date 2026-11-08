@@ -74,6 +74,17 @@ if ($Profile -ne 'Current' -and $Action -in @('build', 'reconfigure')) {
     }
     $defaults += ";configs/logging/$($Profile.ToLowerInvariant()).defaults"
 }
+if ($Board -eq 'MyPaperS31' -and $Action -in @('build', 'reconfigure') -and
+    (Test-Path -LiteralPath $configPath)) {
+    # NT26 owns GPIO58/59. Migrate older S31 configurations that still route
+    # the console UART0 onto the modem pins; USB Serial/JTAG is independent.
+    $consoleConfig = [System.IO.File]::ReadAllText($configPath)
+    if ($consoleConfig -match '(?m)^CONFIG_ESP_CONSOLE_UART(?:_DEFAULT|_CUSTOM)?=y\r?$') {
+        $consoleConfig = $consoleConfig -replace '(?m)^(?:# )?CONFIG_(?:ESP_CONSOLE_|CONSOLE_)[^\r\n]*\r?\n', ''
+        $consoleConfig += "`nCONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y`nCONFIG_ESP_CONSOLE_SECONDARY_NONE=y`n"
+        [System.IO.File]::WriteAllText($configPath, $consoleConfig, (New-Object System.Text.UTF8Encoding($false)))
+    }
+}
 $idfScript = Join-Path $env:IDF_PATH 'tools/idf.py'
 Push-Location $projectRoot
 try {

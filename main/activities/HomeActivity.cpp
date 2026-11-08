@@ -11,6 +11,7 @@
 #include "activities/StocksActivity.h"
 #include "activities/CalculatorActivity.h"
 #include "activities/EmulatorActivity.h"
+#include "activities/CameraActivity.h"
 #include "activities/PlaceholderActivity.h"
 #include "activities/RadioActivity.h"
 #include "activities/SettingActivity.h"
@@ -39,6 +40,9 @@
 #include <string>
 #include <sys/stat.h>
 #include <vector>
+#if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_MYPAPER_S31_CAMERA
+#include "boards/MyPaperS31/camera/CameraS31.h"
+#endif
 
 extern void launch_file_browser(const char *start_path);
 extern void launch_rss_reader();
@@ -84,6 +88,9 @@ static void go_stocks()  { launch_stocks(); }
 static void go_calculator() { launch_calculator(); }
 #if CONFIG_IDF_TARGET_ESP32S31
 static void go_emulator() { launch_emulator(); }
+#if CONFIG_MYPAPER_S31_CAMERA
+static void go_camera() { launch_camera(); }
+#endif
 #endif
 
 static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
@@ -108,7 +115,12 @@ static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
 #endif
         {ui_locale::TextId::Stocks, go_stocks}, {ui_locale::TextId::Calculator, go_calculator},
 #if CONFIG_IDF_TARGET_ESP32S31
-        {ui_locale::TextId::Emulator, go_emulator}, {ui_locale::TextId::Count, nullptr},
+        {ui_locale::TextId::Emulator, go_emulator},
+#if CONFIG_MYPAPER_S31_CAMERA
+        {ui_locale::TextId::Camera, go_camera},
+#else
+        {ui_locale::TextId::Count, nullptr},
+#endif
 #else
         {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
 #endif
@@ -131,7 +143,7 @@ struct HomeTile {
     int size;
 };
 
-static const HomeIconId g_icons[HOME_PAGE_CNT][MENU_CNT] = {
+static HomeIconId g_icons[HOME_PAGE_CNT][MENU_CNT] = {
     {
         HomeIconId::Clock,
         HomeIconId::Transfer,
@@ -153,16 +165,42 @@ static const HomeIconId g_icons[HOME_PAGE_CNT][MENU_CNT] = {
         HomeIconId::Stocks, HomeIconId::Calculator,
 #if CONFIG_IDF_TARGET_ESP32S31
         HomeIconId::Emulator,
+#if CONFIG_MYPAPER_S31_CAMERA
+        HomeIconId::Camera,
 #else
         HomeIconId::Count,
 #endif
-        HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
+#else
+        HomeIconId::Count, HomeIconId::Count,
+#endif
+        HomeIconId::Count, HomeIconId::Count,
         HomeIconId::Count, HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
 #if CONFIG_IDF_TARGET_ESP32S31
         HomeIconId::Count, HomeIconId::Count,
 #endif
     },
 };
+
+static void configure_optional_apps() {
+#if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_MYPAPER_S31_CAMERA
+    // Keep actions/icons aligned and pack every visible item at the front.
+    // Both drawing and hit testing use this same contiguous menu array.
+    for (int page = 0; page < HOME_PAGE_CNT; ++page) {
+        int visible = 0;
+        for (int index = 0; index < MENU_CNT; ++index) {
+            if (!g_menu[page][index].action) continue;
+            if (g_menu[page][index].text_id == ui_locale::TextId::Camera &&
+                !mypaper::board::s31::camera::available()) continue;
+            g_menu[page][visible] = g_menu[page][index];
+            g_icons[page][visible++] = g_icons[page][index];
+        }
+        while (visible < MENU_CNT) {
+            g_menu[page][visible] = {ui_locale::TextId::Count, nullptr};
+            g_icons[page][visible++] = HomeIconId::Count;
+        }
+    }
+#endif
+}
 
 static const int g_tile_x[3] = {52, 268, 484};
 static const int g_tile_y[4] = {110, 385, 660, 935};
@@ -509,13 +547,14 @@ class HomeActivity : public Activity {
     int64_t m_clock_minute = -1;
     int m_clock_offset = 0;
     bool m_clock_24_hour = true;
-    bool m_wifi_enabled = false;
+    uint32_t m_wifi_enabled = 0;
     bool m_battery_available = false;
     bool m_battery_charging = false;
 
 public:
     void on_create() override {
         ESP_LOGI(TAG, "create");
+        configure_optional_apps();
         g_page = 0;
         for (int &focus : g_focus) focus = 0;
         M5.Display.startWrite();
@@ -553,7 +592,7 @@ public:
         const int64_t minute = time_basis_system_clock_valid() ? now / 60 : -1;
         const int offset = time_basis_get_offset_minutes();
         const bool hour24 = time_basis_use_24_hour();
-        const bool wifi_enabled = wifi_setting_is_enabled();
+        const uint32_t wifi_enabled = shelf_status_bar::network_state();
         const bool battery_available = battery_status::available();
         const bool battery_charging = battery_status::charging();
         if (minute == m_clock_minute && offset == m_clock_offset &&
@@ -661,7 +700,7 @@ private:
         m_clock_minute = time_basis_system_clock_valid() ? now / 60 : -1;
         m_clock_offset = time_basis_get_offset_minutes();
         m_clock_24_hour = time_basis_use_24_hour();
-        m_wifi_enabled = wifi_setting_is_enabled();
+        m_wifi_enabled = shelf_status_bar::network_state();
         m_battery_available = battery_status::available();
         m_battery_charging = battery_status::charging();
     }

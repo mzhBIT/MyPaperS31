@@ -49,6 +49,8 @@ if(MYPAPER_BOARD STREQUAL "MyPaperS31")
                        "${CMAKE_CURRENT_LIST_DIR}/third_party/s31/esp_tinyusb"
                        "${CMAKE_CURRENT_LIST_DIR}/third_party/s31/tinyusb"
                        "${CMAKE_CURRENT_LIST_DIR}/third_party/s31/usb"
+                       "${CMAKE_CURRENT_LIST_DIR}/third_party/s31/uart-uhci"
+                       "${CMAKE_CURRENT_LIST_DIR}/third_party/s31/iot_eth"
                        "${CMAKE_CURRENT_LIST_DIR}/components/uac2_host"
                        "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__usb_host_uac"
                        "${CMAKE_CURRENT_LIST_DIR}/managed_components/espressif__cmake_utilities"

@@ -10,6 +10,7 @@ enum class Capability : uint32_t {
     UsbMsc = 1u << 6, UsbAudio = 1u << 7, Modem = 1u << 8,
     Rtc = 1u << 9, BatteryGauge = 1u << 10,
     FrontlightCct = 1u << 11, Vibration = 1u << 12,
+    Camera = 1u << 13,
 };
 constexpr uint32_t bit(Capability capability) { return static_cast<uint32_t>(capability); }
 struct Profile {

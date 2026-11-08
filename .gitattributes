@@ -1,0 +1,3 @@
+# Release checksums and bundled third-party hashes require byte-identical checkouts.
+firmware-release/** -text
+tools/web-flasher/vendor/** -text

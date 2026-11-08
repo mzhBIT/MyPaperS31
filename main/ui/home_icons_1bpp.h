@@ -25,6 +25,7 @@ enum class HomeIconId {
     Stocks,
     Calculator,
     Emulator,
+    Camera,
     Count,
 };
 

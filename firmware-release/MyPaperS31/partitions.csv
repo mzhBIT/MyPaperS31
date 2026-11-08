@@ -1,0 +1,8 @@
+# S31 16 MiB Flash. Preserve system/NVS offsets; emulator is a separate app.
+# Not an A/B OTA layout for upgrading the system firmware.
+# Name, Type, SubType, Offset, Size, Flags
+nvs, data, nvs, 0x9000, 0x6000,
+phy_init, data, phy, 0xF000, 0x1000,
+factory, app, factory, 0x10000, 8M,
+emulator, app, ota_0, 0x810000, 4M,
+otadata, data, ota, 0xC10000, 0x2000,

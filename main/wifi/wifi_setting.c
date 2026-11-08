@@ -21,7 +21,7 @@
 #include "freertos/task.h"
 #include "nvs.h"
 #include "nvs_flash.h"
-#include "usb/usb_modem_probe.h"
+#include "modem/cellular_network.h"
 
 #define WIFI_SETTING_C6_EN_GPIO        GPIO_NUM_54
 #define WIFI_SETTING_C6_BOOT_DELAY_MS  1000
@@ -163,6 +163,10 @@ esp_err_t wifi_setting_load_network_mode(void)
     }
 
     ESP_RETURN_ON_ERROR(ret, TAG, "Failed to load network preference");
+    ESP_RETURN_ON_ERROR(cellular_network_load_config(), TAG, "Failed to load cellular preference");
+#if CONFIG_IDF_TARGET_ESP32S31 && !CONFIG_MYPAPER_S31_CELLULAR
+    stored = WIFI_SETTING_NETWORK_WIFI; // Ignore a preference from a full-feature firmware.
+#endif
     s_network_mode = stored == WIFI_SETTING_NETWORK_CELLULAR
                          ? WIFI_SETTING_NETWORK_CELLULAR
                          : WIFI_SETTING_NETWORK_WIFI;
@@ -173,6 +177,17 @@ esp_err_t wifi_setting_load_network_mode(void)
              s_network_mode == WIFI_SETTING_NETWORK_CELLULAR ? "4G" : "Wi-Fi",
              s_power_mode == WIFI_SETTING_POWER_ALWAYS_ON ? "always on" : "on demand");
     return ESP_OK;
+}
+
+void wifi_setting_apply_hardware_availability(void)
+{
+#if CONFIG_IDF_TARGET_ESP32S31
+    if (s_network_mode == WIFI_SETTING_NETWORK_CELLULAR && !cellular_network_available()) {
+        // Do not erase the saved preference on a temporary detection failure.
+        s_network_mode = WIFI_SETTING_NETWORK_WIFI;
+        ESP_LOGW(TAG, "4G not detected at boot; using Wi-Fi for this session");
+    }
+#endif
 }
 
 wifi_setting_power_mode_t wifi_setting_get_power_mode(void)
@@ -206,6 +221,9 @@ static void wifi_setting_always_on_worker(void *arg)
 
 esp_err_t wifi_setting_start_always_on(void)
 {
+#if CONFIG_IDF_TARGET_ESP32S31
+    if (s_network_mode == WIFI_SETTING_NETWORK_CELLULAR) return cellular_network_start();
+#endif
     if (s_network_mode != WIFI_SETTING_NETWORK_WIFI ||
         s_power_mode != WIFI_SETTING_POWER_ALWAYS_ON ||
         s_always_on_task != NULL || wifi_setting_is_connected()) {
@@ -225,6 +243,9 @@ esp_err_t wifi_setting_start_always_on(void)
 bool wifi_setting_background_busy(void) { return s_always_on_task != NULL; }
 esp_err_t wifi_setting_resume_saved_async(void)
 {
+#if CONFIG_IDF_TARGET_ESP32S31
+    if (s_network_mode == WIFI_SETTING_NETWORK_CELLULAR) return cellular_network_start();
+#endif
     if (s_always_on_task != NULL || wifi_setting_is_connected()) return ESP_OK;
     if (s_network_mode != WIFI_SETTING_NETWORK_WIFI) return ESP_ERR_NOT_SUPPORTED;
     BaseType_t created = xTaskCreate(wifi_setting_always_on_worker, "wifi_resume",
@@ -266,6 +287,9 @@ esp_err_t wifi_setting_set_power_mode(wifi_setting_power_mode_t mode)
 
 esp_err_t wifi_setting_release(void)
 {
+    // Cellular stays registered between applications. P14 also powers audio;
+    // standby/network switching explicitly releases the UART data transport.
+    if (s_network_mode == WIFI_SETTING_NETWORK_CELLULAR) return ESP_OK;
     if (s_network_mode == WIFI_SETTING_NETWORK_WIFI &&
         s_power_mode == WIFI_SETTING_POWER_ALWAYS_ON) {
         return ESP_OK;
@@ -334,13 +358,26 @@ wifi_setting_network_mode_t wifi_setting_get_network_mode(void)
 esp_err_t wifi_setting_set_network_mode(wifi_setting_network_mode_t mode)
 {
 #if CONFIG_IDF_TARGET_ESP32S31
+    ESP_RETURN_ON_FALSE(mode != WIFI_SETTING_NETWORK_CELLULAR || cellular_network_available(),
+                        ESP_ERR_NOT_SUPPORTED, TAG, "4G not detected at boot");
+#endif
+#if CONFIG_IDF_TARGET_ESP32S31 && !CONFIG_MYPAPER_S31_CELLULAR
     ESP_RETURN_ON_FALSE(mode == WIFI_SETTING_NETWORK_WIFI, ESP_ERR_NOT_SUPPORTED,
-                        TAG, "S31 ML307 backend is not adapted; keep native Wi-Fi selected");
+                        TAG, "Cellular driver disabled for this hardware profile");
 #endif
     ESP_RETURN_ON_FALSE(mode == WIFI_SETTING_NETWORK_WIFI ||
                             mode == WIFI_SETTING_NETWORK_CELLULAR,
                         ESP_ERR_INVALID_ARG, TAG, "Invalid network mode");
     wifi_setting_wait_for_always_on_task();
+#if CONFIG_IDF_TARGET_ESP32S31
+    if (mode == WIFI_SETTING_NETWORK_CELLULAR && s_network_mode == mode)
+        return cellular_network_start();
+    // Complete the old transport's teardown before publishing a new route.
+    // A timeout leaves the old preference intact; never destroy live DMA.
+    esp_err_t handoff = mode == WIFI_SETTING_NETWORK_WIFI
+        ? cellular_network_stop(15000) : wifi_setting_deinit(true);
+    ESP_RETURN_ON_ERROR(handoff, TAG, "Network handoff failed");
+#endif
     ESP_RETURN_ON_ERROR(wifi_setting_init_nvs(), TAG, "Failed to initialize NVS");
     nvs_handle_t handle = 0;
     ESP_RETURN_ON_ERROR(nvs_open(WIFI_SETTING_NVS_NAMESPACE, NVS_READWRITE, &handle),
@@ -360,6 +397,9 @@ esp_err_t wifi_setting_set_network_mode(wifi_setting_network_mode_t mode)
         if (s_wifi_started || s_wifi_initialized || s_c6_powered_on) {
             (void)wifi_setting_deinit(true);
         }
+#if CONFIG_IDF_TARGET_ESP32S31
+        return cellular_network_start();
+#endif
     } else if (s_connected && s_sta_netif != NULL) {
         (void)esp_netif_set_default_netif(s_sta_netif);
     } else {
@@ -756,21 +796,21 @@ bool wifi_setting_is_enabled(void)
 
 bool wifi_setting_is_connected(void)
 {
+    if (wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_CELLULAR)
+        return cellular_network_is_online();
     esp_netif_ip_info_t ip_info = {0};
-    const bool wifi_online = s_connected && s_sta_netif != NULL &&
+    const bool wifi_online = !s_stopping && s_connected && s_sta_netif != NULL &&
                              esp_netif_is_netif_up(s_sta_netif) &&
                              esp_netif_get_ip_info(s_sta_netif, &ip_info) == ESP_OK &&
                              ip_info.ip.addr != 0;
-    return wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_CELLULAR
-               ? usb_modem_probe_is_online()
-               : wifi_online;
+    return wifi_online;
 }
 
 esp_err_t wifi_setting_connect_saved(int timeout_ms)
 {
     if (wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_CELLULAR) {
-        ESP_LOGI(TAG, "Using user-selected ML307A 4G connection; C6 Wi-Fi remains off");
-        return usb_modem_probe_wait_online(timeout_ms);
+        ESP_LOGI(TAG, "Using selected cellular data connection");
+        return cellular_network_wait_online(timeout_ms);
     }
     char ssid[WIFI_SETTING_SSID_MAX_LEN + 1] = {0};
     char password[WIFI_SETTING_PASSWORD_MAX_LEN + 1] = {0};
@@ -887,6 +927,10 @@ esp_err_t wifi_setting_deinit(bool power_down_c6)
 
 esp_err_t wifi_setting_reset_driver_config(void)
 {
+#if CONFIG_IDF_TARGET_ESP32S31
+    const esp_err_t cellular_result = cellular_network_suspend();
+    if (cellular_result != ESP_OK) return cellular_result;
+#endif
     const wifi_setting_power_mode_t previous_power = s_power_mode;
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_err_t result;

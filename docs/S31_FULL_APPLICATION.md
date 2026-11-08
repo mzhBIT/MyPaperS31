@@ -59,7 +59,7 @@ menuconfig 的 `MyPaperS31 touch mapping` 提供 mounting transform 和原始 X/
   不编译其他 M5 板卡的 PMIC、I2S 和 GPIO 初始化；`M5.Rtc` 在此 facade 中明确使用系统时钟，
   尚不读取 PCF8563。网络校时仍使用原网络时间服务。
 - 原生 esp_wifi 复用既有连接、设置、常开/按需生命周期；C6 电源接口在 S31 上不操作 GPIO54，
-  不初始化 ESP-Hosted。未适配 ML307 前，4G 设置返回 NOT_SUPPORTED，避免保存无效模式。
+  不初始化 ESP-Hosted。S31 使用 NT26 UART 以太网接入 4G，支持运行时切换 Wi-Fi / 4G 和内置 / 外置 SIM；见 [4G 数据通信](S31_CELLULAR_DATA.md)。
 - IDF 6.1 / Mbed TLS 4 的 MD5、SHA256 改用 PSA；P4 保留原 Mbed TLS 调用。
 - 字体 / Wi-Fi 上传缓冲在 S31 上使用对齐 PSRAM + VFS，SD 驱动负责必要的 DMA 中转。
   上传入口只要求该 stdio 缓冲有效且容量足够，不将 `dma_ok=0` 误判为失败；
@@ -99,7 +99,8 @@ ESP_ERR_NOT_SUPPORTED，日志前缀 `S31_HW`，不假装播放、发短信或�
 |---|---|
 | BH1098G 扬声器音频 | 已接入本地音乐播放（MP3/FLAC/WAV/M4A/AAC/OGG/Opus），见下节；尚未实机验证 |
 | 电台流 / 录音 / USB 耳机 | 网络收音机已接入（见 `S31_RADIO_PLAYBACK.md`）；USB UAC1/UAC2 已接入、待实机验证（见 `S31_USB_AUDIO.md`）；录音仍返回 NOT_SUPPORTED |
-| ML307 / 4G / 电话 / 短信 | Activity 已接入，AT/USB/RNDIS 未在 S31 适配 |
+| 4G 数据 / 电话 / 短信 | NT26 UART 数据已接入；电话和短信未适配、入口隐藏 |
+| 可选 GC2145 摄像头 | 已接入低频预览和手动拍摄定格，采集与 EPD 互斥；待实机验证，见 [摄像头与可选硬件](S31_CAMERA.md) |
 | USB MSC / raw SD 导出 | 已实现重启隔离式虚拟 U 盘（TinyUSB 2.4.0 HS UTMI + ANA_SW GPIO36），详见 `S31_USB_MASS_STORAGE_DESIGN.md`；尚未实机验证 |
 | 冷暖前光 | 已接入 GPIO6 冷光 / GPIO7 暖光，高电平有效 20kHz、10bit PWM；需实机确认 |
 | PCF8563 / 电池计 | 已接入，见下文 RTC 与 BQ27220 说明 |

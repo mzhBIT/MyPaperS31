@@ -8,6 +8,15 @@ list(REMOVE_ITEM srcs
 list(TRANSFORM srcs PREPEND "${CMAKE_CURRENT_LIST_DIR}/../../../")
 list(APPEND srcs "../BoardS31.cpp" "../FrontlightS31.cpp" "../UnavailableHardware.cpp" "../KeysS31.cpp" "../StandbyS31.cpp" "../UsbAudioPort.cpp"
                 "../../../audio/audio_radio_s31.cpp" "../../../audio/file_duration.cpp")
+# Dependency discovery runs before Kconfig; REQUIRES must remain unconditional.
+# Optional hardware implementation sources are excluded below; unused driver
+# functions are discarded by the linker and never initialized at runtime.
+if(CONFIG_MYPAPER_S31_CELLULAR)
+    list(APPEND srcs "../cellular/CellularS31.cpp" "../cellular/uart_eth_modem.cc")
+endif()
+if(CONFIG_MYPAPER_S31_CAMERA)
+    list(APPEND srcs "../camera/CameraS31.cpp" "../camera/PhotoStorage.cpp" "../../../activities/CameraActivity.cpp")
+endif()
 
 idf_component_register(
     SRCS ${srcs}
@@ -15,7 +24,7 @@ idf_component_register(
                  "../../../storage" "../../../activities" "../../../input"
                  "../../../wifi" "../../../usb" "../../../modem"
     REQUIRES app_update M5GFX M5Unified freetype fatfs sdmmc esp_driver_sdmmc esp_driver_gpio esp_driver_ledc
-             esp_driver_i2s esp_driver_uart
+             esp_driver_i2s esp_driver_uart uart-uhci iot_eth esp_driver_cam
              nvs_flash esp_common esp_system esp_psram esp_hw_support log freertos
              esp_wifi esp_event esp_netif esp_http_client esp_http_server esp-tls
              esp_driver_jpeg esp_driver_ppa esp_adc esp_timer mbedtls

@@ -6,11 +6,16 @@
 #include "storage/storage_sdcard.h"
 #include "storage/app_paths.h"
 #include "frontlight/frontlight.h"
+#include "modem/cellular_network.h"
+#include "wifi/wifi_setting.h"
 #include <M5Unified.h>
 #include <driver/gpio.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <sdkconfig.h>
+#if CONFIG_MYPAPER_S31_CAMERA
+#include "camera/CameraS31.h"
+#endif
 #if !CONFIG_IDF_TARGET_ESP32S31
 #error "MyPaperS31 board compiled for the wrong target"
 #endif
@@ -72,6 +77,15 @@ HardwareInitResult initialize_hardware(bool usb_transfer_mode) {
     if (display_ready) s31::display().setRotation(0);
     if (display_ready) frontlight_init();
     if (display_ready) M5.Power.begin();
+#if CONFIG_MYPAPER_S31_CAMERA
+    // Probe before any home menu is constructed; never start the camera in
+    // dedicated USB-MSC mode. Shared power/reset outputs are left untouched.
+    if (display_ready && !usb_transfer_mode) (void)s31::camera::probe_at_boot();
+#endif
+#if CONFIG_MYPAPER_S31_CELLULAR
+    if (display_ready && !usb_transfer_mode) (void)cellular_network_probe_at_boot();
+#endif
+    if (display_ready && !usb_transfer_mode) wifi_setting_apply_hardware_availability();
     return {sd_status, display_ready};
 }
 
@@ -84,7 +98,14 @@ const Profile& profile() {
                       bit(Capability::Speaker) |
                       bit(Capability::Frontlight) | bit(Capability::FrontlightCct) |
                       bit(Capability::BatteryGauge) | bit(Capability::Rtc) |
-                      bit(Capability::UsbMsc) | bit(Capability::UsbAudio), false
+                      bit(Capability::UsbMsc) | bit(Capability::UsbAudio)
+#if CONFIG_MYPAPER_S31_CELLULAR
+                      | bit(Capability::Modem)
+#endif
+#if CONFIG_MYPAPER_S31_CAMERA
+                      | bit(Capability::Camera)
+#endif
+                      , false
     };
     return p;
 }

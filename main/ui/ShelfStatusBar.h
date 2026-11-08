@@ -5,6 +5,7 @@
 #include "ui/pico_shelf_icons.h"
 #include "time/time_basis.h"
 #include "wifi/wifi_setting.h"
+#include "modem/cellular_network.h"
 #include <esp_wifi.h>
 #include <algorithm>
 #include <ctime>
@@ -20,9 +21,29 @@ inline std::string clock_text() {
 inline void draw_clock(const std::string& clock) {
     status_clock::draw(M5.Display, clock);
 }
+inline uint32_t network_state() {
+#if CONFIG_IDF_TARGET_ESP32S31
+    if (wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_CELLULAR) {
+        cellular_status_t status{};
+        cellular_network_get_status(&status);
+        return 0x100u + uint32_t(status.state);
+    }
+#endif
+    return wifi_setting_is_enabled() ? 1u : 0u;
+}
 inline void draw_wifi(bool enabled) {
     constexpr int size = 28;
     const int cx = M5.Display.width() - 114;
+#if CONFIG_IDF_TARGET_ESP32S31
+    if (wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_CELLULAR) {
+        M5.Display.fillRect(cx-size/2-3, 24, size+6, 32, TFT_WHITE);
+        system_font::draw_on_background(M5.Display, "4G",
+            cx-system_font::measure("4G", 22)/2,
+            system_font::centered_y("4G", 40, 22), 22,
+            cellular_network_is_online() ? TFT_BLACK : gray(153), TFT_WHITE);
+        return;
+    }
+#endif
     if (!enabled) {
         M5.Display.fillRect(cx-size/2, 40-size/2, size, size, TFT_WHITE);
         return;

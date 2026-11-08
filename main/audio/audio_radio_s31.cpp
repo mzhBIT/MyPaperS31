@@ -14,6 +14,7 @@
 // Both feed this board's BH1098G sink through the public audio_radio.h API.
 
 #include "audio/audio_radio.h"
+#include "wifi/wifi_setting.h"
 #include "audio/file_duration.h"
 #include "audio/usb_audio_output.h"
 #include "audio/S31UsbPcm.h"
@@ -1037,6 +1038,14 @@ bool play_pcm(Converters &converters, esp_audio_simple_dec_handle_t decoder,
 
 void network_log_link(const char *stage)
 {
+    if (wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_CELLULAR) {
+        esp_netif_ip_info_t ip{};
+        auto *netif = esp_netif_get_default_netif();
+        if (netif) esp_netif_get_ip_info(netif, &ip);
+        ESP_LOGI(TAG, "radio cellular %s: online=%d interface=%s ip=" IPSTR,
+            stage, wifi_setting_is_connected(), netif ? esp_netif_get_desc(netif) : "none", IP2STR(&ip.ip));
+        return;
+    }
     wifi_ap_record_t ap = {};
     wifi_ps_type_t ps = WIFI_PS_NONE;
     uint8_t protocol = 0;
@@ -1066,8 +1075,8 @@ void network_prepare_dns()
 {
     // Preserve DHCP MAIN/BACKUP (which may serve local names). Only populate
     // the reserved fallback slot when it has no configured resolver.
-    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-    if (!netif || esp_netif_get_default_netif() != netif) return;
+    esp_netif_t *netif = esp_netif_get_default_netif();
+    if (!netif) return;
     esp_netif_dns_info_t dns = {};
     const auto read = esp_netif_get_dns_info(netif, ESP_NETIF_DNS_FALLBACK, &dns);
     if (read != ESP_OK || !ESP_IP_IS_ANY(dns.ip)) return;
@@ -1080,6 +1089,11 @@ void network_prepare_dns()
 
 void network_acquire_wifi()
 {
+    if (wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_CELLULAR) {
+        network_prepare_dns();
+        network_log_link("start");
+        return;
+    }
     wifi_ps_type_t previous;
     if (esp_wifi_get_ps(&previous) == ESP_OK && previous != WIFI_PS_NONE) {
         const esp_err_t result = esp_wifi_set_ps(WIFI_PS_NONE);

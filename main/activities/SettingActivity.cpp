@@ -26,6 +26,7 @@
 #include "ui/VirtualKeyboard.h"
 #include "ui/home_preferences.h"
 #include "wifi/wifi_setting.h"
+#include "modem/cellular_network.h"
 
 #include <M5Unified.h>
 #include <esp_err.h>
@@ -931,18 +932,119 @@ private:
     }
 };
 
+#if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_MYPAPER_S31_CELLULAR
+class CellularSettingsActivity final : public StatusBarActivity {
+public:
+    void on_create() override {
+        if (wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_CELLULAR)
+            (void)cellular_network_start();
+        draw(true);
+    }
+    void on_show() override { draw(false); }
+    void loop() override {
+        StatusBarActivity::loop();
+        const auto now = lgfx::millis();
+        if (now - _last_check < 1000 || M5.Display.displayBusy() || touch_input_needs_fast_poll()) return;
+        _last_check = now;
+        cellular_status_t status{};
+        cellular_network_get_status(&status);
+        if (status.revision != _revision) draw(false);
+    }
+    bool on_touch(const TouchEvent &event) override {
+        if (status_bar_touch(event)) return true;
+        if (event.type == TouchEventType::Back) { ActivityManager::instance().pop(); return true; }
+        if (event.type != TouchEventType::Tap) return false;
+        for (int i = 0; i < 3; ++i) {
+            if (event.y >= 160 + i*150 && event.y < 300 + i*150) {
+                _focus = i; select(); return true;
+            }
+        }
+        return true;
+    }
+    bool on_key(int key) override {
+        if (key == APP_KEY_BACK) { ActivityManager::instance().pop(); return true; }
+        if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
+            _focus = (_focus + (key == APP_KEY_DOWN ? 1 : 2)) % 3;
+            draw(false); return true;
+        }
+        if (key == APP_KEY_OK) { select(); return true; }
+        return false;
+    }
+private:
+    int _focus = 0;
+    uint32_t _last_check = 0, _revision = 0;
+    esp_err_t _error = ESP_OK;
+    void select() {
+        _error = wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_CELLULAR ? ESP_OK :
+            wifi_setting_set_network_mode(WIFI_SETTING_NETWORK_CELLULAR);
+        if (_error == ESP_OK) _error = _focus < 2
+            ? cellular_network_set_sim_slot(_focus) : cellular_network_retry();
+        draw(false);
+    }
+    void draw(bool quality) {
+        using ui_locale::TextId;
+        cellular_status_t status{};
+        cellular_network_get_status(&status);
+        _revision = status.revision;
+        M5.Display.startWrite();
+        M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_text);
+        M5.Display.fillScreen(TFT_WHITE);
+        draw_header(ui_locale::text(TextId::CellularSettings));
+        const TextId titles[] = {TextId::ExternalSim, TextId::InternalSim, TextId::TapToRetry};
+        for (int i = 0; i < 3; ++i) {
+            const int top = 160 + i*150;
+            M5.Display.drawFastHLine(PAD, top, M5.Display.width()-2*PAD, TFT_BLACK);
+            list_focus::draw(M5.Display, PAD, top, 140, _focus == i);
+            system_font::draw_left(M5.Display, ui_locale::text(titles[i]),
+                PAD + list_focus::text_inset(), top+40, TFT_BLACK);
+            if (i < 2 && status.sim_slot == i)
+                system_font::draw_right(M5.Display, ui_locale::text(TextId::Selected),
+                    M5.Display.width()-PAD, top+40, TFT_BLACK);
+        }
+        TextId message = TextId::Off;
+        switch (status.state) {
+            case CELLULAR_STARTING: message = TextId::CellularStarting; break;
+            case CELLULAR_SEARCHING: message = TextId::CellularSearching; break;
+            case CELLULAR_ONLINE: message = TextId::Connected; break;
+            case CELLULAR_NO_SIM: message = TextId::CellularNoSim; break;
+            case CELLULAR_REGISTRATION_DENIED: message = TextId::CellularDenied; break;
+            case CELLULAR_ERROR: message = TextId::ConnectionFailed; break;
+            case CELLULAR_STOPPING: message = TextId::CellularStopping; break;
+            case CELLULAR_OFF: break;
+            case CELLULAR_NOT_PRESENT: message = TextId::CellularMissing; break;
+        }
+        const int available = M5.Display.width()-2*PAD;
+        system_font::draw_left(M5.Display, system_font::ellipsize(ui_locale::text(message), available), PAD, 680, TFT_BLACK);
+        if (status.sim_slot < 0)
+            system_font::draw_left(M5.Display, ui_locale::text(TextId::SimUnknown), PAD, 750, TFT_DARKGRAY);
+        if (status.csq >= 0 && status.csq <= 31) {
+            char signal[80];
+            std::snprintf(signal, sizeof(signal), ui_locale::text(TextId::CellularSignalFormat), status.csq);
+            system_font::draw_left(M5.Display, signal, PAD, 820, TFT_BLACK);
+        }
+        const auto error = _error != ESP_OK ? _error : status.error;
+        if (error != ESP_OK) system_font::draw_left(M5.Display, esp_err_to_name(error), PAD, 890, TFT_DARKGRAY);
+        system_font::draw_left(M5.Display, system_font::ellipsize(ui_locale::text(TextId::SimChoiceHint), available), PAD, 1010, TFT_DARKGRAY);
+        M5.Display.display();
+        M5.Display.endWrite();
+    }
+};
+#endif
+
 class NetworkSettingsActivity final : public StatusBarActivity {
 public:
     void on_create() override
     {
         _network_mode = wifi_setting_get_network_mode();
         _power_mode = wifi_setting_get_power_mode();
-        _focus = _network_mode == WIFI_SETTING_NETWORK_WIFI ? 0 : 1;
+        _focus = _network_mode == WIFI_SETTING_NETWORK_CELLULAR && has_cellular() ? 1 : 0;
         draw(true);
     }
 
     void on_show() override
     {
+        _network_mode = wifi_setting_get_network_mode();
+        _power_mode = wifi_setting_get_power_mode();
         if (_shown) draw(false);
         _shown = true;
     }
@@ -955,7 +1057,8 @@ public:
             return true;
         }
         if (event.type != TouchEventType::Tap) return false;
-        for (int i = 0; i < 5; ++i) {
+        for (int row = 0; row < option_count(); ++row) {
+            const int i = option_id(row);
             const int top = row_top(i);
             if (event.y >= top && event.y < top + 126) {
                 _focus = i;
@@ -973,7 +1076,10 @@ public:
             return true;
         }
         if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
-            _focus = (_focus + (key == APP_KEY_DOWN ? 1 : 4)) % 5;
+            int row = 0;
+            const int count = option_count();
+            while (row < count && option_id(row) != _focus) ++row;
+            _focus = option_id((row + (key == APP_KEY_DOWN ? 1 : count-1)) % count);
             draw(false);
             return true;
         }
@@ -985,17 +1091,44 @@ public:
     }
 
 private:
+    static bool has_cellular() {
+#if CONFIG_IDF_TARGET_ESP32S31
+        return cellular_network_available();
+#else
+        return true;
+#endif
+    }
+    static int option_count() {
+#if CONFIG_IDF_TARGET_ESP32S31
+        return has_cellular() ? 6 : 4;
+#else
+        return 5;
+#endif
+    }
+    static int option_id(int row) {
+        return !has_cellular() && row > 0 ? row+1 : row;
+    }
     wifi_setting_network_mode_t _network_mode = WIFI_SETTING_NETWORK_WIFI;
     wifi_setting_power_mode_t _power_mode = WIFI_SETTING_POWER_ON_DEMAND;
     int _focus = 0;
     bool _shown = false;
 
-    static int row_top(int index) { return index < 2 ? 150 + index * 156
+    static int row_top(int index) {
+        if (!has_cellular()) return index == 0 ? 150 : index < 4 ? 370+(index-2)*156 : 725;
+        return index < 2 ? 150 + index * 156
                                       : index < 4 ? 530 + (index - 2) * 156
-                                                  : 895; }
+                                                  : 895 + (index-4)*150;
+    }
 
     void select_focused()
     {
+        if ((_focus == 1 || _focus == 5) && !has_cellular()) return;
+#if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_MYPAPER_S31_CELLULAR
+        if (_focus == 5) {
+            ActivityManager::instance().push(new CellularSettingsActivity());
+            return;
+        }
+#endif
         if (_focus == 4) {
             ActivityManager::instance().push(new WifiSettingsActivity());
             return;
@@ -1042,10 +1175,21 @@ private:
                                  M5.Display.width() / 2, HEADER_H + 8, 0x8410);
         draw_option(0, "WiFi", ui_locale::text(ui_locale::TextId::WifiChoiceHint),
                     _network_mode == WIFI_SETTING_NETWORK_WIFI);
-        draw_option(1, "4G", ui_locale::text(ui_locale::TextId::CellularChoiceHint),
+#if !CONFIG_IDF_TARGET_ESP32S31 || CONFIG_MYPAPER_S31_CELLULAR
+        if (has_cellular()) {
+            draw_option(1, "4G", ui_locale::text(ui_locale::TextId::
+#if CONFIG_IDF_TARGET_ESP32S31
+                    CellularChoiceHintS31),
+#else
+                    CellularChoiceHint),
+#endif
                     _network_mode == WIFI_SETTING_NETWORK_CELLULAR);
+        }
+#endif
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::WifiPowerMode),
-                                 M5.Display.width() / 2, 465, 0x8410);
+                                 M5.Display.width() / 2,
+                                 has_cellular() ? 465 : 305,
+                                 0x8410);
         draw_option(2, ui_locale::text(ui_locale::TextId::WifiAlwaysOn),
                     ui_locale::text(ui_locale::TextId::WifiAlwaysOnHint),
                     _power_mode == WIFI_SETTING_POWER_ALWAYS_ON);
@@ -1070,6 +1214,15 @@ private:
                                PAD + list_focus::text_inset(), top + 68, TFT_DARKGRAY);
         system_font::draw_right(M5.Display, ">", M5.Display.width() - PAD - 18,
                                 top + 20, TFT_BLACK);
+#if CONFIG_IDF_TARGET_ESP32S31 && CONFIG_MYPAPER_S31_CELLULAR
+        if (has_cellular()) {
+            cellular_status_t cellular{};
+            cellular_network_get_status(&cellular);
+            draw_option(5, ui_locale::text(ui_locale::TextId::CellularSettings),
+                ui_locale::text(cellular.sim_slot == 0 ? ui_locale::TextId::ExternalSim :
+                    cellular.sim_slot == 1 ? ui_locale::TextId::InternalSim : ui_locale::TextId::SimUnknown), false);
+        }
+#endif
         M5.Display.display();
         M5.Display.endWrite();
     }

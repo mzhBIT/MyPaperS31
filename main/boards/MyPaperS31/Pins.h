@@ -23,4 +23,8 @@ inline constexpr int power_key_io = 15, power_pulse_io = 11;
 inline constexpr int volume_up_io = 8, volume_down_io = 9;
 inline constexpr int rtc_interrupt_io = 14, motor_io = 3, pa_enable_io = 4;
 inline constexpr int screen_power_io = 5, bt_power_io = 12;
+// NT26 UART Ethernet, independent of the BH1098G UART1 and USB-C path.
+inline constexpr int modem_tx = 58, modem_rx = 59, modem_mrdy = 60, modem_srdy = 3;
+inline constexpr int camera_data0 = 46, camera_pclk = 54, camera_mclk = 55;
+inline constexpr int camera_vsync = 56, camera_href = 57;
 } // namespace mypaper::board::s31

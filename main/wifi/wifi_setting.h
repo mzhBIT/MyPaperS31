@@ -40,6 +40,9 @@ esp_err_t wifi_setting_network_stack_init(void);
 // Loads the persisted Wi-Fi/4G preference into internal RAM. Call once from
 // the boot task before any worker with a PSRAM-backed stack can query it.
 esp_err_t wifi_setting_load_network_mode(void);
+// Boot-only, after board detection and before network workers: fall back to
+// Wi-Fi in RAM when the saved cellular preference has no detected hardware.
+void wifi_setting_apply_hardware_availability(void);
 wifi_setting_power_mode_t wifi_setting_get_power_mode(void);
 esp_err_t wifi_setting_set_power_mode(wifi_setting_power_mode_t mode);
 // Starts the saved Wi-Fi connection in a background task when Always On is

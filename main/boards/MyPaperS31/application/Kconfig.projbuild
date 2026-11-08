@@ -2,6 +2,22 @@
 # options retain target dependencies in the shared configuration.
 rsource "../../../Kconfig.projbuild"
 
+menu "MyPaperS31 optional hardware"
+    config MYPAPER_S31_CAMERA
+        bool "Enable optional GC2145 camera"
+        default y
+        help
+            Probe the GC2145 at normal system boot and show its application
+            only if detected. Image buffers are allocated on opening the app.
+            Disable to omit the application and capture implementation.
+    config MYPAPER_S31_CELLULAR
+        bool "Enable optional NT26 cellular data"
+        default y
+        help
+            Probe NT26 with AT at normal system boot. Hide 4G/SIM options if
+            absent; start the full data connection only when 4G is selected.
+endmenu
+
 menu "MyPaperS31 touch mapping"
     config MYPAPER_S31_TOUCH_ROTATION
         int "FT6336U mounting transform (0..7)"

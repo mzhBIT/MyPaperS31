@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src data:; connect-src 'none'; base-uri 'none'; form-action 'none'">
+<title>MyPaperS31 · 离线刷机工具</title>
+<style>/*__STYLES__*/</style>
+</head>
+<body>
+<div class="shell">
+  <header><a class="brand" href="#"><span class="mark">M</span><span>MyPaper<span class="brand-sub">S31</span></span></a><span class="offline"><i></i>离线运行 · 固件已内置</span></header>
+  <main>
+    <section class="intro"><p class="eyebrow">METALIO-E-INK4-PLUS</p><h1>MyPaperS31 固件烧录</h1><p class="lead">连接阅读器，选择安装方式，将固件写入设备。</p><div class="chips"><span>ESP32-S31</span><span>16 MB Flash</span><span>Chrome / Edge 电脑版</span></div></section>
+    <div id="unsupported" class="notice error" hidden>当前浏览器不支持串口访问。请用电脑上的 Chrome 或 Edge 打开本文件；不要在微信内置浏览器中打开。</div>
+    <div class="workspace">
+      <section class="card setup"><div class="section-heading"><span class="step">01</span><h2>准备与连接</h2></div>
+        <ol class="instructions"><li>使用可传输数据的 USB 线连接设备，关闭串口监视器。</li><li>点击连接，选择阅读器对应的 USB 串口。</li><li>连接失败时按住 BOOT，短按 RESET，再松开 BOOT 重试。</li></ol>
+        <div class="selects"><label>烧录速率<select id="baud"><option value="460800">460800 · 推荐</option><option value="921600">921600 · 更快</option><option value="115200">115200 · 稳定优先</option></select></label><label>连接方式<select id="reset"><option value="default_reset">自动进入下载模式</option><option value="no_reset">已手动进入下载模式</option></select></label></div>
+        <div class="connection-actions"><button id="connect" class="button secondary" disabled>连接设备</button><button id="disconnect" class="button text" disabled>断开连接</button></div>
+        <dl class="device"><div><dt>设备</dt><dd id="device">未连接</dd></div><div><dt>Flash</dt><dd id="flash-size">—</dd></div><div><dt>分区</dt><dd id="layout">连接后检查</dd></div></dl>
+      </section>
+      <section class="card install"><div class="section-heading"><span class="step">02</span><h2>安装方式</h2></div>
+        <div class="modes" role="radiogroup" aria-label="安装方式">
+          <label class="mode"><input type="radio" name="mode" value="update" checked><span><strong>更新主系统</strong><small>保留设置、模拟器和 SD 卡文件；要求分区匹配。</small></span></label>
+          <label class="mode"><input type="radio" name="mode" value="install"><span><strong>首次安装 / 修复安装</strong><small>写入引导程序、分区表和系统，恢复从主系统启动。</small></span></label>
+          <label class="mode"><input type="radio" name="mode" value="emulator"><span><strong>仅更新模拟器</strong><small>只写模拟器分区，主系统保持不变。</small></span></label>
+        </div>
+        <label id="emulator-option" class="check" hidden><input id="include-emulator" type="checkbox" checked>同时安装游戏模拟器</label>
+        <div class="package"><span>固件包 <strong id="version">正在校验…</strong></span><span id="build-time"></span></div>
+        <div class="plan-wrap"><table><thead><tr><th>写入内容</th><th>地址</th><th>大小</th></tr></thead><tbody id="plan"></tbody></table></div>
+        <p id="mode-hint" class="mode-hint"></p>
+        <button id="flash" class="button primary" disabled>开始烧录</button>
+        <p class="scope">仅适用于无名科技 Metalio-E-INK4-Plus / MyPaperS31。首次安装会覆盖目标地址的原固件；本工具不整片擦除，不操作 SD 卡。</p>
+      </section>
+    </div>
+    <section class="card status-card" aria-live="polite"><div class="status-heading"><div><span id="status-dot" class="status-dot"></span><strong id="status">正在校验固件包</strong></div><span id="percent">0%</span></div><progress id="progress" max="100" value="0"></progress><p id="detail">无需安装开发环境，也不会下载或上传数据。</p><details><summary>操作日志</summary><pre id="log" tabindex="0"></pre></details><button id="save-log" class="button text">保存日志</button></section>
+    <section class="help"><h2>常见问题</h2><div class="help-grid"><div><h3>找不到串口？</h3><p>检查 USB 数据线、USB 转接器及系统驱动；确保串口未被 VS Code 或其他软件占用。</p></div><div><h3>刷机时断开了？</h3><p>换短数据线，降低速率后重新烧录。写入失败不会显示成功，也不会自动重启。</p></div><div><h3>完成后没有重启？</h3><p>如果已提示写入和校验成功，松开 BOOT 后按 RESET 或重新上电即可。</p></div></div></section>
+  </main>
+  <footer><span>MyPaperS31 · 本地固件发布包</span><span>烧录库 esptool-js 0.7.1 · 许可证见包内说明</span></footer>
+</div>
+<script id="firmware-package" type="application/json">/*__PACKAGE__*/</script>
+<script>/*__VENDOR__*/</script>
+<script>/*__MD5__*/</script>
+<script>/*__CORE__*/</script>
+<script>/*__APP__*/</script>
+</body></html>

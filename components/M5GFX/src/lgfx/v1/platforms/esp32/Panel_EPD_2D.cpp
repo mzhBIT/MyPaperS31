@@ -1,3 +1,4 @@
+#include "EpdPeripheralGuard.hpp"
 #include "Panel_EPD_2D.hpp"
 #include "EpdTransitionStats.h"
 #include "EpdDu4Triple.h"
@@ -2093,6 +2094,9 @@ namespace lgfx
       const int64_t received_at_us = esp_timer_get_time();
       const int64_t queue_wait_us = received_at_us - update.queued_at_us;
       me->_display_busy_2d = true;
+#if defined(CONFIG_IDF_TARGET_ESP32S31) && CONFIG_MYPAPER_S31_CAMERA
+      EpdPeripheralGuard peripheral_guard;
+#endif
       xSemaphoreTake(me->_stats_mutex, portMAX_DELAY);
       StatsLock stats_lock{me->_stats_mutex};
       // Every submitted batch invalidates the prior physical generation,

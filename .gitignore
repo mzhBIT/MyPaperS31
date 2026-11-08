@@ -22,6 +22,7 @@
 build/
 /build-p4/
 /build-s31/
+/build-s31-no-modules/
 /build-p4-debug/
 /build-p4-release/
 /build-s31-debug/
@@ -33,6 +34,9 @@ build/
 
 # ESP-IDF specific build outputs
 *.bin
+!firmware-release/MyPaperS31/firmware/*.bin
+/firmware-release/*.zip
+!/firmware-release/MyPaperS31-offline.zip
 !main/spiffs/fonts/reader.bin
 *.elf
 *.map
