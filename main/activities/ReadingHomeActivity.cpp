@@ -76,6 +76,7 @@ class ReadingHomeActivity final : public Activity {
     std::array<uint64_t,7> days_{};
     bool shown_=false,days_valid_=false;
     uint32_t status_ms_=0;
+    uint32_t last_network_=0;
     bool last_charging_=false;
     std::string cover_path_;
     int64_t cover_size_=-1,cover_mtime_=-1;
@@ -134,6 +135,7 @@ class ReadingHomeActivity final : public Activity {
     }
     void status() {
         clock_=shelf_status_bar::draw();
+        last_network_=shelf_status_bar::network_state();
         last_charging_=battery_status::charging();
         status_ms_=lgfx::millis();
     }
@@ -245,7 +247,8 @@ public:
         char clock[24]="--:--";
         if(time_basis_system_clock_valid()) time_basis_format_clock(std::time(nullptr),clock,sizeof(clock));
         if(clock_==clock && uint32_t(lgfx::millis()-status_ms_)<60000 &&
-           last_charging_==battery_status::charging()) return;
+           last_charging_==battery_status::charging() &&
+           last_network_==shelf_status_bar::network_state()) return;
         const auto previous=M5.Display.getEpdMode();
         M5.Display.startWrite(); M5.Display.setEpdMode(epd_mode_t::epd_text);
         M5.Display.fillRect(0,0,M5.Display.width(),shelf_status_bar::height,TFT_WHITE); status();

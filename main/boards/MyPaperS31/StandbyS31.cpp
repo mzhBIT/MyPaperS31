@@ -160,6 +160,15 @@ bool service() {
         ESP_LOGW(TAG, "standby cancelled: key worker did not become idle");
         return true;
     }
+    if (!touch_input_pause_for_sleep()) {
+        keys::resume_after_sleep();
+        activity->on_standby_resume();
+        ESP_LOGW(TAG, "standby cancelled: touch sampler did not become idle");
+        return true;
+    }
+    struct TouchResume {
+        ~TouchResume() { touch_input_resume_after_sleep(); }
+    } touch_resume;
     const bool wifi_enabled = wifi_setting_is_enabled();
     const bool wifi_connected = wifi_setting_is_connected();
     // Join NT26 tasks and release UHCI/PM locks before light sleep. P14 stays

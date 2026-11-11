@@ -49,9 +49,15 @@ void touch_input_init();
 void touch_input_cancel_until_release();
 void touch_input_update();
 bool touch_input_pop(TouchEvent *event);
-// Main-thread only: poll more promptly while tracking a gesture or dispatching
-// queued events. This does not change tap-on-release / swipe recognition.
+// Main-thread only: consume samples promptly while tracking a gesture or
+// dispatching queued events. S31 hardware sampling runs independently.
 bool touch_input_needs_fast_poll();
+// Idle wait can be interrupted by a freshly captured S31 touch sample.
+void touch_input_wait(bool fast_poll);
+bool touch_input_pause_for_sleep();
+void touch_input_resume_after_sleep();
+// Called before rendering a new activity, so samples during rendering belong to it.
+void touch_input_set_context(uint32_t generation);
 
 void touch_input_set_back_swipe_edge(BackSwipeEdge edge);
 BackSwipeEdge touch_input_get_back_swipe_edge();

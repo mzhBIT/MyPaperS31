@@ -41,6 +41,8 @@ constexpr int AUDIO_PLAYBACK_STOPPED=1, AUDIO_PLAYBACK_ERROR=5;
 constexpr int CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS=30000;
 std::vector<std::string> events;
 bool http_alive=true, wifi_alive=true, pa_on=true, join_ok=true, keys_ok=true;
+bool touch_ok=true;
+unsigned touch_pauses=0,touch_resumes=0,key_resumes=0;
 int wifi_stops=0, enters=0, sink_closes=0, connect_result=ESP_OK;
 std::atomic<bool> s_initialized{true};
 std::atomic<int> s_state{2};
@@ -80,7 +82,13 @@ bool network_time_busy(){return false;}
 bool network_time_try_pause(){return true;}
 void network_time_resume(){}
 namespace weread { std::mutex mutex;std::mutex& reading_transaction_mutex(){return mutex;} }
-namespace keys { bool pause_for_sleep(){return keys_ok;} }
+namespace keys {
+bool pause_for_sleep(){return keys_ok;}
+void resume_after_sleep(){++key_resumes;}
+}
+bool touch_input_pause_for_sleep(){++touch_pauses;return touch_ok;}
+void touch_input_resume_after_sleep(){++touch_resumes;}
+int cellular_network_suspend(){return ESP_OK;}
 bool wifi_setting_is_enabled(){return wifi_alive;}
 bool wifi_setting_is_connected(){return wifi_alive;}
 int wifi_setting_deinit(bool){
@@ -113,6 +121,7 @@ int main(){
     auto reset=[&]{
         events.clear();http_alive=wifi_alive=pa_on=join_ok=true;s_initialized=true;
         wifi_stops=enters=sink_closes=0;pending=true;shutdown_requested=false;
+        touch_ok=true;touch_pauses=touch_resumes=key_resumes=0;
         generation=am.generation();requested_at=lgfx::tick;
     };
     for(bool shutdown : {false,true}) {
@@ -120,8 +129,12 @@ int main(){
         assert(service());
         assert((events==std::vector<std::string>{"mute","join","sink-off","enter","netif-off"}));
         assert(wifi_stops==1 && !http_alive && !pending);
+        assert(touch_pauses==1 && touch_resumes==1);
         assert(!page->_switching && page->_queued_station==-1 && page->_status.empty());
     }
+    reset();touch_ok=false;
+    assert(service() && wifi_alive && wifi_stops==0);
+    assert(touch_pauses==1 && touch_resumes==0 && key_resumes==1);
     reset();join_ok=false;
     assert(service());
     assert((events==std::vector<std::string>{"mute","join"}));

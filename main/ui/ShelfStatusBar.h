@@ -21,12 +21,20 @@ inline std::string clock_text() {
 inline void draw_clock(const std::string& clock) {
     status_clock::draw(M5.Display, clock);
 }
+#if CONFIG_IDF_TARGET_ESP32S31
+inline int cellular_signal_level(const cellular_status_t& status) {
+    // CSQ 0..31: four equal bands. 99 (unknown) must never look like full signal.
+    if (status.state != CELLULAR_ONLINE || status.csq < 0 || status.csq > 31) return 0;
+    return 1 + status.csq / 8;
+}
+#endif
 inline uint32_t network_state() {
 #if CONFIG_IDF_TARGET_ESP32S31
     if (wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_CELLULAR) {
         cellular_status_t status{};
         cellular_network_get_status(&status);
-        return 0x100u + uint32_t(status.state);
+        // Track visible bars, so CSQ fluctuations within a band do not refresh EPD.
+        return 0x100u | (uint32_t(status.state) << 3) | uint32_t(cellular_signal_level(status));
     }
 #endif
     return wifi_setting_is_enabled() ? 1u : 0u;
@@ -36,11 +44,22 @@ inline void draw_wifi(bool enabled) {
     const int cx = M5.Display.width() - 114;
 #if CONFIG_IDF_TARGET_ESP32S31
     if (wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_CELLULAR) {
-        M5.Display.fillRect(cx-size/2-3, 24, size+6, 32, TFT_WHITE);
+        cellular_status_t status{};
+        cellular_network_get_status(&status);
+        const int level = cellular_signal_level(status);
+        const int label_cx = M5.Display.width() - 128;
+        const int bars_x = M5.Display.width() - 108;
+        M5.Display.fillRect(M5.Display.width()-144, 24, 62, 32, TFT_WHITE);
         system_font::draw_on_background(M5.Display, "4G",
-            cx-system_font::measure("4G", 22)/2,
+            label_cx-system_font::measure("4G", 22)/2,
             system_font::centered_y("4G", 40, 22), 22,
             cellular_network_is_online() ? TFT_BLACK : gray(153), TFT_WHITE);
+        // 22px wide, ending 8px before the battery; align their lower edges.
+        for (int bar = 0; bar < 4; ++bar) {
+            const int bar_height = 6 * (bar + 1);
+            M5.Display.fillRect(bars_x + bar * 6, 51-bar_height, 4, bar_height,
+                bar < level ? TFT_BLACK : gray(153));
+        }
         return;
     }
 #endif

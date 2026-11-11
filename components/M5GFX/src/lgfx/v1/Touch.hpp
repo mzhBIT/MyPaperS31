@@ -82,6 +82,8 @@ namespace lgfx
     virtual bool isEnable(void) { return true; };
     virtual uint8_t getGesture(void) { return 0; }
     virtual uint_fast8_t getTouchRaw(touch_point_t* tp, uint_fast8_t count) = 0;
+    // Distinguish an I2C failure from a successful sample with no fingers.
+    virtual bool lastReadSucceeded(void) const { return true; }
 
   protected:
     config_t _cfg;

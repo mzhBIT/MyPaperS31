@@ -14,7 +14,7 @@ public:
         dismiss_overlay(false);
         if (!m_stack.empty()) m_stack.back()->on_hide();
         m_stack.push_back(act);
-        ++m_generation;
+        changed();
         act->on_create();
         act->on_show();
         m_transition_cd = lgfx::millis() + 80;
@@ -25,7 +25,7 @@ public:
         if (m_overlay) { dismiss_overlay(true); return; }
         if (m_stack.empty()) return;
         auto *old = m_stack.back(); m_stack.pop_back();
-        ++m_generation;
+        changed();
         delete old;
         if (!m_stack.empty()) {
             m_stack.back()->on_show();
@@ -45,7 +45,7 @@ public:
     void pop_to_root() {
         dismiss_overlay(m_stack.size() <= 1);
         if (m_stack.size() <= 1) return;
-        ++m_generation;
+        changed();
         while (m_stack.size() > 1) {
             auto *old = m_stack.back();
             m_stack.pop_back();
@@ -63,7 +63,7 @@ public:
         dismiss_overlay(m_stack.back() == target);
         const size_t target_depth=size_t(found-m_stack.begin())+1;
         if(m_stack.size()==target_depth) return true;
-        ++m_generation;
+        changed();
         while(m_stack.size()>target_depth) {
             auto *old=m_stack.back(); m_stack.pop_back(); delete old;
         }
@@ -84,7 +84,7 @@ public:
     bool show_overlay(Activity *act) {
         if (!act || m_overlay || m_stack.empty()) return false;
         m_overlay = act;
-        ++m_generation;
+        changed();
         act->on_create();
         act->on_show();
         m_transition_cd = lgfx::millis() + 80;
@@ -94,7 +94,7 @@ public:
         if (!m_overlay) return;
         auto *old = m_overlay;
         m_overlay = nullptr;
-        ++m_generation;
+        changed();
         old->on_overlay_dismiss(restore);
         delete old;
         m_transition_cd = lgfx::millis() + 80;
@@ -114,7 +114,7 @@ public:
     // intermediate pages. Keep the root available if hardware power-off fails.
     void close_apps_for_shutdown() {
         dismiss_overlay(false);
-        ++m_generation;
+        changed();
         while (m_stack.size() > 1) {
             auto* old = m_stack.back(); m_stack.pop_back(); delete old;
         }
@@ -122,6 +122,12 @@ public:
 
 private:
     ActivityManager() = default;
+    void changed() {
+        ++m_generation;
+#if CONFIG_IDF_TARGET_ESP32S31
+        touch_input_set_context(m_generation);
+#endif
+    }
     std::vector<Activity *> m_stack;
     Activity *m_overlay = nullptr;
     uint32_t m_transition_cd = 0;

@@ -44,6 +44,7 @@ namespace lgfx
     void sleep(void) override;
 
     uint_fast8_t getTouchRaw(touch_point_t* tp, uint_fast8_t count) override;
+    bool lastReadSucceeded(void) const override { return _last_read_ok; }
 
   private:
     enum
@@ -52,6 +53,7 @@ namespace lgfx
     };
 
     bool _flg_released = false;
+    bool _last_read_ok = true;
 
     bool _check_init(void);
     bool _write_reg(uint8_t reg, uint8_t val);

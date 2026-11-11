@@ -17,11 +17,10 @@
     "IDF_TARGET": "esp32s31",
     "IDF_COMPONENT_CHECK_NEW_VERSION": "0"
   },
-  "clangd.path": "C:\\Espressif\\tools\\esp-clang\\16.0.1-fe4f10a809\\esp-clang\\bin\\clangd.exe",
   "clangd.arguments": [
     "--background-index",
     "--query-driver=**",
-    "--compile-commands-dir=e:\\opensource\\epdiy-main\\MyPaperP4/build-s31"
+    "--compile-commands-dir=${workspaceFolder}/build-s31"
   ],
   "idf.flashType": "UART",
   "idf.flashBaudRate": "921600",

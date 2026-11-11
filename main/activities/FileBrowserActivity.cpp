@@ -188,9 +188,11 @@ static bool is_image_file(const char *n) {
 
 static std::string g_status_clock;
 static uint32_t g_status_draw_ms=0;
+static uint32_t g_status_network=0;
 static bool g_status_charging=false;
 static void draw_status() {
     g_status_clock=shelf_status_bar::draw();
+    g_status_network=shelf_status_bar::network_state();
     g_status_charging=battery_status::charging();
     g_status_draw_ms=lgfx::millis();
 }
@@ -423,7 +425,8 @@ public:
            m_confirm_delete || !m_notice.empty() || m_text_input.visible()) return;
         m_status_check_ms=now;
         if(uint32_t(now-g_status_draw_ms)<60000 && g_status_clock==status_clock::text() &&
-           g_status_charging==battery_status::charging()) return;
+           g_status_charging==battery_status::charging() &&
+           g_status_network==shelf_status_bar::network_state()) return;
         const auto previous=M5.Display.getEpdMode();
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_text);

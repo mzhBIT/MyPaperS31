@@ -7,7 +7,8 @@ list(REMOVE_ITEM srcs
     "audio/audio_radio.c" "audio/m5_i2c_codec_ctrl.cpp")
 list(TRANSFORM srcs PREPEND "${CMAKE_CURRENT_LIST_DIR}/../../../")
 list(APPEND srcs "../BoardS31.cpp" "../FrontlightS31.cpp" "../UnavailableHardware.cpp" "../KeysS31.cpp" "../StandbyS31.cpp" "../UsbAudioPort.cpp"
-                "../../../audio/audio_radio_s31.cpp" "../../../audio/file_duration.cpp")
+                "../../../audio/audio_radio_s31.cpp" "../../../audio/file_duration.cpp"
+                "../../../input/S31TouchSampler.cpp")
 # Dependency discovery runs before Kconfig; REQUIRES must remain unconditional.
 # Optional hardware implementation sources are excluded below; unused driver
 # functions are discarded by the linker and never initialized at runtime.

@@ -162,6 +162,7 @@ class BookshelfActivity final : public Activity {
     bool keyboard_focus = false;
     std::string last_clock;
     uint32_t last_status_ms = 0;
+    uint32_t last_network = 0;
     bool last_charging = false;
     using Pixels = std::unique_ptr<uint8_t,decltype(&heap_caps_free)>;
     std::array<Pixels,9> cover_pixels{{
@@ -333,6 +334,7 @@ class BookshelfActivity final : public Activity {
     }
     void status() {
         last_clock=shelf_status_bar::draw();
+        last_network=shelf_status_bar::network_state();
         last_charging=battery_status::charging();
         last_status_ms=lgfx::millis();
     }
@@ -489,10 +491,11 @@ public:
         if(touch_input_needs_fast_poll()) return;
         char clock[24]="--:--";
         if(time_basis_system_clock_valid()) time_basis_format_clock(std::time(nullptr),clock,sizeof(clock));
-        // Keep the minute cadence, but react to measured charging changes.
+        // Keep the minute cadence, but react to charging/network icon changes.
         // Redraw the whole status strip together, not independent icon updates.
         if(last_clock==clock && uint32_t(lgfx::millis()-last_status_ms)<60000 &&
-           last_charging==battery_status::charging()) return;
+           last_charging==battery_status::charging() &&
+           last_network==shelf_status_bar::network_state()) return;
         const auto previous_mode=M5.Display.getEpdMode();
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_text);

@@ -252,11 +252,8 @@ extern "C" void app_main(void)
         if (!dispatched_touch && !touch_input_needs_fast_poll() && !M5.Display.displayBusy())
             M5.Power.update();
 #endif
-        // While a finger is down, inspect release/motion every tick instead
-        // of adding 20 ms to each sample. Idle UI keeps the existing cadence.
-        // Always block for at least one tick so IDLE and lower-priority tasks
-        // can run; do not busy-poll or bypass tap/long-press recognition.
-        vTaskDelay(dispatched_touch || touch_input_needs_fast_poll()
-                       ? 1 : std::max<TickType_t>(1, pdMS_TO_TICKS(20)));
+        // Consume active gestures promptly. S31 samples independently and
+        // wakes this idle wait on new input; P4 retains the tick/20ms delay.
+        touch_input_wait(dispatched_touch || touch_input_needs_fast_poll());
     }
 }

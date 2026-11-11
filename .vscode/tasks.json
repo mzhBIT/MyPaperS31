@@ -100,6 +100,14 @@
       "label": "编译 MyPaperS31",
       "type": "process",
       "command": "powershell.exe",
+      "osx": {
+        "command": "/bin/bash",
+        "args": ["${workspaceFolder}/scripts/build-s31.sh"]
+      },
+      "linux": {
+        "command": "/bin/bash",
+        "args": ["${workspaceFolder}/scripts/build-s31.sh"]
+      },
       "args": [
         "-NoProfile",
         "-ExecutionPolicy",

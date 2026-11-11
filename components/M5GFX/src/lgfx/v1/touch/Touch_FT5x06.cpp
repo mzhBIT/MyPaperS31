@@ -146,6 +146,30 @@ if (_inited)
 
   uint_fast8_t Touch_FT5x06::getTouchRaw(touch_point_t *tp, uint_fast8_t count)
   {
+#if defined(CONFIG_IDF_TARGET_ESP32S31)
+    // FT6336U supplies at most two contacts. One frame read avoids comparing
+    // successive moving frames until they happen to match. INT is a wake hint:
+    // a high pulse must not be interpreted as finger release.
+    _last_read_ok = false;
+    if (!_check_init() || !count) return 0;
+    uint8_t data[11]{};
+    const uint8_t reg = 0x02;
+    if (!_read_reg(reg, data, sizeof(data))) return 0;
+    const auto points = data[0] & 0x0F;
+    if (points > 2) return 0;
+    _last_read_ok = true;
+    uint_fast8_t result = 0;
+    for (int i = 0; i < points && result < count; ++i) {
+      const auto* contact = &data[i * 6];
+      if ((contact[1] >> 6) == 1) continue; // Explicit UP record.
+      tp[result].x = (contact[1] & 0x0F) << 8 | contact[2];
+      tp[result].y = (contact[3] & 0x0F) << 8 | contact[4];
+      tp[result].id = contact[3] >> 4;
+      tp[result].size = 1;
+      ++result;
+    }
+    return result;
+#else
     if (!_check_init() || count == 0) return 0;
     if (_cfg.pin_int >= 0)
     {
@@ -182,6 +206,7 @@ if (_inited)
       tp[idx].id = data[3] >> 4;
     }
     return count;
+#endif
   }
 
 //----------------------------------------------------------------------------

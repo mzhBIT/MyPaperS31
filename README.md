@@ -130,6 +130,14 @@ cd MyPaperS31
 
 VS Code 工作区默认指向 S31，可使用 ESP-IDF Build 或仓库的“编译 MyPaperS31”任务。本仓库 `.vscode` 中的 SDK、Python 和串口路径需按本机安装修改，不要使用 C/C++ 的“编译当前文件”任务构建固件。
 
+S31 触摸使用 GPIO5 中断唤醒独立采样任务，识别与待机处理见 [触摸输入说明](docs/S31_TOUCH_INPUT.md)。
+
+macOS / Linux 可运行 `bash scripts/build-s31.sh`，也可在 VS Code 中运行默认生成任务“编译 MyPaperS31”。脚本优先使用已激活的 IDF 环境，否则加载 `~/.espressif/tools/activate_idf_v6.1.sh`；其他安装位置可通过 `IDF_S31_ACTIVATE` 指定。Debug / Release 等 PowerShell 任务仍用于 Windows。
+
+多人跨平台开发时，C/C++ 代码提示读取各自构建生成的 `compile_commands.json`。`clangd.path` 应在个人 VS Code 用户设置中配置，共享配置不固定其安装路径。`idf.currentSetup`、`idf.port` 也需按各自电脑设置；分享工作区配置时不要覆盖其他成员的 SDK 与串口路径。
+
+S31 关闭了 Component Manager 自动解析。首次使用 ESP-IDF 扩展直接构建前，运行 `python3 scripts/prepare-s31-deps.py` 补齐 `usb_host_uac 1.2.0`、`cmake_utilities 0.5.3` 和 `libjpeg-turbo 3.1.1~1`，并恢复遗漏的 extractor MJPEG 头文件。脚本从 Espressif 官方存储下载固定版本并校验 SHA256，不覆盖已有组件；`build-s31.sh` 会自动执行这一步。
+
 ### 模拟器固件（可选）
 
 先构建并烧录主系统，使设备具备双固件分区表，再执行：

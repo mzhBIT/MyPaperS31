@@ -2926,7 +2926,7 @@ The usage of each pin is as follows.
     auto t = new lgfx::Touch_FT5x06();
     _touch_last.reset(t);
     auto tc = t->config();
-    tc.pin_sda = 0; tc.pin_scl = 1; tc.pin_rst = -1; tc.pin_int = -1;
+    tc.pin_sda = 0; tc.pin_scl = 1; tc.pin_rst = -1; tc.pin_int = 5;
     tc.i2c_port = 1; tc.i2c_addr = 0x38; tc.freq = 400000;
     tc.x_min = 0; tc.x_max = 683; tc.y_min = 0; tc.y_max = 1215;
 #if CONFIG_MYPAPER_S31_TOUCH_MIRROR_X

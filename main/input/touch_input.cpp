@@ -6,12 +6,20 @@
 #include <cstdlib>
 #if CONFIG_IDF_TARGET_ESP32S31
 #include "boards/MyPaperS31/KeysS31.h"
+#include "activities/ActivityManager.h"
+#include "input/S31TouchSampler.h"
 #endif
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 namespace {
 
 constexpr int TAP_MAX_MOVE_PX = 20;
+#if CONFIG_IDF_TARGET_ESP32S31
+constexpr uint32_t TAP_MAX_DURATION_MS = 599;
+#else
 constexpr uint32_t TAP_MAX_DURATION_MS = 350;
+#endif
 constexpr int LONG_PRESS_MAX_MOVE_PX = 25;
 constexpr uint32_t LONG_PRESS_MS = 600;
 constexpr int SWIPE_MIN_DISTANCE_PX = 60;
@@ -49,6 +57,9 @@ uint32_t s_start_ms = 0;
 uint8_t s_last_hw_gesture = 0;
 uint32_t s_last_hw_debug_ms = 0;
 uint32_t s_contact_sequence = 0;
+#if CONFIG_IDF_TARGET_ESP32S31
+uint32_t s_context = 0;
+#endif
 
 void push_event(const TouchEvent &event)
 {
@@ -153,6 +164,7 @@ bool has_swipe_velocity(int dx, int dy, uint32_t duration_ms, uint32_t max_durat
     return (distance * 1000) / (int)duration_ms >= min_velocity_px_per_sec;
 }
 
+#if !CONFIG_IDF_TARGET_ESP32S31
 TouchEventType classify_gt911_gesture(uint8_t gesture)
 {
     switch (gesture) {
@@ -216,11 +228,13 @@ bool push_hardware_gesture(uint32_t now, bool pressed, const lgfx::touch_point_t
     push_event(event);
     return true;
 }
+#endif
 
 } // namespace
 
-void touch_input_init()
+static void reset_recognizer(bool suppress)
 {
+    s_suppress_until_release = suppress;
     s_contact_claimed = false;
     s_head = 0;
     s_tail = 0;
@@ -229,26 +243,34 @@ void touch_input_init()
     s_swipe_sent = false;
     s_last_hw_gesture = 0;
     s_last_hw_debug_ms = 0;
-    s_contact_sequence = 0;
     s_peak_x = 0;
     s_peak_y = 0;
 }
 
-void touch_input_cancel_until_release()
+void touch_input_init()
 {
-    touch_input_init();
-    s_suppress_until_release = true;
+    reset_recognizer(false);
+    s_contact_sequence = 0;
+#if CONFIG_IDF_TARGET_ESP32S31
+    s_context = ActivityManager::instance().generation();
+    s31_touch::init();
+    s31_touch::discard();
+#endif
 }
 
-void touch_input_update()
+void touch_input_cancel_until_release()
 {
-    uint32_t now = lgfx::millis();
+    reset_recognizer(true);
+#if CONFIG_IDF_TARGET_ESP32S31
+    s31_touch::discard();
+#endif
+}
 
-    lgfx::touch_point_t point{};
+static void process_sample(lgfx::touch_point_t point, int count, uint32_t now)
+{
 #if CONFIG_IDF_TARGET_ESP32S31
     // Cover keys are reported as RAW Y~1600, outside the screen. Identify
     // them before affine/rotation conversion and never read FT twice.
-    int count = M5.Display.getTouchRaw(&point, 1);
     if (s_suppress_until_release) {
         mypaper::board::s31::keys::cover_sample(count > 0, point.x, point.y, now);
         if (!count) s_suppress_until_release = false;
@@ -262,7 +284,6 @@ void touch_input_update()
     }
     M5.Display.convertRawXY(&point, count);
 #else
-    int count = M5.Display.getTouch(&point, 1);
     if (s_suppress_until_release) {
         if (!count) s_suppress_until_release = false;
         return;
@@ -270,6 +291,7 @@ void touch_input_update()
 #endif
     bool pressed = count > 0;
 
+#if !CONFIG_IDF_TARGET_ESP32S31
     bool hardware_gesture = !s_contact_claimed && push_hardware_gesture(now, pressed, point);
     if (hardware_gesture) {
         s_pressed = false;
@@ -277,6 +299,7 @@ void touch_input_update()
         s_swipe_sent = false;
         return;
     }
+#endif
 
     if (pressed && !s_pressed) {
         s_contact_claimed = false;
@@ -331,7 +354,7 @@ void touch_input_update()
         if (!s_swipe_sent &&
             !s_long_press_sent &&
             now - s_start_ms >= LONG_PRESS_MS &&
-            std::max(abs_i(dx), abs_i(dy)) <= LONG_PRESS_MAX_MOVE_PX) {
+            std::max(abs_i(s_peak_x-s_start_x), abs_i(s_peak_y-s_start_y)) <= LONG_PRESS_MAX_MOVE_PX) {
             push_event(make_event(TouchEventType::LongPress, s_last_x, s_last_y, now));
             s_long_press_sent = true;
         }
@@ -343,13 +366,20 @@ void touch_input_update()
         int peak_dx = s_peak_x - s_start_x;
         int peak_dy = s_peak_y - s_start_y;
         int move = std::max(abs_i(peak_dx), abs_i(peak_dy));
-        if (s_swipe_sent || s_contact_claimed) {
+        if (s_swipe_sent || s_contact_claimed || s_long_press_sent) {
             // Swipe was already emitted while the finger was still down.
         } else if (!s_long_press_sent &&
             event.duration_ms <= TAP_MAX_DURATION_MS &&
             move <= TAP_MAX_MOVE_PX) {
             event.type = TouchEventType::Tap;
             push_event(event);
+#if CONFIG_IDF_TARGET_ESP32S31
+        } else if (!s_long_press_sent && event.duration_ms >= LONG_PRESS_MS &&
+                   move <= LONG_PRESS_MAX_MOVE_PX) {
+            // Release may be the first sample crossing the long-press threshold.
+            event.type = TouchEventType::LongPress;
+            push_event(event);
+#endif
         } else {
             event.dx = peak_dx;
             event.dy = peak_dy;
@@ -380,8 +410,69 @@ void touch_input_update()
     }
 }
 
+#if CONFIG_IDF_TARGET_ESP32S31
+static bool sync_context()
+{
+    const auto generation = ActivityManager::instance().generation();
+    if (s_context == generation) return false;
+    touch_input_set_context(generation);
+    return true;
+}
+#endif
+
+void touch_input_set_context(uint32_t generation)
+{
+#if CONFIG_IDF_TARGET_ESP32S31
+    s_context = generation;
+    touch_input_cancel_until_release();
+#else
+    (void)generation;
+#endif
+}
+
+void touch_input_update()
+{
+#if CONFIG_IDF_TARGET_ESP32S31
+    if (sync_context()) return;
+    if (s31_touch::running()) {
+        if (s31_touch::take_overflow()) {
+            ESP_LOGW(TAG, "sample queue overflow; cancelling contact");
+            touch_input_cancel_until_release();
+            return;
+        }
+        s31_touch::Sample sample;
+        while (s31_touch::pop(&sample)) {
+            if (!sample.valid || uint32_t(lgfx::millis()-sample.at) > 1500) {
+                touch_input_cancel_until_release();
+                return;
+            }
+            lgfx::touch_point_t point{};
+            point.x = sample.x; point.y = sample.y;
+            process_sample(point, sample.down ? 1 : 0, sample.at);
+        }
+        return;
+    }
+#endif
+    lgfx::touch_point_t point{};
+#if CONFIG_IDF_TARGET_ESP32S31
+    const int count = M5.Display.getTouchRaw(&point, 1);
+    auto* touch = M5.Display.touch();
+    if (touch && !touch->lastReadSucceeded()) { reset_recognizer(true); return; }
+#else
+    const int count = M5.Display.getTouch(&point, 1);
+#endif
+    process_sample(point, count, lgfx::millis());
+}
+
 bool touch_input_pop(TouchEvent *event)
 {
+#if CONFIG_IDF_TARGET_ESP32S31
+    if (sync_context()) return false;
+    if (s31_touch::take_overflow()) {
+        touch_input_cancel_until_release();
+        return false;
+    }
+#endif
     if (!event || s_head == s_tail) return false;
     *event = s_events[s_head];
     s_head = (s_head + 1) % EVENT_QUEUE_SIZE;
@@ -391,9 +482,36 @@ bool touch_input_pop(TouchEvent *event)
 bool touch_input_needs_fast_poll()
 {
 #if CONFIG_IDF_TARGET_ESP32S31
+    if (s31_touch::pending()) return true;
     if (mypaper::board::s31::keys::cover_active()) return true;
 #endif
     return s_pressed || s_head != s_tail;
+}
+
+void touch_input_wait(bool fast_poll)
+{
+#if CONFIG_IDF_TARGET_ESP32S31
+    s31_touch::wait(fast_poll);
+#else
+    vTaskDelay(fast_poll ? 1 : std::max<TickType_t>(1, pdMS_TO_TICKS(20)));
+#endif
+}
+
+bool touch_input_pause_for_sleep()
+{
+#if CONFIG_IDF_TARGET_ESP32S31
+    return s31_touch::pause();
+#else
+    return true;
+#endif
+}
+
+void touch_input_resume_after_sleep()
+{
+    touch_input_cancel_until_release();
+#if CONFIG_IDF_TARGET_ESP32S31
+    s31_touch::resume();
+#endif
 }
 
 TouchContact touch_input_contact()
