@@ -13,6 +13,15 @@ No global profile switch or temporary replacement of book preferences is used.
   `/sdcard/.reader/rss_background.g4` and temporary `.g4.tmp`.
 - RSS book cover: NVS `rss_reader_cover/path`.
 
+While viewing an RSS article, S31 standby uses the RSS book-cover selection,
+falling back to the system standby wallpaper if unset or unavailable. Feed/item
+lists and Bing wallpaper views use the system wallpaper. Book-cover rendering
+uses a separate transient 4bpp cache (`/sdcard/.reader/reader_book_cover.g4`),
+released before sleeping; it never overwrites either background configuration.
+PNG book covers blend their alpha over the current article in an offscreen
+grayscale surface. This page-specific composition is regenerated per standby
+and kept only in RAM, never loaded from or written to the image cache file.
+
 The first RSS visit snapshots current shared settings and selections, then saves
 them independently. Background/cover `profile_v1` markers prevent a disabled
 selection from inheriting book artwork again after reboot. Background RAM/cache

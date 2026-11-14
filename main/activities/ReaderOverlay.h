@@ -89,7 +89,7 @@ private:
     int chapter_count() const;
     int visible_chapter_rows() const;
     void clamp_chapter_scroll();
-    int hit_setting(int x, int y, int *direction) const;
+    int hit_setting(int x, int y, int *direction, bool *right_margin) const;
     int hit_chapter(int y) const;
     int hit_progress(int x, int y) const;
     Action activate_setting();
@@ -121,6 +121,7 @@ private:
     bool m_script_load_failed = false;
     Tab m_tab = Tab::Settings;
     int m_setting_focus = 0;
+    bool m_right_margin_focus = false;
     int m_chapter_focus = 0;
     int m_chapter_scroll = 0;
     int m_pending_progress = -1;

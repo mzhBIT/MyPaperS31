@@ -38,6 +38,8 @@ public:
     // Close live resource users before the system tears down Wi-Fi/peripherals.
     // Return false to cancel this power action without releasing those resources.
     virtual bool prepare_standby() { return true; }
+    // Only the foreground reader supplies artwork; other applications use the system wallpaper.
+    virtual const char *standby_book_cover_path() const { return nullptr; }
     virtual void on_standby_enter() { on_hide(); }
     virtual void on_standby_resume() {}
 };

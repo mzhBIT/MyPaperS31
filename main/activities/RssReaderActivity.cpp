@@ -1110,7 +1110,7 @@ public:
             vQueueDelete(_image_result_queue);
             _image_result_queue = nullptr;
         }
-        stop_wifi();
+        release_network();
     }
 
     void on_create() override
@@ -1132,15 +1132,16 @@ public:
             open_item();
             return;
         }
+        g_status.clear(); // Do not retain an old connection error after changing uplinks.
         load_feeds();
-        draw_status("RSS", ui_locale::text(ui_locale::TextId::LoadingWifi));
+        if (!wifi_setting_is_connected()) draw_status("RSS", network_hint(false));
         // Do not start a Wi-Fi/RNDIS handshake while the EPD high-voltage rails
         // are powering up.  On the cellular module this overlap can produce a
         // supply-current peak large enough to reboot it into the 2ECC:3004 ROM
         // boot port before it returns as the normal 2ECC:3012 device.
         M5.Display.waitDisplay();
-        _wifi_ok = connect_wifi();
-        if (!_wifi_ok) g_status = ui_locale::text(ui_locale::TextId::ConfigureWifiHint);
+        _network_ok = connect_network();
+        if (!_network_ok) g_status = network_hint(true);
         _view = View::Feeds;
         draw_feeds();
     }
@@ -1184,6 +1185,10 @@ public:
     }
 
     bool can_standby() const override { return !_image_load_busy; }
+    const char *standby_book_cover_path() const override {
+        return _view == View::Article && !bing_wallpaper_mode()
+            ? reader_book_cover_path(ReaderProfile::Rss) : nullptr;
+    }
     void on_standby_enter() override { _auto_page.reset(); }
     void on_standby_resume() override { _auto_page.reset(); }
     bool on_navigation_key(int direction) override { return on_key(direction < 0 ? APP_KEY_UP : APP_KEY_DOWN); }
@@ -1477,7 +1482,7 @@ private:
     View _view = View::Feeds;
     bool _seen_show = false;
     bool _external_article = false;
-    bool _wifi_ok = false;
+    bool _network_ok = false;
     bool _current_feed_is_bing = false;
     std::string _current_feed_title;
     bool _confirm_wallpaper_save = false;
@@ -1590,19 +1595,28 @@ private:
         }
     }
 
-    bool connect_wifi()
+    const char *network_hint(bool failed) const
     {
+        const bool cellular = wifi_setting_get_network_mode() == WIFI_SETTING_NETWORK_CELLULAR;
+        return ui_locale::text(failed
+            ? (cellular ? ui_locale::TextId::ConfigureCellularHint : ui_locale::TextId::ConfigureWifiHint)
+            : (cellular ? ui_locale::TextId::ConnectingCellular : ui_locale::TextId::LoadingWifi));
+    }
+
+    bool connect_network()
+    {
+        if (wifi_setting_is_connected()) return true;
         esp_err_t err = wifi_setting_connect_saved(CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS);
         if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Wi-Fi connect failed: %s", esp_err_to_name(err));
+            ESP_LOGE(TAG, "network connect failed: %s", esp_err_to_name(err));
             return false;
         }
         return true;
     }
 
-    void stop_wifi()
+    void release_network()
     {
-        // RSS does not need background connectivity after the activity exits.
+        // Apply the selected transport's lifecycle policy (4G stays registered).
         wifi_setting_release();
     }
 
@@ -2369,9 +2383,9 @@ private:
         if (g_focus < 0 || g_focus >= (int)g_feeds.size()) return;
         _feed_focus = g_focus;
         _feed_scroll = g_scroll;
-        if (!_wifi_ok) {
+        if (!_network_ok) {
             draw_status(ui_locale::text(ui_locale::TextId::RssWifi),
-                        ui_locale::text(ui_locale::TextId::ConfigureWifiHint));
+                        network_hint(true));
             vTaskDelay(pdMS_TO_TICKS(1200));
             redraw_list();
             return;

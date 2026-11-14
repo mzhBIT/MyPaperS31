@@ -379,6 +379,8 @@ enum class TextId : uint16_t {
     RssWifi,
     ConfigureWifiHint,
     LoadingWifi,
+    ConnectingCellular,
+    ConfigureCellularHint,
     Fetching,
     FetchParseFailed,
     ProgressiveJpegUnsupported,

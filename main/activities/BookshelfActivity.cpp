@@ -159,6 +159,7 @@ class BookshelfActivity final : public Activity {
     Style style = Style::Acrylic;
     int focus = 0;
     bool shown = false, styles_open = false;
+    bool opening_animation = true;
     bool keyboard_focus = false;
     std::string last_clock;
     uint32_t last_status_ms = 0;
@@ -182,7 +183,7 @@ class BookshelfActivity final : public Activity {
         feedback_canvas.reset(); feedback_crop.reset();
     }
     void capture_cover(int slot, layout::Rect r) {
-        if(style==Style::List) return;
+        if(!opening_animation || style==Style::List) return;
         auto& pixels=cover_pixels[slot];
         if(!pixels) pixels.reset(static_cast<uint8_t*>(heap_caps_malloc(
             bookshelf_press::cover_bytes,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT)));
@@ -198,7 +199,7 @@ class BookshelfActivity final : public Activity {
         }
     }
     bool paint_press(int slot, bool raised) {
-        if(style==Style::List || M5.Display.displayBusy()) return false;
+        if(!opening_animation || style==Style::List || M5.Display.displayBusy()) return false;
         const int row=slot/3,first=page()*capacity();
         for(int other=row*3;other<row*3+3 && first+other<int(books.size());++other)
             if(!cover_pixels[other]) return false;
@@ -282,6 +283,19 @@ class BookshelfActivity final : public Activity {
         release_feedback();
         style=s; styles_open=false; draw(false);
     }
+    void toggle_opening_animation() {
+        opening_animation = !opening_animation;
+        nvs_handle_t h;
+        esp_err_t err = nvs_open("bookshelf_ui", NVS_READWRITE, &h);
+        if(err == ESP_OK) {
+            err = nvs_set_u8(h, "open_anim", opening_animation ? 1 : 0);
+            if(err == ESP_OK) err = nvs_commit(h);
+            nvs_close(h);
+        }
+        if(err != ESP_OK) ESP_LOGW("BOOKSHELF", "opening animation persistence failed: %s", esp_err_to_name(err));
+        release_feedback();
+        show_styles();
+    }
     void cover(int slot,int i) {
         auto r=layout::cover(style,slot);
         M5.Display.fillRect(r.x,r.y,r.w,r.h,TFT_WHITE);
@@ -345,7 +359,7 @@ class BookshelfActivity final : public Activity {
             M5.Display.fillRoundRect(r.x,r.y,r.w,r.h,18,TFT_WHITE);
             M5.Display.drawRoundRect(r.x,r.y,r.w,r.h,18,gray(112));
         }
-        ui_centered(tr("Style","管理","管理"),490,121,20,layout::manage.w-12,0,255);
+        ui_centered(tr("Manage","管理","管理"),490,121,20,layout::manage.w-12,0,255);
         ui_centered(tr("+ Add","+ 导入","+ 匯入"),599,121,20,layout::import.w-12,0,255);
         M5.Display.drawFastHLine(36,195,612,gray(104));
         M5.Display.drawFastHLine(36,196,612,gray(104));
@@ -360,25 +374,34 @@ class BookshelfActivity final : public Activity {
         reading_navigation::draw(reading_navigation::Tab::Bookshelf);
     }
     void style_dialog() {
-        M5.Display.fillRoundRect(90,370,504,432,20,TFT_WHITE);
-        M5.Display.drawRoundRect(90,370,504,432,20,TFT_BLACK);
-        ui_centered(tr("Bookshelf style","书架样式","書架樣式"),342,411,28,460,0,255);
+        const auto dialog = layout::management_dialog;
+        M5.Display.fillRoundRect(dialog.x,dialog.y,dialog.w,dialog.h,20,TFT_WHITE);
+        M5.Display.drawRoundRect(dialog.x,dialog.y,dialog.w,dialog.h,20,TFT_BLACK);
+        ui_centered(tr("Bookshelf management","书架管理","書架管理"),342,411,28,460,0,255);
         const char *labels[]={tr("Acrylic","亚克力书架","壓克力書架"),tr("Dark rail","深色书轨","深色書軌"),tr("List","列表书架","列表書架")};
         const Style values[]={Style::Acrylic,Style::DarkRail,Style::List};
         for(int i=0;i<3;++i) {
-            int y=451+i*100;
+            const int y=layout::management_style(i).y;
             if(style==values[i]) M5.Display.fillRect(112,y+20,5,40,TFT_BLACK);
             ui_centered(labels[i],342,y+40,28,440,0,255);
-            if(i<2) M5.Display.drawFastHLine(112,y+90,460,gray(192));
+            M5.Display.drawFastHLine(112,y+90,460,gray(192));
         }
-        ui_centered(tr("Tap outside to close","点击空白处关闭","點選空白處關閉"),342,775,17,460,96,255);
+        const auto row = layout::opening_animation_row;
+        const auto toggle = layout::opening_animation_toggle;
+        ui_centered(tr("Open animation","打开动画","開啟動畫"),
+            row.x+154,row.y+40,22,toggle.x-row.x-24,0,255);
+        M5.Display.drawRoundRect(toggle.x,toggle.y,toggle.w,toggle.h,8,TFT_BLACK);
+        ui_centered(ui_locale::text(opening_animation ? ui_locale::TextId::On : ui_locale::TextId::Off),
+            toggle.x+toggle.w/2,toggle.y+toggle.h/2,22,toggle.w-16,0,255);
+        ui_centered(tr("Tap outside to close","点击空白处关闭","點選空白處關閉"),342,875,17,460,96,255);
     }
     void show_styles() {
         styles_open=true;
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_hd);
         style_dialog();
-        M5.Display.display(90,370,504,432);
+        const auto dialog = layout::management_dialog;
+        M5.Display.display(dialog.x,dialog.y,dialog.w,dialog.h);
         M5.Display.endWrite();
     }
     void draw(bool full = true) {
@@ -458,9 +481,14 @@ public:
     void on_standby_enter() override {} // Keep cover feedback caches for the restored page.
     void on_create() override {
         const int64_t begin = esp_timer_get_time();
-        nvs_handle_t h; uint8_t value=2;
-        if(nvs_open("bookshelf_ui",NVS_READONLY,&h)==ESP_OK) { nvs_get_u8(h,"style",&value); nvs_close(h); }
+        nvs_handle_t h; uint8_t value=2, animation=1;
+        if(nvs_open("bookshelf_ui",NVS_READONLY,&h)==ESP_OK) {
+            nvs_get_u8(h,"style",&value);
+            nvs_get_u8(h,"open_anim",&animation);
+            nvs_close(h);
+        }
         if(value==1 || value==2 || value==5) style=static_cast<Style>(value);
+        opening_animation = animation != 0;
         const int64_t settings_end = esp_timer_get_time();
         reload();
         const int64_t reload_end = esp_timer_get_time();
@@ -476,7 +504,8 @@ public:
             const auto event=deferred_event;deferred_touch=false;
             on_touch(event);return; // May open another activity or delete this one.
         }
-        const int wanted=press_tracker.update(touch_input_contact(),style,page()*capacity(),int(books.size()));
+        const int wanted=opening_animation
+            ? press_tracker.update(touch_input_contact(),style,page()*capacity(),int(books.size())) : -1;
         if(feedback_slot>=0 && wanted!=feedback_slot) {
             if(paint_press(feedback_slot,false)) return;
             // A rare composition/allocation failure must not strand a lifted
@@ -530,7 +559,8 @@ public:
         if(styles_open) {
             if(e.type==TouchEventType::Tap) {
                 const Style values[]={Style::Acrylic,Style::DarkRail,Style::List};
-                for(int i=0;i<3;++i) if(layout::Rect{112,451+i*100,460,90}.contains(e.x,e.y)) { set_style(values[i]); return true; }
+                for(int i=0;i<3;++i) if(layout::management_style(i).contains(e.x,e.y)) { set_style(values[i]); return true; }
+                if(layout::opening_animation_row.contains(e.x,e.y)) { toggle_opening_animation(); return true; }
                 styles_open=false; draw(false);
             }
             return true;

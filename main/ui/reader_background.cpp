@@ -1,5 +1,6 @@
 #include "ui/reader_background.h"
 #include "ui/standby_wallpaper.h"
+#include "ui/reader_book_cover.h"
 #include "ui/UiLocale.h"
 #include "renderer/TurboJpegDecoder.h"
 
@@ -201,9 +202,9 @@ bool probe_image(const std::string &path, const std::string &ext,
 
 bool draw_source(lgfx::LGFXBase &gfx, const std::string &path,
                  const std::string &ext, int source_width, int source_height,
-                 int width, int height)
+                 int width, int height, bool clear_background = true)
 {
-    gfx.fillScreen(TFT_WHITE);
+    if (clear_background) gfx.fillScreen(TFT_WHITE);
     float scale = std::max((float)width / source_width,
                            (float)height / source_height);
     int draw_width = std::max(1, (int)std::lround(source_width * scale));
@@ -225,7 +226,7 @@ bool draw_source(lgfx::LGFXBase &gfx, const std::string &path,
     if (!ok && !require_full_resolution && ext == ".jpg")
         ok = turbo_jpeg::draw_file(gfx, path.c_str(), x, y, draw_width, draw_height);
     gfx.clearClipRect();
-    if (!ok) gfx.fillScreen(TFT_WHITE);
+    if (!ok && clear_background) gfx.fillScreen(TFT_WHITE);
     return ok;
 }
 
@@ -281,7 +282,8 @@ void update_cache_identity(const std::string &path)
 }
 
 bool generate_cache(const std::string &path, const std::string &ext,
-                    int source_width, int source_height, int width, int height)
+                    int source_width, int source_height, int width, int height,
+                    lgfx::LGFXBase *reading_page = nullptr)
 {
     int64_t started = esp_timer_get_time();
     size_t size = packed_size(width, height);
@@ -298,9 +300,18 @@ bool generate_cache(const std::string &path, const std::string &ext,
         ESP_LOGE(TAG, "cache sprite allocation failed: %dx%d", width, height);
         return false;
     }
+    if (reading_page) {
+        if (!reading_page->isReadable() || reading_page->width() != width ||
+            reading_page->height() != height) return false;
+        // readRect applies the current screen rotation and writes explicit
+        // grayscale pixels directly into the offscreen surface (no RGB buffer).
+        static_assert(sizeof(lgfx::grayscale_t) == 1, "8-bit grayscale required");
+        reading_page->readRect(0, 0, width, height,
+            static_cast<lgfx::grayscale_t *>(sprite.getBuffer()));
+    }
     sprite.startWrite();
     bool decoded = draw_source(sprite, path, ext, source_width, source_height,
-                               width, height);
+                               width, height, reading_page == nullptr);
     sprite.endWrite();
     if (!decoded || !sprite.getBuffer()) return false;
 
@@ -320,7 +331,9 @@ bool generate_cache(const std::string &path, const std::string &ext,
             cache[destination++] = high | low;
         }
     }
-    if (!write_cache_file(path, width, height, cache, size)) {
+    // A composited page is specific to this standby operation. Never persist
+    // book text or reuse the composition after the user has turned a page.
+    if (!reading_page && !write_cache_file(path, width, height, cache, size)) {
         heap_caps_free(cache);
         ESP_LOGE(TAG, "cache file write failed: %s", CACHE_PATH);
         return false;
@@ -544,7 +557,7 @@ bool reader_background_draw(lgfx::LGFXBase &gfx, int width, int height)
     return true;
 }
 
-Settings(bool rss = false, bool standby = false) {
+Settings(bool rss = false, bool standby = false, bool book_cover = false) {
     if (standby) {
         NVS_NAMESPACE = "standby_bg";
         CACHE_PATH = "/sdcard/.reader/standby_wallpaper.g4";
@@ -556,11 +569,20 @@ Settings(bool rss = false, bool standby = false) {
         CACHE_PATH = "/sdcard/.reader/rss_background.g4";
         CACHE_TEMP_PATH = "/sdcard/.reader/rss_background.g4.tmp";
     }
+    if (book_cover) {
+        // The selected path comes from reader_book_cover; never read/write a
+        // background or system-wallpaper preference for this temporary renderer.
+        initialized = true;
+        require_full_resolution = false;
+        CACHE_PATH = "/sdcard/.reader/reader_book_cover.g4";
+        CACHE_TEMP_PATH = "/sdcard/.reader/reader_book_cover.g4.tmp";
+    }
 }
 };
 Settings shared_settings;
 Settings rss_settings(true);
 Settings standby_settings(false, true);
+Settings book_cover_settings(false, false, true);
 bool rss_seeded = false;
 void seed_rss_settings()
 {
@@ -630,3 +652,38 @@ bool standby_wallpaper_draw(lgfx::LGFXBase& gfx, int width, int height) {
         && standby_settings.reader_background_draw(gfx, width, height);
 }
 void standby_wallpaper_release() { standby_settings.release_cache(); }
+
+bool reader_book_cover_prepare(const char *path, int width, int height, lgfx::LGFXBase *reading_page) {
+    auto &image = book_cover_settings;
+    image.release_cache();
+    image.background_path = path ? path : "";
+    image.background_ext = image.image_extension(image.background_path);
+    image.background_width = image.background_height = 0;
+    if (width <= 0 || height <= 0 || image.background_ext.empty() ||
+        !image.probe_image(image.background_path, image.background_ext,
+            &image.background_width, &image.background_height, &image.background_progressive)) {
+        reader_book_cover_release();
+        return false;
+    }
+    const bool prepared = image.background_ext == ".png"
+        ? reading_page && image.generate_cache(image.background_path, image.background_ext,
+            image.background_width, image.background_height, width, height, reading_page)
+        : image.ensure_cache(width, height);
+    if (!prepared) {
+        reader_book_cover_release();
+        return false;
+    }
+    return true;
+}
+
+bool reader_book_cover_draw(lgfx::LGFXBase &gfx, int width, int height) {
+    return book_cover_settings.background_cache &&
+        book_cover_settings.reader_background_draw(gfx, width, height);
+}
+
+void reader_book_cover_release() {
+    book_cover_settings.release_cache();
+    book_cover_settings.background_path.clear();
+    book_cover_settings.background_ext.clear();
+    book_cover_settings.background_width = book_cover_settings.background_height = 0;
+}

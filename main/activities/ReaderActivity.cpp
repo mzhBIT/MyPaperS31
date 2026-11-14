@@ -13,6 +13,7 @@
 #include "ui/SystemFont.h"
 #include "ui/ReaderHeader.h"
 #include "ui/reader_background.h"
+#include "ui/reader_book_cover.h"
 #include "utils/CooperativeYield.h"
 #include <M5Unified.h>
 #include <esp_log.h>
@@ -240,6 +241,7 @@ public:
     }
 
     void on_hide() override { m_reading_timer.pause(); m_auto_page.reset(); }
+    const char *standby_book_cover_path() const override { return reader_book_cover_path(); }
     void on_standby_resume() override { m_reading_timer.resume(); m_auto_page.reset(); }
 
     void on_show() override {

@@ -19,6 +19,10 @@ constexpr int ui_font_pixels(int base, int system_pixels) {
     return px < 46 ? (px * system_pixels + 12) / 24 : px;
 }
 constexpr Rect manage{442, 94, 97, 54}, import{551, 94, 97, 54};
+constexpr Rect management_dialog{90, 370, 504, 532};
+constexpr Rect management_style(int index) { return {112, 451 + index * 100, 460, 90}; }
+constexpr Rect opening_animation_row{112, 751, 460, 90};
+constexpr Rect opening_animation_toggle{442, 766, 130, 50};
 constexpr Rect previous{194, 1032, 64, 60}, next{426, 1032, 64, 60};
 constexpr int capacity(Style s) { return s == Style::List ? 4 : 9; }
 constexpr Rect card(Style s, int slot) {

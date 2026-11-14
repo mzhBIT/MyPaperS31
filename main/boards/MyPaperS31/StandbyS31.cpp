@@ -6,6 +6,7 @@
 #include "input/touch_input.h"
 #include "time/network_time.h"
 #include "ui/standby_wallpaper.h"
+#include "ui/reader_book_cover.h"
 #include "weread/WereadReadingSession.h"
 #include "wifi/wifi_setting.h"
 #include "modem/cellular_network.h"
@@ -29,6 +30,18 @@ bool pending = false;
 bool shutdown_requested = false;
 uint32_t requested_at = 0, generation = 0;
 constexpr int held_pins[] = {sd_clk, sd_cmd, 20, 21, 22, 23, frontlight_cool, frontlight_warm};
+enum class StandbyImage { None, SystemWallpaper, BookCover };
+
+StandbyImage prepare_standby_image(const Activity &activity, bool shutting_down, int width, int height) {
+    // A suspended/background reader must not affect another application's standby.
+    const char *cover = shutting_down ? nullptr : activity.standby_book_cover_path();
+    if (cover && cover[0] && reader_book_cover_prepare(cover, width, height, &M5.Display))
+        return StandbyImage::BookCover;
+    reader_book_cover_release();
+    return standby_wallpaper_enabled() && standby_wallpaper_prepare(width, height)
+        ? StandbyImage::SystemWallpaper : StandbyImage::None;
+}
+
 void hold_pins(bool hold) {
     for (int pin : held_pins) {
         if (hold) gpio_hold_en(static_cast<gpio_num_t>(pin));
@@ -182,14 +195,18 @@ bool service() {
     const auto old_mode = M5.Display.getEpdMode();
     const bool old_dither = M5.Display.getDither();
     bool wallpaper_shown = false;
-    if (ret == ESP_OK && standby_wallpaper_enabled()
-        && standby_wallpaper_prepare(M5.Display.width(), M5.Display.height())) {
+    const auto image = ret == ESP_OK
+        ? prepare_standby_image(*activity, shutting_down, M5.Display.width(), M5.Display.height())
+        : StandbyImage::None;
+    if (image != StandbyImage::None) {
         snapshot.reset(static_cast<uint8_t*>(heap_caps_malloc(bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
         if (snapshot && panel->copyPhysicalGrayscale4(snapshot.get(), bytes)) {
             M5.Display.startWrite();
             M5.Display.setEpdMode(lgfx::epd_mode_t::epd_quality);
             M5.Display.setDither(false);
-            wallpaper_shown = standby_wallpaper_draw(M5.Display, M5.Display.width(), M5.Display.height());
+            wallpaper_shown = image == StandbyImage::BookCover
+                ? reader_book_cover_draw(M5.Display, M5.Display.width(), M5.Display.height())
+                : standby_wallpaper_draw(M5.Display, M5.Display.width(), M5.Display.height());
             if (wallpaper_shown) M5.Display.display();
             M5.Display.endWrite();
             M5.Display.waitDisplay();
@@ -198,6 +215,7 @@ bool service() {
             ESP_LOGW(TAG, "wallpaper skipped: page snapshot unavailable");
         }
     }
+    reader_book_cover_release();
     standby_wallpaper_release();
     if (ret == ESP_OK && shutting_down) {
         frontlight_set_suspended(true);
@@ -230,7 +248,8 @@ bool service() {
     }
     if (ret == ESP_OK) {
         frontlight_set_suspended(true); // No NVS write and no user-level change.
-        ESP_LOGI(TAG, "enter light sleep wallpaper=%d frontlight=off", wallpaper_shown);
+        ESP_LOGI(TAG, "enter light sleep wallpaper=%d source=%s frontlight=off", wallpaper_shown,
+            wallpaper_shown ? (image == StandbyImage::BookCover ? "book-cover" : "system") : "none");
         ret = sleep_until_power();
     }
     if (snapshot) {

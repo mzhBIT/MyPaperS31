@@ -23,6 +23,7 @@
 #include "ui/ReaderHeader.h"
 #include "ui/UiLocale.h"
 #include "ui/reader_background.h"
+#include "ui/reader_book_cover.h"
 #include "weread/WereadApi.h"
 #include "weread/WereadHttpClient.h"
 #include "weread/WereadOffline.h"
@@ -466,6 +467,9 @@ public:
         _reading_timer.pause(); _auto_page.reset();
     }
     bool can_standby() const override { return _annotation_task == nullptr; }
+    const char *standby_book_cover_path() const override {
+        return _ok ? reader_book_cover_path() : nullptr;
+    }
     void on_standby_resume() override {
         _weread_visible = true;
         _weread_last_tick_us = esp_timer_get_time();

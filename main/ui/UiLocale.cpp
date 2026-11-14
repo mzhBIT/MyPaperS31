@@ -384,6 +384,8 @@ constexpr Translation kText[] = {
     {"RSS WiFi", "RSS 网络", "RSS 網路"},
     {"Configure WiFi in Settings", "请在设置中配置 WiFi", "請在設定中設定 WiFi"},
     {"Loading WiFi...", "正在连接 WiFi...", "正在連線 WiFi..."},
+    {"Connecting 4G...", "正在连接 4G…", "正在連線 4G…"},
+    {"4G is not connected; check network settings", "4G 未连接，请检查网络设置", "4G 未連線，請檢查網路設定"},
     {"Fetching...", "正在获取...", "正在取得..."},
     {"Fetch or parse failed", "获取或解析失败", "取得或解析失敗"},
     {"Progressive JPEG unsupported", "不支持此渐进式 JPEG", "不支援此漸進式 JPEG"},

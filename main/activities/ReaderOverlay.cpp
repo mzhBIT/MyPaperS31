@@ -1,5 +1,6 @@
 #include "activities/ReaderOverlay.h"
 #include "ui/ListFocus.h"
+#include "ui/BookshelfFontFit.h"
 
 #include "reader_font.h"
 #include "reader_style.h"
@@ -25,8 +26,54 @@ constexpr int STEP_BOX_GAP = 10;
 constexpr int VALUE_W = 100;
 constexpr int CHAPTER_INDEX_H = 52;
 constexpr int PANEL_RADIUS = 10;
+constexpr int MARGIN_ROW = 6;
 constexpr const char *FONT_PREVIEW_CN = "同一个世界，同一个梦想";
 constexpr const char *FONT_PREVIEW_EN = "One world, One dream";
+
+// Drawing and hit testing share the exact half-row and step-button bounds.
+struct MarginCell {
+    int x, w, minus_x, value_x, plus_x, button_w, value_w;
+};
+
+MarginCell margin_cell(int x, int w, bool right)
+{
+    constexpr int divider_gap = 16;
+    constexpr int button_w = 44;
+    constexpr int gap = 4;
+    const int split = x + (w - divider_gap) / 2;
+    const int left = right ? split + divider_gap : x;
+    const int end = right ? x + w : split;
+    const int value_w = std::max(48, system_font::measure("120") + 8);
+    const int plus_x = end - button_w;
+    const int value_x = plus_x - gap - value_w;
+    return {left, end - left, value_x - gap - button_w, value_x,
+            plus_x, button_w, value_w};
+}
+
+void draw_margin_cell(const MarginCell &cell, int y, int h, int value,
+                      bool focused, ui_locale::TextId label_id)
+{
+    list_focus::draw(M5.Display, cell.x, y, h, focused);
+    const std::string label = ui_locale::text(label_id);
+    const int label_x = cell.x + list_focus::text_inset();
+    const int label_w = std::max(1, cell.minus_x - 8 - label_x);
+    const int size = system_font::pixel_size();
+    static bookshelf_font_fit::Cache label_sizes;
+    const int label_size = label_sizes.fit(label, size, label_w, system_font::generation(),
+        [](const std::string &text, int pixels) { return system_font::measure(text, pixels); });
+    system_font::draw_left_sized(M5.Display, label, label_x,
+        y + std::max(0, (h - system_font::line_height(label_size)) / 2), label_size, TFT_BLACK);
+
+    const int box_y = y + 6;
+    const int box_h = std::max(28, h - 12);
+    const int text_y = y + std::max(0, (h - system_font::line_height()) / 2);
+    M5.Display.drawRoundRect(cell.minus_x, box_y, cell.button_w, box_h, 4, TFT_BLACK);
+    M5.Display.drawRoundRect(cell.plus_x, box_y, cell.button_w, box_h, 4, TFT_BLACK);
+    system_font::draw_center(M5.Display, "-", cell.minus_x + cell.button_w / 2, text_y, TFT_BLACK);
+    system_font::draw_center(M5.Display, std::to_string(value),
+        cell.value_x + cell.value_w / 2, text_y, TFT_BLACK);
+    system_font::draw_center(M5.Display, "+", cell.plus_x + cell.button_w / 2, text_y, TFT_BLACK);
+}
 
 const char *base_name(const char *path)
 {
@@ -69,11 +116,6 @@ void setting_text(int index, script_conversion::Mode script_mode, bool script_fa
     case 5:
         *name = ui_locale::text(ui_locale::TextId::ParagraphGap);
         snprintf(buf, sizeof(buf), "%.1f", style.paragraph_spacing * 0.1f);
-        *value = buf;
-        break;
-    case 6:
-        *name = ui_locale::text(ui_locale::TextId::PageMargin);
-        snprintf(buf, sizeof(buf), "%d", (style.margin_left + style.margin_right) / 2);
         *value = buf;
         break;
     case 7:
@@ -360,9 +402,9 @@ void ReaderOverlay::adjust_setting(int delta)
         case 5:
             style.paragraph_spacing += delta;
             break;
-        case 6:
-            style.margin_left = (style.margin_left + style.margin_right) / 2 + delta * 5;
-            style.margin_right = style.margin_left;
+        case MARGIN_ROW:
+            if (m_right_margin_focus) style.margin_right += delta * 2;
+            else style.margin_left += delta * 2;
             break;
         default:
             return;
@@ -421,6 +463,15 @@ int ReaderOverlay::active_setting_count() const
 
 void ReaderOverlay::move_setting_focus(int delta)
 {
+    // Physical keys visit both controls without adding another visible row.
+    if (m_tab == Tab::Settings) {
+        if (m_setting_focus == MARGIN_ROW &&
+            ((delta > 0 && !m_right_margin_focus) || (delta < 0 && m_right_margin_focus))) {
+            m_right_margin_focus = delta > 0;
+            return;
+        }
+        if (m_setting_focus + delta == MARGIN_ROW) m_right_margin_focus = delta < 0;
+    }
     m_setting_focus = std::max(0, std::min(active_setting_count() - 1, m_setting_focus + delta));
 }
 
@@ -432,7 +483,7 @@ void ReaderOverlay::move_chapter_focus(int delta)
     clamp_chapter_scroll();
 }
 
-int ReaderOverlay::hit_setting(int x, int y, int *direction) const
+int ReaderOverlay::hit_setting(int x, int y, int *direction, bool *right_margin) const
 {
     if (direction) *direction = 0;
     Geometry g = geometry();
@@ -440,10 +491,23 @@ int ReaderOverlay::hit_setting(int x, int y, int *direction) const
     int inner_w = g.w - PANEL_PAD * 2;
     if (y < g.body_y || y >= g.tab_y) return -1;
     int count = active_setting_count();
-    int index = (y - g.body_y) * count / g.body_h;
+    int index = ((y - g.body_y + 1) * count - 1) / g.body_h;
     int cell_x = inner_x;
     int cell_w = inner_w;
     if (index < 0 || index >= count || x < cell_x || x >= cell_x + cell_w) return -1;
+    if (m_tab == Tab::Settings && index == MARGIN_ROW) {
+        const auto left = margin_cell(cell_x, cell_w, false);
+        const auto right = margin_cell(cell_x, cell_w, true);
+        if (x >= left.x + left.w && x < right.x) return -1;
+        const bool is_right = x >= right.x;
+        if (right_margin) *right_margin = is_right;
+        const auto &cell = is_right ? right : left;
+        if (direction) {
+            if (x >= cell.minus_x && x < cell.minus_x + cell.button_w) *direction = -1;
+            else if (x >= cell.plus_x && x < cell.plus_x + cell.button_w) *direction = 1;
+        }
+        return index;
+    }
     const int beauty_index = m_tab == Tab::Beauty ? beauty_base_index(index) : -1;
     bool navigation_row = (m_tab == Tab::Settings && index == 0) ||
                           (m_tab == Tab::Beauty && (beauty_index == 2 || beauty_index == 3));
@@ -614,9 +678,11 @@ ReaderOverlay::Action ReaderOverlay::on_touch(const TouchEvent &event)
 
     if (m_tab == Tab::Settings || m_tab == Tab::Beauty) {
         int direction = 0;
-        int index = hit_setting(event.x, event.y, &direction);
+        bool right_margin = false;
+        int index = hit_setting(event.x, event.y, &direction, &right_margin);
         if (index < 0) return Action::None;
         m_setting_focus = index;
+        if (m_tab == Tab::Settings && index == MARGIN_ROW) m_right_margin_focus = right_margin;
         if (m_tab == Tab::Settings && index == 0) {
             open_fonts();
             return Action::None;
@@ -836,10 +902,20 @@ void ReaderOverlay::draw_settings(const Geometry &g)
         constexpr uint16_t bg = TFT_WHITE;
         constexpr uint16_t fg = TFT_BLACK;
         M5.Display.fillRect(x, row_y0 + 1, w, row_h - 1, bg);
-        list_focus::draw(M5.Display, x, row_y0, row_h, index == m_setting_focus);
         if (index + 1 < count) {
             M5.Display.drawFastHLine(x, row_y1, w, TFT_BLACK);
         }
+
+        if (m_tab == Tab::Settings && index == MARGIN_ROW) {
+            const auto style = reader_style_get(m_profile);
+            const bool focused = index == m_setting_focus;
+            draw_margin_cell(margin_cell(x, w, false), row_y0, row_h, style.margin_left,
+                focused && !m_right_margin_focus, ui_locale::TextId::LeftMargin);
+            draw_margin_cell(margin_cell(x, w, true), row_y0, row_h, style.margin_right,
+                focused && m_right_margin_focus, ui_locale::TextId::RightMargin);
+            continue;
+        }
+        list_focus::draw(M5.Display, x, row_y0, row_h, index == m_setting_focus);
 
         std::string name;
         std::string value;
