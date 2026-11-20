@@ -8,12 +8,12 @@
 #include "activities/MapActivity.h"
 #include "activities/SmsActivity.h"
 #include "activities/PhoneActivity.h"
-#include "activities/StocksActivity.h"
 #include "activities/CalculatorActivity.h"
 #include "activities/EmulatorActivity.h"
 #include "activities/CameraActivity.h"
 #include "activities/PlaceholderActivity.h"
 #include "activities/RadioActivity.h"
+#include "activities/RssReaderActivity.h"
 #include "activities/SettingActivity.h"
 #include "activities/TransferActivity.h"
 #include "activities/WifiTransferActivity.h"
@@ -45,7 +45,6 @@
 #endif
 
 extern void launch_file_browser(const char *start_path);
-extern void launch_rss_reader();
 extern void launch_reader(const char *path);
 extern void launch_epub_reader(const char *path);
 extern void launch_mobi_reader(const char *path);
@@ -76,7 +75,6 @@ static void go_transfer(){ launch_transfer(); }
 static void go_settings(){ launch_settings(); }
 static void go_clock()   { ActivityManager::instance().push(new PlaceholderActivity(ui_locale::text(ui_locale::TextId::Clock))); }
 static void go_music()   { launch_music(); }
-static void go_images()  { launch_file_browser("/sdcard"); }
 static void go_deepseek(){ launch_deepseek(); }
 static void go_weread()  { launch_weread(); }
 static void go_map()     { launch_map(); }
@@ -84,7 +82,6 @@ static void go_map()     { launch_map(); }
 static void go_sms()     { launch_sms(); }
 static void go_phone()   { launch_phone(); }
 #endif
-static void go_stocks()  { launch_stocks(); }
 static void go_calculator() { launch_calculator(); }
 #if CONFIG_IDF_TARGET_ESP32S31
 static void go_emulator() { launch_emulator(); }
@@ -97,7 +94,7 @@ static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
     {
         {ui_locale::TextId::Clock, go_clock},
         {ui_locale::TextId::Transfer, go_transfer},
-        {ui_locale::TextId::Images, go_images},
+        {ui_locale::TextId::BingWallpaper, launch_bing_wallpaper},
         {ui_locale::TextId::Files, go_browse},
         {ui_locale::TextId::Book, go_bookshelf},
         {ui_locale::TextId::News, go_rss},
@@ -113,7 +110,7 @@ static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
         {ui_locale::TextId::Messages, go_sms},
         {ui_locale::TextId::Phone, go_phone},
 #endif
-        {ui_locale::TextId::Stocks, go_stocks}, {ui_locale::TextId::Calculator, go_calculator},
+        {ui_locale::TextId::Calculator, go_calculator},
 #if CONFIG_IDF_TARGET_ESP32S31
         {ui_locale::TextId::Emulator, go_emulator},
 #if CONFIG_MYPAPER_S31_CAMERA
@@ -127,6 +124,7 @@ static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
         {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
         {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
         {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
+        {ui_locale::TextId::Count, nullptr},
 #if CONFIG_IDF_TARGET_ESP32S31
         {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
 #endif
@@ -162,7 +160,7 @@ static HomeIconId g_icons[HOME_PAGE_CNT][MENU_CNT] = {
 #if !CONFIG_IDF_TARGET_ESP32S31
         HomeIconId::Messages, HomeIconId::Phone,
 #endif
-        HomeIconId::Stocks, HomeIconId::Calculator,
+        HomeIconId::Calculator,
 #if CONFIG_IDF_TARGET_ESP32S31
         HomeIconId::Emulator,
 #if CONFIG_MYPAPER_S31_CAMERA
@@ -175,6 +173,7 @@ static HomeIconId g_icons[HOME_PAGE_CNT][MENU_CNT] = {
 #endif
         HomeIconId::Count, HomeIconId::Count,
         HomeIconId::Count, HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
+        HomeIconId::Count,
 #if CONFIG_IDF_TARGET_ESP32S31
         HomeIconId::Count, HomeIconId::Count,
 #endif
@@ -436,11 +435,15 @@ static HomeTile tile_at(int idx) {
 }
 
 static void draw_label_center(const char *label, int cx, int y, int max_w, uint16_t fg, uint16_t bg) {
-    std::string text = system_font::ellipsize(label, max_w);
-    M5.Display.setTextSize(1);
-    M5.Display.setTextDatum(textdatum_t::top_left);
-    M5.Display.setTextColor(fg, bg);
-    system_font::draw_center(M5.Display, text, cx, y, fg);
+    int size = system_font::pixel_size();
+    int width = system_font::measure(label);
+    if (width > max_w) {
+        const int line_height = system_font::line_height();
+        size = std::max(8, size * (max_w - 4) / width);
+        width = system_font::measure(label, size);
+        y += (line_height - system_font::line_height(size)) / 2;
+    }
+    system_font::draw_on_background(M5.Display, label, cx - width / 2, y, size, fg, bg);
 }
 
 static bool bitmap_bit(const uint8_t *data, int x, int y) {
@@ -497,7 +500,7 @@ static void draw_menu_tile(int index, bool show_frame) {
     M5.Display.fillRect(tile.x - 8, label_y - 2,
                         tile.size + 16, label_h, bg);
     draw_label_center(ui_locale::text(tile.item->text_id), tile.x + tile.size / 2,
-                      label_y, tile.size + 28, fg, bg);
+                      label_y, tile.size + 12, fg, bg);
 }
 
 static void draw_menu() {

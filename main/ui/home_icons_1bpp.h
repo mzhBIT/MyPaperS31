@@ -22,7 +22,6 @@ enum class HomeIconId {
     Map,
     Messages,
     Phone,
-    Stocks,
     Calculator,
     Emulator,
     Camera,

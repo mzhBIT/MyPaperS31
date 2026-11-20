@@ -15,6 +15,7 @@ RssCacheInfo rss_cache_info();
 bool clear_rss_cache(RssCacheInfo *removed = nullptr);
 
 void launch_rss_reader();
+void launch_bing_wallpaper();
 
 // Opens already-downloaded text in the same reflow reader used by RSS
 // articles. The source URL is retained as a fallback/reference only.

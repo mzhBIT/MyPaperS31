@@ -13,6 +13,7 @@
 #include <freertos/task.h>
 #include <atomic>
 #include <algorithm>
+#include <iterator>
 
 namespace mypaper::board::s31::keys {
 namespace {
@@ -24,6 +25,7 @@ QueueHandle_t queue = nullptr;
 TaskHandle_t task = nullptr;
 std::atomic<uint32_t> context{0};
 std::atomic<bool> pause_requested{false}, pause_ack{false};
+std::atomic<bool> physical_active{false};
 board_keys::Cover cover;
 bool cover_pending = false; // Main-thread producer/consumer only.
 
@@ -98,6 +100,8 @@ void scan(void*) {
                     ESP_LOGW(TAG, "key queue full; dropped %s", name(ids[i]));
             }
         }
+        physical_active.store(std::any_of(std::begin(buttons), std::end(buttons),
+            [](const auto& button) { return button.stable || button.candidate; }));
         vTaskDelay(pdMS_TO_TICKS(20));
     }
 }
@@ -152,6 +156,7 @@ bool cover_sample(bool pressed, int raw_x, int raw_y, uint32_t now) {
     return was_active || cover.active;
 }
 bool cover_active() { return cover.active; }
+bool input_active() { return physical_active.load() || (queue && uxQueueMessagesWaiting(queue) != 0); }
 
 bool pause_for_sleep() {
     cover.cancel();

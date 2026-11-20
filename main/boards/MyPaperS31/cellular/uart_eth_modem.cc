@@ -740,6 +740,7 @@ void UartEthModem::DeinitIotEth() {
                                               ip_event_handler_instance_);
         ip_event_handler_instance_ = nullptr;
     }
+    data_link_configured_.store(false);
     if (eth_handle_) {
         iot_eth_stop(eth_handle_);
     }
@@ -1910,8 +1911,36 @@ void UartEthModem::SetNetworkEvent(UartEthModemEvent event, const std::string& d
 
 bool UartEthModem::HasDataLink() const {
     esp_netif_ip_info_t ip{};
-    return registered_.load() && eth_netif_ && esp_netif_is_netif_up(eth_netif_) &&
-        esp_netif_get_ip_info(eth_netif_, &ip) == ESP_OK && ip.ip.addr != 0;
+    return data_link_configured_.load() && registered_.load() && eth_netif_ &&
+        esp_netif_is_netif_up(eth_netif_) && esp_netif_get_ip_info(eth_netif_, &ip) == ESP_OK && ip.ip.addr != 0;
+}
+
+void UartEthModem::ConfigureDns(const esp_netif_ip_info_t& ip) {
+    esp_netif_dns_info_t main{};
+    esp_netif_dns_info_t backup{};
+    esp_netif_dns_info_t fallback{};
+    esp_netif_get_dns_info(eth_netif_, ESP_NETIF_DNS_MAIN, &main);
+    esp_netif_get_dns_info(eth_netif_, ESP_NETIF_DNS_BACKUP, &backup);
+    const auto status = esp_netif_get_dns_info(eth_netif_, ESP_NETIF_DNS_FALLBACK, &fallback);
+    const uint32_t public_dns = ESP_IP4TOADDR(223, 5, 5, 5);
+    const auto ipv4 = [](const esp_netif_dns_info_t& dns) {
+        return dns.ip.type == ESP_IPADDR_TYPE_V4 ? dns.ip.u_addr.ip4.addr : uint32_t{0};
+    };
+    if (status == ESP_OK && ESP_IP_IS_ANY(fallback.ip) &&
+        ipv4(main) != public_dns && ipv4(backup) != public_dns) {
+        esp_netif_dns_info_t candidate{};
+        candidate.ip.type = ESP_IPADDR_TYPE_V4;
+        candidate.ip.u_addr.ip4.addr = public_dns;
+        const auto result = esp_netif_set_dns_info(eth_netif_, ESP_NETIF_DNS_FALLBACK, &candidate);
+        if (result == ESP_OK) fallback = candidate;
+        else ESP_LOGW(kTag, "NT26 DNS fallback setup failed: %s", esp_err_to_name(result));
+    }
+
+    const esp_ip4_addr_t main_ip{ipv4(main)};
+    const esp_ip4_addr_t backup_ip{ipv4(backup)};
+    const esp_ip4_addr_t fallback_ip{ipv4(fallback)};
+    ESP_LOGI(kTag, "NT26 IPv4=" IPSTR " gateway=" IPSTR " DNS main=" IPSTR " backup=" IPSTR " fallback=" IPSTR,
+             IP2STR(&ip.ip), IP2STR(&ip.gw), IP2STR(&main_ip), IP2STR(&backup_ip), IP2STR(&fallback_ip));
 }
 
 void UartEthModem::IpEventHandler(void* arg, esp_event_base_t event_base,
@@ -1927,7 +1956,9 @@ void UartEthModem::IpEventHandler(void* arg, esp_event_base_t event_base,
             self->SetNetworkEvent(UartEthModemEvent::ErrorInitFailed, "Default route failed");
             return;
         }
-        // Only a real DHCP address marks the data link ready, never CEREG.
+        self->ConfigureDns(event->ip_info);
+        // Publish the DHCP link only after its route and DNS are configured.
+        self->data_link_configured_.store(true);
         self->SetNetworkEvent(UartEthModemEvent::Connected);
         network_time_on_connected();
     }

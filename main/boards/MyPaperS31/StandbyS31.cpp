@@ -2,6 +2,7 @@
 #include "KeysS31.h"
 #include "Pins.h"
 #include "activities/ActivityManager.h"
+#include "audio/audio_radio.h"
 #include "frontlight/frontlight.h"
 #include "input/touch_input.h"
 #include "time/network_time.h"
@@ -17,6 +18,9 @@
 #include <esp_sleep.h>
 #include <esp_heap_caps.h>
 #include <esp_log.h>
+#include <esp_timer.h>
+#include <nvs.h>
+#include <algorithm>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <memory>
@@ -26,6 +30,18 @@
 namespace mypaper::board::s31::standby {
 namespace {
 constexpr const char* TAG = "S31_STANDBY";
+// The standby preferences share the namespace cleared by Restore Defaults.
+// Clearing only the wallpaper removes its path key and leaves this timeout intact.
+constexpr const char* NVS_NAMESPACE = "standby_bg";
+constexpr const char* NVS_AUTO_MINUTES = "auto_min";
+constexpr int64_t US_PER_MINUTE = 60 * 1000000LL;
+uint8_t idle_minutes = 0;
+int64_t last_activity_us = 0;
+
+bool valid_timeout(uint8_t minutes) {
+    return std::find(auto_standby_options.begin(), auto_standby_options.end(), minutes) !=
+           auto_standby_options.end();
+}
 bool pending = false;
 bool shutdown_requested = false;
 uint32_t requested_at = 0, generation = 0;
@@ -128,6 +144,37 @@ esp_err_t sleep_until_power() {
 }
 }
 
+void init() {
+    nvs_handle_t handle;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &handle) == ESP_OK) {
+        uint8_t minutes = 0;
+        if (nvs_get_u8(handle, NVS_AUTO_MINUTES, &minutes) == ESP_OK && valid_timeout(minutes))
+            idle_minutes = minutes;
+        nvs_close(handle);
+    }
+    note_user_activity();
+}
+
+uint8_t auto_standby_minutes() { return idle_minutes; }
+
+esp_err_t set_auto_standby_minutes(uint8_t minutes) {
+    if (!valid_timeout(minutes)) return ESP_ERR_INVALID_ARG;
+    if (minutes == idle_minutes) return ESP_OK;
+    nvs_handle_t handle;
+    esp_err_t result = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &handle);
+    if (result != ESP_OK) return result;
+    result = nvs_set_u8(handle, NVS_AUTO_MINUTES, minutes);
+    if (result == ESP_OK) result = nvs_commit(handle);
+    nvs_close(handle);
+    if (result == ESP_OK) {
+        idle_minutes = minutes;
+        note_user_activity();
+    }
+    return result;
+}
+
+void note_user_activity() { last_activity_us = esp_timer_get_time(); }
+
 void request() {
     if (shutdown_requested) return;
     if (pending) { pending = false; ESP_LOGI(TAG, "pending standby cancelled"); return; }
@@ -143,9 +190,17 @@ void request_shutdown() {
     ESP_LOGW(TAG, "shutdown requested; waiting for safe I/O boundary");
 }
 bool service() {
-    if (!pending) return false;
+    const bool automatic = !pending;
+    if (automatic) {
+        if (idle_minutes == 0) return false;
+        if (keys::input_active() || audio_radio_get_state() == AUDIO_PLAYBACK_PLAYING) {
+            note_user_activity();
+            return false;
+        }
+        if (esp_timer_get_time() - last_activity_us < idle_minutes * US_PER_MINUTE) return false;
+    }
     auto& manager = ActivityManager::instance();
-    if (manager.generation() != generation || uint32_t(lgfx::millis()-requested_at) > 15000) {
+    if (!automatic && (manager.generation() != generation || uint32_t(lgfx::millis()-requested_at) > 15000)) {
         pending = false;
         shutdown_requested = false;
         ESP_LOGW(TAG, "power action cancelled: activity changed or background remained busy");
@@ -163,6 +218,7 @@ bool service() {
     struct TimeResume { ~TimeResume() { network_time_resume(); } } time_resume;
     const bool shutting_down = shutdown_requested;
     pending = shutdown_requested = false;
+    if (automatic) ESP_LOGI(TAG, "automatic standby after %u idle minutes", unsigned(idle_minutes));
     if (!activity->prepare_standby()) {
         ESP_LOGW(TAG, "power action cancelled: application I/O could not be stopped safely");
         return true; // Keep Wi-Fi/netif alive for the unfinished application.

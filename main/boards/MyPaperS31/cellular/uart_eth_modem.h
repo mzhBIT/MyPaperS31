@@ -339,6 +339,8 @@ private:
     // Resource cleanup
     void CleanupResources(bool cleanup_iot_eth = true);
 
+    void ConfigureDns(const esp_netif_ip_info_t& ip);
+
     // IP event handler
     static void IpEventHandler(void* arg, esp_event_base_t event_base,
                                int32_t event_id, void* event_data);
@@ -351,6 +353,7 @@ private:
 
     // Network initialization flag (atomic for thread safety)
     std::atomic<bool> initialized_{false};
+    std::atomic<bool> data_link_configured_{false};
 
     // Network event (atomic for thread safety)
     std::atomic<UartEthModemEvent> network_event_{UartEthModemEvent::Disconnected};

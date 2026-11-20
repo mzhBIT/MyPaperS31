@@ -9,12 +9,8 @@
 #include <esp_log.h>
 
 #include <algorithm>
-#include <cerrno>
 #include <cstring>
 #include <string_view>
-
-#include <lwip/inet.h>
-#include <lwip/netdb.h>
 
 namespace weread {
 namespace {
@@ -53,42 +49,6 @@ std::string trim_copy(std::string value)
     while (!value.empty() && (value.front() == ' ' || value.front() == '\t')) value.erase(value.begin());
     while (!value.empty() && (value.back() == ' ' || value.back() == '\t' || value.back() == '\r')) value.pop_back();
     return value;
-}
-
-std::string url_host(const std::string &url)
-{
-    const size_t scheme = url.find("://");
-    const size_t begin = scheme == std::string::npos ? 0 : scheme + 3;
-    const size_t end = url.find_first_of("/:?#", begin);
-    return url.substr(begin, end == std::string::npos ? std::string::npos : end - begin);
-}
-
-void log_cellular_endpoint(const std::string &url, int socket_errno)
-{
-    const std::string host = url_host(url);
-    if (host.empty()) return;
-    addrinfo hints = {};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    addrinfo *addresses = nullptr;
-    const int dns_result = getaddrinfo(host.c_str(), "443", &hints, &addresses);
-    if (dns_result != 0 || addresses == nullptr) {
-        ESP_LOGW(TAG, "4G endpoint host=%s errno=%d dns=%d", host.c_str(), socket_errno,
-                 dns_result);
-        if (addresses) freeaddrinfo(addresses);
-        return;
-    }
-    unsigned index = 0;
-    for (addrinfo *item = addresses; item != nullptr && index < 4; item = item->ai_next) {
-        if (item->ai_family != AF_INET || item->ai_addr == nullptr) continue;
-        char address[INET_ADDRSTRLEN] = {};
-        const auto *ipv4 = reinterpret_cast<const sockaddr_in *>(item->ai_addr);
-        if (inet_ntop(AF_INET, &ipv4->sin_addr, address, sizeof(address))) {
-            ESP_LOGW(TAG, "4G endpoint host=%s ipv4[%u]=%s errno=%d",
-                     host.c_str(), index++, address, socket_errno);
-        }
-    }
-    freeaddrinfo(addresses);
 }
 
 }  // namespace
@@ -394,11 +354,13 @@ HttpResponse HttpClient::perform_once(const char *method, const std::string &url
     const esp_err_t result = esp_http_client_perform(_client);
     if (result != ESP_OK) {
         const int socket_errno = esp_http_client_get_errno(_client);
+        int tls_code = 0;
+        // Read the saved failure from this request without making another DNS query.
+        const esp_err_t tls_error = esp_http_client_get_and_clear_last_tls_error(_client, &tls_code, nullptr);
         response.error = esp_err_to_name(result);
-        ESP_LOGW(TAG, "%s request failed transport=%s url=%s error=%s errno=%d",
+        ESP_LOGW(TAG, "%s request failed transport=%s url=%s error=%s errno=%d tls=%s tls_code=%d",
                  method, cellular ? "4G/fresh" : "Wi-Fi/reuse", url.c_str(),
-                 response.error.c_str(), socket_errno);
-        if (cellular) log_cellular_endpoint(url, socket_errno);
+                 response.error.c_str(), socket_errno, esp_err_to_name(tls_error), tls_code);
         if (cellular) close();
         return response;
     }

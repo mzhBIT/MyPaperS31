@@ -96,7 +96,8 @@ static const int PAD = 12;
 static const int MAX_FEED_BYTES = 256 * 1024;
 static const int MAX_IMAGE_BYTES = 2 * 1024 * 1024;
 static const int MAX_RSS_IMAGES_PER_ITEM = 6;
-static const char *RSS_IMAGE_SAVE_DIR = "/sdcard/images";
+static const char *WALLPAPER_SAVE_DIR = "/sdcard/images";
+static constexpr const char *BING_RSS_URL = "https://rsshub.app/bing";
 
 struct RssImageRef {
     std::string url;
@@ -967,8 +968,8 @@ static std::string json_string_value_utf8(const std::string &obj, const char *ke
     if (p == std::string::npos) return std::string();
     p = obj.find(':', p + needle.size());
     if (p == std::string::npos) return std::string();
-    p = obj.find('"', p + 1);
-    if (p == std::string::npos) return std::string();
+    p = obj.find_first_not_of(" \t\r\n", p + 1);
+    if (p == std::string::npos || obj[p] != '"') return std::string();
     std::string out;
     for (++p; p < obj.size(); ++p) {
         char c = obj[p];
@@ -1065,9 +1066,10 @@ static bool parse_bing_wallpaper_items(const std::string &json, std::vector<RssI
         std::string date = json_string_value_utf8(obj, "startdate");
         if (!full_url.empty()) {
             RssItem item;
-        item.title = title.empty() ? ui_locale::text(ui_locale::TextId::FeedBingWallpaper) : title;
+            item.title = title.empty() ? ui_locale::text(ui_locale::TextId::BingWallpaper) : title;
             item.date = bing_date_text(date);
-            item.text = copyright.empty() ? item.title : copyright;
+            item.text = trim_copy(json_string_value_utf8(obj, "description"));
+            if (item.text.empty()) item.text = copyright.empty() ? item.title : copyright;
             item.link = json_string_value_utf8(obj, "copyrightlink");
             item.image_url = full_url;
             item.images.push_back({full_url, "", 1280, 720});
@@ -1092,20 +1094,24 @@ static void load_feeds()
         g_feeds.push_back({ui_locale::text(ui_locale::TextId::FeedZaobaoWorld), "https://plink.anyfeeder.com/zaobao/realtime/world"});
         g_feeds.push_back({ui_locale::text(ui_locale::TextId::FeedThePaper), "https://plink.anyfeeder.com/thepaper"});
         g_feeds.push_back({ui_locale::text(ui_locale::TextId::FeedFortuneChina), "https://plink.anyfeeder.com/fortunechina"});
-        g_feeds.push_back({ui_locale::text(ui_locale::TextId::FeedBingWallpaper), "https://rsshub.app/bing"});
         g_feeds.push_back({ui_locale::text(ui_locale::TextId::FeedWallstreetcn), "https://feed.wallstreetcn.com/wallstreetcn/news/global"});
+    } else {
+        // Older saved lists may contain the former built-in wallpaper entry.
+        g_feeds.erase(std::remove_if(g_feeds.begin(), g_feeds.end(),
+            [](const RssFeed &feed) { return feed.url == BING_RSS_URL; }), g_feeds.end());
     }
 }
 
 class RssReaderActivity : public Activity {
 public:
-    explicit RssReaderActivity(bool external_article = false)
-        : _external_article(external_article) {}
+    enum class Entry { Feeds, ExternalArticle, BingWallpaper };
+
+    explicit RssReaderActivity(Entry entry = Entry::Feeds) : _entry(entry) {}
 
     ~RssReaderActivity() override
     {
         stop_article_image_loader();
-        reader_text_renderer().releaseFontStreamCache();
+        if (!bing_wallpaper_mode()) reader_text_renderer().releaseFontStreamCache();
         if (_image_result_queue) {
             vQueueDelete(_image_result_queue);
             _image_result_queue = nullptr;
@@ -1115,15 +1121,17 @@ public:
 
     void on_create() override
     {
-        _reader_overlay.set_profile(ReaderProfile::Rss);
-        // Snapshot all preferences together on the first RSS visit.
-        reader_style_get(ReaderProfile::Rss);
-        reader_font_path(ReaderProfile::Rss);
-        reader_background_enabled(ReaderProfile::Rss);
-        reader_book_cover_enabled(ReaderProfile::Rss);
-        _reader_overlay.set_chapters_enabled(false);
+        if (!bing_wallpaper_mode()) {
+            _reader_overlay.set_profile(ReaderProfile::Rss);
+            // Snapshot all preferences together on the first RSS visit.
+            reader_style_get(ReaderProfile::Rss);
+            reader_font_path(ReaderProfile::Rss);
+            reader_background_enabled(ReaderProfile::Rss);
+            reader_book_cover_enabled(ReaderProfile::Rss);
+            _reader_overlay.set_chapters_enabled(false);
+        }
         _image_result_queue = xQueueCreate(1, sizeof(ArticleImageLoadResult *));
-        if (_external_article) {
+        if (_entry == Entry::ExternalArticle) {
             g_items.clear();
             g_items.push_back(g_external_article);
             g_focus = 0;
@@ -1133,8 +1141,10 @@ public:
             return;
         }
         g_status.clear(); // Do not retain an old connection error after changing uplinks.
-        load_feeds();
-        if (!wifi_setting_is_connected()) draw_status("RSS", network_hint(false));
+        if (bing_wallpaper_mode()) _view = View::Items;
+        else load_feeds();
+        if (!wifi_setting_is_connected())
+            draw_status(bing_wallpaper_mode() ? status_title() : "RSS", network_hint(false));
         // Do not start a Wi-Fi/RNDIS handshake while the EPD high-voltage rails
         // are powering up.  On the cellular module this overlap can produce a
         // supply-current peak large enough to reboot it into the 2ECC:3004 ROM
@@ -1142,8 +1152,8 @@ public:
         M5.Display.waitDisplay();
         _network_ok = connect_network();
         if (!_network_ok) g_status = network_hint(true);
-        _view = View::Feeds;
-        draw_feeds();
+        if (bing_wallpaper_mode()) load_items(BING_RSS_URL);
+        else draw_feeds();
     }
 
     void on_show() override
@@ -1155,8 +1165,10 @@ public:
             return;
         }
         if (_view == View::Article) {
-            rebuild_article_lines(false);
-            _reader_overlay.clear_settings_dirty();
+            if (!bing_wallpaper_mode()) {
+                rebuild_article_lines(false);
+                _reader_overlay.clear_settings_dirty();
+            }
             draw_article();
         } else {
             redraw_list();
@@ -1170,14 +1182,16 @@ public:
             edit_feed(FeedEdit::AddUrl);
             return;
         }
-        poll_article_image_loader();
-        run_article_prefetch();
-        const bool allowed = _view == View::Article && !_reader_overlay.visible() &&
-            !_confirm_wallpaper_save && !_image_load_busy && !M5.Display.displayBusy() &&
-            g_page + 1 < article_page_count() &&
-            (!_article_frame.buffer || _article_frame.ready);
-        if (_auto_page.due(esp_timer_get_time(), reader_auto_page_seconds(ReaderProfile::Rss), allowed)) {
-            next_article_page();
+        if (poll_article_image_loader()) return;
+        if (!bing_wallpaper_mode()) {
+            run_article_prefetch();
+            const bool allowed = _view == View::Article && !_reader_overlay.visible() &&
+                !_image_load_busy && !M5.Display.displayBusy() &&
+                g_page + 1 < article_page_count() &&
+                (!_article_frame.buffer || _article_frame.ready);
+            if (_auto_page.due(esp_timer_get_time(), reader_auto_page_seconds(ReaderProfile::Rss), allowed)) {
+                next_article_page();
+            }
         }
         if ((_view != View::Article || article_header_visible() || _reader_overlay.visible()) &&
             !_confirm_wallpaper_save && _feed_menu==FeedMenu::None)
@@ -1204,7 +1218,7 @@ public:
         if (_view==View::Feeds && key==APP_KEY_EXTRA) { edit_feed(FeedEdit::AddName); return true; }
         if (_view == View::Article) return article_key(key);
         if (key == APP_KEY_BACK) {
-            if (_view == View::Items) {
+            if (_view == View::Items && !bing_wallpaper_mode()) {
                 _view = View::Feeds;
                 g_focus = _feed_focus;
                 g_scroll = _feed_scroll;
@@ -1346,10 +1360,10 @@ private:
     bool _pending_feed_url=false;
     app_status_bar::State _status_bar;
     const char* status_title()const {
+        if (bing_wallpaper_mode()) return ui_locale::text(ui_locale::TextId::BingWallpaper);
         if (_view==View::Feeds) return ui_locale::text(ui_locale::TextId::RssFeeds);
         if (!_current_feed_title.empty()) return _current_feed_title.c_str();
-        return ui_locale::text(
-            _current_feed_is_bing ? ui_locale::TextId::FeedBingWallpaper : ui_locale::TextId::RssNews);
+        return ui_locale::text(ui_locale::TextId::RssNews);
     }
 
     app_status_bar_layout::Rect feed_add_rect()const {
@@ -1385,6 +1399,7 @@ private:
             if(name && !rss_feeds::valid_name(value))return ui_locale::text(ui_locale::TextId::FeedNameInvalid);
             if(!name) {
                 if(!rss_feeds::valid_url(value))return ui_locale::text(ui_locale::TextId::FeedAddressInvalid);
+                if (value == BING_RSS_URL) return ui_locale::text(ui_locale::TextId::BingWallpaperHomeHint);
                 if(rss_feeds::duplicate_url(g_feeds,value,adding ? -1 : _editing_feed))
                     return ui_locale::text(ui_locale::TextId::FeedAddressDuplicate);
             }
@@ -1481,9 +1496,8 @@ private:
 
     View _view = View::Feeds;
     bool _seen_show = false;
-    bool _external_article = false;
+    const Entry _entry;
     bool _network_ok = false;
-    bool _current_feed_is_bing = false;
     std::string _current_feed_title;
     bool _confirm_wallpaper_save = false;
     int _wallpaper_save_choice = 0;
@@ -1526,7 +1540,7 @@ private:
     void run_article_prefetch() {
 #if MYPAPER_EPD_USE_2D_ENGINE
         if (_view != View::Article || _reader_overlay.visible() || _image_load_busy ||
-            M5.Display.displayBusy() || !rss_cache_enabled() || bing_wallpaper_mode()) return;
+            M5.Display.displayBusy() || !rss_cache_enabled()) return;
         const int next = g_page + 1;
         if (next >= (int)g_article_pages.size()) return;
         if (_article_frame_origin != g_page) {
@@ -2028,6 +2042,10 @@ private:
                      (unsigned)_pending_image_refs.size());
             delete job;
             _image_load_task = nullptr;
+            if (bing_wallpaper_mode() && _view == View::Article) {
+                _pending_image_refs.clear();
+                draw_article();
+            }
             return;
         }
         _image_load_busy = true;
@@ -2048,11 +2066,12 @@ private:
         return false;
     }
 
-    void poll_article_image_loader()
+    // Returns true when the activity was closed while completing a download.
+    bool poll_article_image_loader()
     {
-        if (!_image_load_busy || !_image_result_queue) return;
+        if (!_image_load_busy || !_image_result_queue) return false;
         ArticleImageLoadResult *raw = nullptr;
-        if (xQueueReceive(_image_result_queue, &raw, 0) != pdTRUE) return;
+        if (xQueueReceive(_image_result_queue, &raw, 0) != pdTRUE) return false;
 
         std::unique_ptr<ArticleImageLoadResult> result(raw);
         _image_load_busy = false;
@@ -2062,7 +2081,7 @@ private:
         if (_exit_when_image_load_done) {
             _exit_when_image_load_done = false;
             ActivityManager::instance().pop();
-            return;
+            return true;
         }
 
         if (result && result->generation == _article_generation) {
@@ -2082,7 +2101,7 @@ private:
                 }
             }
             _pending_image_refs.clear();
-            if (layout_changed) rebuild_article_lines(false);
+            if (layout_changed && !bing_wallpaper_mode()) rebuild_article_lines(false);
             ESP_LOGI(TAG,
                      "image task complete generation=%lu loaded=%u layout_changed=%d current_page=%d",
                      (unsigned long)result->generation,
@@ -2099,9 +2118,10 @@ private:
                      (unsigned long)_article_generation);
         }
 
-        // A fast Bing/article switch may have replaced the pending generation
-        // while the previous task was finishing.
+        // A fast wallpaper/article switch may have replaced the pending
+        // generation while the previous task was finishing.
         start_article_image_loader();
+        return false;
     }
 
     void stop_article_image_loader()
@@ -2136,7 +2156,7 @@ private:
 
     bool article_header_visible() const
     {
-        return reader_style_get(ReaderProfile::Rss).hide_header == 0;
+        return bing_wallpaper_mode() || reader_style_get(ReaderProfile::Rss).hide_header == 0;
     }
 
     int article_header_height() const
@@ -2200,36 +2220,36 @@ private:
         return pos + n;
     }
 
-    static std::string normalize_title_text(const std::string &title)
+    static std::string normalize_line_text(const std::string &text)
     {
         std::string out;
-        out.reserve(title.size());
+        out.reserve(text.size());
         bool pending_space = false;
-        for (size_t i = 0; i < title.size();) {
-            unsigned char c = (unsigned char)title[i];
+        for (size_t i = 0; i < text.size();) {
+            unsigned char c = (unsigned char)text[i];
             if (std::isspace(c)) {
                 pending_space = !out.empty();
-                while (i < title.size() && std::isspace((unsigned char)title[i])) i++;
+                while (i < text.size() && std::isspace((unsigned char)text[i])) i++;
                 continue;
             }
             if (pending_space) {
                 out.push_back(' ');
                 pending_space = false;
             }
-            size_t next = utf8_advance(title, i);
-            out.append(title, i, next - i);
+            size_t next = utf8_advance(text, i);
+            out.append(text, i, next - i);
             i = next;
         }
         return trim_copy(out);
     }
 
-    static std::vector<std::string> split_title_lines(const std::string &title, int max_width)
+    static std::vector<std::string> wrap_text_lines(const std::string &text, int max_width, int max_lines)
     {
         std::vector<std::string> lines;
-        std::string clean = normalize_title_text(title);
+        std::string clean = normalize_line_text(text);
         size_t pos = 0;
 
-        for (int line = 0; line < 3 && pos < clean.size(); ++line) {
+        for (int line = 0; line < max_lines && pos < clean.size(); ++line) {
             size_t start = pos;
             size_t last_fit = pos;
             int width = 0;
@@ -2251,7 +2271,8 @@ private:
             pos = last_fit;
             while (!part.empty() && part.back() == ' ') part.pop_back();
             while (pos < clean.size() && clean[pos] == ' ') pos++;
-            if (line == 2 && pos < clean.size()) part += "...";
+            if (line + 1 == max_lines && pos < clean.size())
+                part = system_font::ellipsize(clean.substr(start), max_width);
             lines.push_back(part);
         }
         return lines;
@@ -2339,14 +2360,11 @@ private:
             M5.Display.drawFastHLine(PAD, y + rh - 2, w - PAD * 2, TFT_BLACK);
             M5.Display.setTextColor(TFT_BLACK, TFT_WHITE);
             std::string label = row_label(idx);
-            std::string date;
-            if (_view == View::Items && idx >= 0 && idx < (int)g_items.size()) {
-                date = compact_date(g_items[idx].date);
-            }
             if (_view == View::Items) {
+                const std::string date = bing_wallpaper_mode() ? std::string{} : compact_date(g_items[idx].date);
                 int title_right = date.empty() ? (w - PAD - 14) : (w - PAD - 120);
                 int title_max_w = std::max(80, title_right - (PAD + 12));
-                auto lines = split_title_lines(label, title_max_w);
+                auto lines = wrap_text_lines(label, title_max_w, 3);
                 for (int li = 0; li < (int)lines.size(); ++li) {
                     system_font::draw_left(M5.Display, lines[li], PAD + 12, y + 8 + li * 42);
                 }
@@ -2390,35 +2408,38 @@ private:
             redraw_list();
             return;
         }
-        RssFeed feed = g_feeds[g_focus];
-        _current_feed_is_bing = feed.url == "https://rsshub.app/bing";
+        const auto &feed = g_feeds[g_focus];
         _current_feed_title = feed.title;
         _view = View::Items;
-        draw_status(feed.title.c_str(), ui_locale::text(ui_locale::TextId::Fetching));
+        load_items(feed.url);
+    }
+
+    void load_items(const std::string &url)
+    {
+        g_items.clear();
+        g_focus = 0;
+        g_scroll = 0;
+        if (!_network_ok) {
+            redraw_list();
+            return;
+        }
+        draw_status(status_title(), ui_locale::text(ui_locale::TextId::Fetching));
         // The status frame must be physically complete before DNS/HTTP starts.
         // RNDIS data activity and an EPD full refresh otherwise overlap on the
         // board supply and have been observed to reset the ML307A.
         M5.Display.waitDisplay();
-        std::string xml;
-        g_items.clear();
+        std::string response;
         bool ok = false;
-        if (feed.url == "https://rsshub.app/bing") {
-            ok = fetch_url("https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=8&mkt=zh-CN", &xml) &&
-                 parse_bing_wallpaper_items(xml, &g_items);
-            if (!ok) {
-                xml.clear();
-                ok = fetch_url(feed.url, &xml) && parse_rss_items(xml, &g_items);
-            }
-        } else {
-            ok = fetch_url(feed.url, &xml) && parse_rss_items(xml, &g_items);
+        if (bing_wallpaper_mode()) {
+            ok = fetch_url("https://www.bing.com/HPImageArchive.aspx?format=js&idx=0&n=8&mkt=zh-CN", &response) &&
+                 parse_bing_wallpaper_items(response, &g_items);
         }
+        if (!ok) ok = fetch_url(url, &response) && parse_rss_items(response, &g_items);
         if (!ok) {
             g_status = ui_locale::text(ui_locale::TextId::FetchParseFailed);
         } else {
             g_status.clear();
         }
-        g_focus = 0;
-        g_scroll = 0;
         redraw_list();
     }
 
@@ -2427,13 +2448,13 @@ private:
         if (g_focus < 0 || g_focus >= (int)g_items.size()) return;
         if (_image_load_busy) _cancel_image_load = true;
         ++_article_generation;
-        if (reader_style_get(ReaderProfile::Rss).show_images) {
+        if (bing_wallpaper_mode() || reader_style_get(ReaderProfile::Rss).show_images) {
             prepare_article_image_placeholders(g_items[g_focus]);
         } else {
             clear_article_images();
             _pending_image_refs.clear();
         }
-        rebuild_article_lines(true);
+        if (!bing_wallpaper_mode()) rebuild_article_lines(true);
         _view = View::Article;
         draw_article();
         // Avoid overlapping TLS/SD traffic with the EPD power-on and scan.
@@ -2603,14 +2624,18 @@ private:
 
     bool bing_wallpaper_mode() const
     {
-        return _current_feed_is_bing && reader_style_get(ReaderProfile::Rss).show_images && !g_article_images.empty();
+        return _entry == Entry::BingWallpaper;
     }
 
-    bool draw_bing_wallpaper()
+    void draw_bing_wallpaper()
     {
-        if (!bing_wallpaper_mode()) return false;
-        const ArticleImage &image = g_article_images[0];
-        if (image.path.empty() || image.width <= 0 || image.height <= 0) return false;
+        if (g_article_images.empty() || g_article_images.front().path.empty()) {
+            const bool fetching = _image_result_queue && !_pending_image_refs.empty();
+            draw_status(g_items[g_focus].title.c_str(), ui_locale::text(fetching
+                ? ui_locale::TextId::Fetching : ui_locale::TextId::FetchParseFailed));
+            return;
+        }
+        const ArticleImage &image = g_article_images.front();
 
         M5.Display.startWrite();
         M5.Display.setEpdMode(epd_mode_t::epd_quality);
@@ -2618,17 +2643,21 @@ private:
 
         int screen_w = M5.Display.width();
         int screen_h = M5.Display.height();
-        // Match the file-manager image viewer: fit the complete wallpaper
-        // inside the current logical screen instead of filling and cropping.
-        const int top=article_header_height();
-        const int content_h=std::max(1,screen_h-top);
+        const int content_h = std::max(1, screen_h - ARTICLE_TOP_H);
+        const int line_h = std::max(1, system_font::line_height());
+        constexpr int caption_gap = 24;
+        const int max_caption_lines = std::max(0, (content_h / 2 - caption_gap) / line_h);
+        const auto caption = wrap_text_lines(g_items[g_focus].text, screen_w - 4 * PAD, max_caption_lines);
+        const int caption_h = caption.empty() ? 0 : caption_gap + static_cast<int>(caption.size()) * line_h;
+        const int image_h = content_h - caption_h;
+        // Fit the full image and center it together with the caption.
         float scale = std::min((float)screen_w / (float)image.width,
-                               (float)content_h / (float)image.height);
+                               (float)image_h / (float)image.height);
         if (scale <= 0.0f) scale = 1.0f;
         int draw_w = std::max(1, (int)((float)image.width * scale + 0.5f));
         int draw_h = std::max(1, (int)((float)image.height * scale + 0.5f));
         int x = std::max(0, (screen_w - draw_w) / 2);
-        int y = top+std::max(0, (content_h - draw_h) / 2);
+        int y = ARTICLE_TOP_H + std::max(0, (image_h - draw_h) / 2);
 
         bool ok = draw_article_image_file(M5.Display, image, x, y,
                                           draw_w, draw_h, scale);
@@ -2642,12 +2671,17 @@ private:
                                      ui_locale::text(ui_locale::TextId::ImageDecodeFailed),
                                      screen_w / 2,
                                      screen_h / 2 - 18);
+        } else {
+            int caption_y = y + draw_h + caption_gap;
+            for (const auto &line : caption) {
+                system_font::draw_center(M5.Display, line, screen_w / 2, caption_y, TFT_BLACK);
+                caption_y += line_h;
+            }
         }
-        if (article_header_visible() || _reader_overlay.visible()) draw_topbar(status_title());
+        draw_topbar(status_title());
         if (_confirm_wallpaper_save) draw_wallpaper_save_dialog();
         M5.Display.display();
         M5.Display.endWrite();
-        return true;
     }
 
     void draw_wallpaper_save_dialog()
@@ -2705,7 +2739,7 @@ private:
 
     void begin_wallpaper_save()
     {
-        if (!bing_wallpaper_mode()) return;
+        if (g_article_images.empty() || g_article_images.front().path.empty()) return;
         _confirm_wallpaper_save = true;
         _wallpaper_save_choice = 0;
         draw_article();
@@ -2727,7 +2761,7 @@ private:
 
     void switch_bing_wallpaper(int delta)
     {
-        if (!_current_feed_is_bing || g_items.empty() || delta == 0) return;
+        if (g_items.empty() || delta == 0) return;
         int count = (int)g_items.size();
         g_focus = (g_focus + (delta > 0 ? 1 : count - 1)) % count;
         ensure_focus_visible();
@@ -2751,7 +2785,7 @@ private:
         char hash[16];
         std::snprintf(hash, sizeof(hash), "%08lx", (unsigned long)hash32_string(image.url));
         std::string ext = image.ext.empty() ? ".jpg" : image.ext;
-        return std::string(RSS_IMAGE_SAVE_DIR) + "/bing_" + stamp + "_" + hash + ext;
+        return std::string(WALLPAPER_SAVE_DIR) + "/bing_" + stamp + "_" + hash + ext;
     }
 
     bool copy_file(const std::string &src, const std::string &dst)
@@ -2785,13 +2819,13 @@ private:
 
     void save_bing_wallpaper()
     {
-        if (!bing_wallpaper_mode()) return;
-        const ArticleImage &image = g_article_images[0];
-        mkdir(RSS_IMAGE_SAVE_DIR, 0775);
+        if (g_article_images.empty() || g_article_images.front().path.empty()) return;
+        const ArticleImage &image = g_article_images.front();
+        mkdir(WALLPAPER_SAVE_DIR, 0775);
         std::string dst = bing_wallpaper_save_path(image);
         bool ok = copy_file(image.path, dst);
         ESP_LOGI(TAG, "save bing wallpaper src=%s dst=%s ok=%d", image.path.c_str(), dst.c_str(), ok ? 1 : 0);
-        draw_status("Bing Wallpaper", ui_locale::text(ok ? ui_locale::TextId::WallpaperSaved
+        draw_status(status_title(), ui_locale::text(ok ? ui_locale::TextId::WallpaperSaved
                                                           : ui_locale::TextId::WallpaperSaveFailed));
         vTaskDelay(pdMS_TO_TICKS(900));
         draw_article();
@@ -2971,9 +3005,8 @@ private:
     void draw_article(int direction = 0)
     {
         M5.Display.waitDisplay();
-        if (draw_bing_wallpaper()) {
-            _non_quality_refresh_count = 0;
-            _post_image_quality_pending = false;
+        if (bing_wallpaper_mode()) {
+            draw_bing_wallpaper();
             return;
         }
         epd_mode_t mode = select_article_refresh_mode();
@@ -3044,7 +3077,7 @@ private:
             return true;
         }
         if (key == APP_KEY_BACK) {
-            if (_external_article) {
+            if (_entry == Entry::ExternalArticle) {
                 ActivityManager::instance().pop();
                 return true;
             }
@@ -3088,6 +3121,12 @@ void launch_rss_reader()
     ActivityManager::instance().push(new RssReaderActivity());
 }
 
+void launch_bing_wallpaper()
+{
+    if (!ensure_wifi_configured_or_show_guide()) return;
+    ActivityManager::instance().push(new RssReaderActivity(RssReaderActivity::Entry::BingWallpaper));
+}
+
 void launch_rss_article(const std::string &title,
                         const std::string &text,
                         const std::string &source_url)
@@ -3097,5 +3136,5 @@ void launch_rss_article(const std::string &title,
     g_external_article.title = title;
     g_external_article.text = text;
     g_external_article.link = source_url;
-    ActivityManager::instance().push(new RssReaderActivity(true));
+    ActivityManager::instance().push(new RssReaderActivity(RssReaderActivity::Entry::ExternalArticle));
 }

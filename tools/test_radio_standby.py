@@ -37,15 +37,16 @@ program = r'''
 #include <vector>
 using esp_err_t=int;
 constexpr int ESP_OK=0, ESP_FAIL=-1, portMAX_DELAY=-1;
-constexpr int AUDIO_PLAYBACK_STOPPED=1, AUDIO_PLAYBACK_ERROR=5;
+constexpr int AUDIO_PLAYBACK_STOPPED=1, AUDIO_PLAYBACK_PLAYING=2, AUDIO_PLAYBACK_ERROR=5;
 constexpr int CONFIG_WIFI_SETTING_CONNECT_TIMEOUT_MS=30000;
 std::vector<std::string> events;
 bool http_alive=true, wifi_alive=true, pa_on=true, join_ok=true, keys_ok=true;
-bool touch_ok=true;
+bool touch_ok=true, input_active=false;
 unsigned touch_pauses=0,touch_resumes=0,key_resumes=0;
 int wifi_stops=0, enters=0, sink_closes=0, connect_result=ESP_OK;
 std::atomic<bool> s_initialized{true};
 std::atomic<int> s_state{2};
+int audio_radio_get_state(){return s_state.load();}
 int s_lock=1;
 void ensure_sync(){}
 void xSemaphoreTake(int,int){}
@@ -83,6 +84,7 @@ bool network_time_try_pause(){return true;}
 void network_time_resume(){}
 namespace weread { std::mutex mutex;std::mutex& reading_transaction_mutex(){return mutex;} }
 namespace keys {
+bool input_active(){return ::input_active;}
 bool pause_for_sleep(){return keys_ok;}
 void resume_after_sleep(){++key_resumes;}
 }
@@ -97,10 +99,15 @@ int wifi_setting_deinit(bool){
 }
 bool pending=true,shutdown_requested=false;
 unsigned requested_at=1000,generation=0;
+constexpr int64_t US_PER_MINUTE=60000000;
+int64_t time_us=0,last_activity_us=0;
+uint8_t idle_minutes=0;
+int64_t esp_timer_get_time(){return time_us;}
 '''
 standby = (root / 'main/boards/MyPaperS31/StandbyS31.cpp').read_text(encoding='utf-8')
 start = standby.index('bool service() {')
 end = standby.index('    using Buffer', start)
+program += function('main/boards/MyPaperS31/StandbyS31.cpp', 'void note_user_activity()')
 program += standby[start:end]
 program += '\n    return ret==ESP_OK;\n}\n'
 program += r'''
@@ -152,8 +159,23 @@ int main(){
     events.clear();connect_result=ESP_FAIL;wifi_alive=false;
     radio_play_worker(new RadioPlayJob{nullptr,4,10,"http://station"});
     assert((events==std::vector<std::string>{"connect"}) && last_result.result==ESP_FAIL);
+    reset();pending=false;time_us=US_PER_MINUTE*2;
+    assert(!service() && events.empty()); // Disabled, even after a long idle period.
+    idle_minutes=1;note_user_activity();
+    time_us+=US_PER_MINUTE-1;
+    assert(!service() && events.empty());
+    ++time_us;input_active=true;
+    assert(!service() && last_activity_us==time_us); // Input at the deadline defers sleep.
+    input_active=false;time_us+=US_PER_MINUTE;
+    s_state=AUDIO_PLAYBACK_PLAYING;
+    assert(!service() && last_activity_us==time_us); // Active playback keeps the device awake.
+    s_state=AUDIO_PLAYBACK_STOPPED;time_us+=US_PER_MINUTE;
+    page->_play_task=reinterpret_cast<void*>(1);
+    assert(!service() && events.empty()); // An expired timer waits for the I/O barrier.
+    page->_play_task=nullptr;
+    assert(service() && wifi_stops==1);
     am.pop();
-    puts("Radio standby: mute/join/sink/netif order, standby/shutdown, failure veto, startup deferral, wake reconnect PASS");
+    puts("Radio standby: mute/join/sink/netif order, standby/shutdown, failure veto, startup deferral, wake reconnect, automatic timeout PASS");
 }
 '''
 (out / 'test.cpp').write_text(program, encoding='utf-8')

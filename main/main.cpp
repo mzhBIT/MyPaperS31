@@ -178,6 +178,7 @@ extern "C" void app_main(void)
 #if CONFIG_IDF_TARGET_ESP32S31
     mypaper::board::s31::keys::sync_context(ActivityManager::instance().generation());
     mypaper::board::s31::keys::init();
+    mypaper::board::s31::standby::init();
 #endif
 
     // In Always On mode connect without blocking touch/UI startup. The
@@ -188,9 +189,6 @@ extern "C" void app_main(void)
     }
 
     while (true) {
-#if CONFIG_IDF_TARGET_ESP32S31
-        if (mypaper::board::s31::standby::service()) continue;
-#endif
         bool dispatched_touch = false;
 #if CONFIG_IDF_TARGET_ESP32S31
         mypaper::board::s31::keys::sync_context(ActivityManager::instance().generation());
@@ -246,14 +244,19 @@ extern "C" void app_main(void)
             }
         }
 
+        const bool input_active = dispatched_touch || touch_input_needs_fast_poll();
 #if CONFIG_IDF_TARGET_ESP32S31
+        if (input_active) mypaper::board::s31::standby::note_user_activity();
+        if (mypaper::board::s31::standby::service()) {
+            mypaper::board::s31::standby::note_user_activity();
+            continue;
+        }
         // Passive gauge reads only when touch and panel are idle. Internal
         // one-second throttle; no extra task, refresh or charger writes.
-        if (!dispatched_touch && !touch_input_needs_fast_poll() && !M5.Display.displayBusy())
-            M5.Power.update();
+        if (!input_active && !M5.Display.displayBusy()) M5.Power.update();
 #endif
         // Consume active gestures promptly. S31 samples independently and
         // wakes this idle wait on new input; P4 retains the tick/20ms delay.
-        touch_input_wait(dispatched_touch || touch_input_needs_fast_poll());
+        touch_input_wait(input_active);
     }
 }

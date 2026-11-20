@@ -9,6 +9,8 @@ void sync_context(uint32_t generation);
 // Returns true for a bezel-key contact (including its final release sample).
 bool cover_sample(bool pressed, int raw_x, int raw_y, uint32_t now);
 bool cover_active();
+// Held physical buttons or input events waiting for UI dispatch.
+bool input_active();
 // Main thread only. At most one event per call; never draws from the worker.
 bool dispatch_one();
 bool pause_for_sleep();

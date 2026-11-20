@@ -34,6 +34,9 @@
 #include <esp_timer.h>
 #include "time/network_time.h"
 #include <sdkconfig.h>
+#if CONFIG_IDF_TARGET_ESP32S31
+#include "boards/MyPaperS31/StandbyS31.h"
+#endif
 
 #include <algorithm>
 #include <cstdio>
@@ -55,6 +58,7 @@ enum SettingItemIndex {
     SETTINGS_NETWORK,
 #if CONFIG_IDF_TARGET_ESP32S31
     SETTINGS_STANDBY_WALLPAPER,
+    SETTINGS_AUTO_STANDBY,
 #endif
     SETTINGS_FRONTLIGHT,
     SETTINGS_APPS,
@@ -1849,6 +1853,71 @@ private:
     }
 };
 
+#if CONFIG_IDF_TARGET_ESP32S31
+namespace standby = mypaper::board::s31::standby;
+
+std::string auto_standby_label(uint8_t minutes)
+{
+    using ui_locale::TextId;
+    return minutes == 0 ? ui_locale::text(TextId::Off)
+        : std::to_string(minutes) + " " + ui_locale::text(TextId::AutoStandbyMinutes);
+}
+
+class AutoStandbySettingsActivity final : public StatusBarActivity {
+public:
+    void on_create() override { draw(); }
+
+    bool on_touch(const TouchEvent &event) override
+    {
+        if (status_bar_touch(event)) return true;
+        if (event.type == TouchEventType::Back) {
+            ActivityManager::instance().pop();
+            return true;
+        }
+        if (event.type != TouchEventType::Tap || event.y < HEADER_H) return false;
+        const size_t row = (event.y - HEADER_H) / SETTINGS_ROW_H;
+        if (row >= standby::auto_standby_options.size()) return false;
+
+        const esp_err_t result = standby::set_auto_standby_minutes(standby::auto_standby_options[row]);
+        if (result == ESP_OK) ActivityManager::instance().pop();
+        else {
+            _error = std::string(ui_locale::text(ui_locale::TextId::NvsSaveFailed)) + esp_err_to_name(result);
+            draw();
+        }
+        return true;
+    }
+
+private:
+    std::string _error;
+
+    void draw()
+    {
+        using ui_locale::TextId;
+        using ui_locale::text;
+        auto &gfx = M5.Display;
+        gfx.startWrite();
+        gfx.setEpdMode(epd_mode_t::epd_fast);
+        gfx.fillScreen(TFT_WHITE);
+        draw_header(text(TextId::AutoStandby));
+        const uint8_t selected = standby::auto_standby_minutes();
+        int top = HEADER_H;
+        for (uint8_t minutes : standby::auto_standby_options) {
+            gfx.drawFastHLine(PAD, top + SETTINGS_ROW_H - 1, gfx.width() - PAD * 2, TFT_BLACK);
+            list_focus::draw(gfx, PAD, top, SETTINGS_ROW_H, minutes == selected);
+            system_font::draw_left(gfx, auto_standby_label(minutes), PAD + list_focus::text_inset(),
+                top + (SETTINGS_ROW_H - system_font::line_height()) / 2, TFT_BLACK);
+            top += SETTINGS_ROW_H;
+        }
+        if (!_error.empty()) {
+            system_font::draw_left(gfx, system_font::ellipsize(_error, gfx.width() - PAD * 2),
+                PAD, top + 12, TFT_BLACK);
+        }
+        gfx.display();
+        gfx.endWrite();
+    }
+};
+#endif
+
 class SettingActivity final : public StatusBarActivity {
 public:
     void on_create() override
@@ -1953,6 +2022,7 @@ private:
         else if (_focus == SETTINGS_NETWORK) ActivityManager::instance().push(new NetworkSettingsActivity());
 #if CONFIG_IDF_TARGET_ESP32S31
         else if (_focus == SETTINGS_STANDBY_WALLPAPER) launch_standby_wallpaper_picker();
+        else if (_focus == SETTINGS_AUTO_STANDBY) ActivityManager::instance().push(new AutoStandbySettingsActivity());
 #endif
         else if (_focus == SETTINGS_FRONTLIGHT) ActivityManager::instance().push(new FrontlightSettingsActivity());
         else if (_focus == SETTINGS_APPS) ActivityManager::instance().push(new AppSettingsActivity());
@@ -2016,6 +2086,8 @@ private:
         if (slash != std::string::npos) wallpaper = wallpaper.substr(slash+1);
         draw_item(SETTINGS_STANDBY_WALLPAPER, text(TextId::StandbyWallpaper), wallpaper.empty()
             ? text(TextId::StandbyKeepScreen) : wallpaper);
+        draw_item(SETTINGS_AUTO_STANDBY, text(TextId::AutoStandby),
+                  auto_standby_label(standby::auto_standby_minutes()));
 #endif
         draw_item(SETTINGS_FRONTLIGHT, text(TextId::Frontlight), std::to_string(frontlight_get_percent()) + "%");
         draw_item(SETTINGS_APPS, text(TextId::AppSettings),

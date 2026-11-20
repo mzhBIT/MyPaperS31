@@ -1,12 +1,11 @@
 #include "activities/WereadActivity.h"
 
-#include "activities/Activity.h"
 #include "activities/ActivityManager.h"
 #include "activities/SettingActivity.h"
+#include "activities/StatusBarActivity.h"
 #include "renderer/CoverThumbnail.h"
 #include "storage/app_paths.h"
 #include "ui/SystemFont.h"
-#include "ui/HeaderLayout.h"
 #include "ui/UiLocale.h"
 #include "ui/ReaderOpening.h"
 #include "weread/WereadApi.h"
@@ -41,11 +40,12 @@ extern void launch_weread_reader(const char *path, int initial_spine,
 namespace {
 
 constexpr const char *TAG = "WEREAD_UI";
-constexpr int HEADER_H = header_layout::height;
+constexpr int HEADER_H = app_status_bar::height;
 constexpr int LIST_TOP = HEADER_H;
 constexpr int LIST_BOTTOM = 1124;
 constexpr int LIST_ROWS = 5;
 constexpr int LIST_ROW_H = (LIST_BOTTOM - LIST_TOP) / LIST_ROWS;
+constexpr int LIST_ROWS_END = LIST_TOP + LIST_ROWS * LIST_ROW_H;
 constexpr int FOOTER_Y = 1138;
 constexpr int REVIEW_TABS_TOP = HEADER_H;
 constexpr int REVIEW_TABS_H = 72;
@@ -484,16 +484,6 @@ std::string localized_weread_error(const std::string &message)
     return ui_locale::localize_message(message);
 }
 
-void draw_header(const std::string &title)
-{
-    const int width = M5.Display.width();
-    M5.Display.fillRect(0, 0, width, HEADER_H, TFT_WHITE);
-    system_font::draw_left(M5.Display, "<", 18, header_layout::text_y(), TFT_BLACK);
-    system_font::draw_center(M5.Display, system_font::ellipsize(title, width - 150),
-                             width / 2, header_layout::text_y(), TFT_BLACK);
-    header_layout::draw_separator(M5.Display);
-}
-
 size_t utf8_char_bytes(const std::string &text, size_t position)
 {
     const unsigned char c = static_cast<unsigned char>(text[position]);
@@ -528,7 +518,7 @@ std::vector<std::string> wrap_text(const std::string &text, int max_width)
     return lines;
 }
 
-class WereadActivity final : public Activity {
+class WereadActivity final : public StatusBarActivity {
 public:
     ~WereadActivity() override
     {
@@ -565,9 +555,12 @@ public:
             }
             return;
         }
-        if (!_queue) return;
         WorkResult *raw = nullptr;
-        if (xQueueReceive(_queue, &raw, 0) != pdTRUE) return;
+        if (!_queue || xQueueReceive(_queue, &raw, 0) != pdTRUE) {
+            // Cached books keep the screen white until the reader draws its first page.
+            if (!_reader_opening) refresh_header();
+            return;
+        }
         std::unique_ptr<WorkResult> result(raw);
         if (_enter_offline_when_done && result->kind != ResultKind::LoginQr) {
             _task = nullptr;
@@ -800,6 +793,7 @@ public:
 
     bool on_touch(const TouchEvent &event) override
     {
+        if (status_bar_touch(event)) return true;
         if (_progress_sync_active) {
             if (!_sync_touch_pending) { _sync_touch=event; _sync_touch_pending=true; }
             _cancelled=true;
@@ -813,7 +807,8 @@ public:
         }
         if (_book_menu_visible) return book_menu_touch(event);
         if (event.type == TouchEventType::Back ||
-            (event.type == TouchEventType::Tap && header_layout::left_hit(event.x, event.y, 110))) {
+            (_view == View::Login && event.type == TouchEventType::Tap &&
+             login_cancel_rect().contains(event.x, event.y))) {
             go_back();
             return true;
         }
@@ -961,6 +956,12 @@ private:
         end_frame();
     }
 
+    static app_status_bar_layout::Rect login_cancel_rect()
+    {
+        constexpr int width = 230;
+        return {(M5.Display.width() - width) / 2, 1036, width, 82};
+    }
+
     void draw_login()
     {
         begin_frame(epd_mode_t::epd_quality);
@@ -975,8 +976,11 @@ private:
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::WaitingForConfirmation),
                                  M5.Display.width() / 2, 820, TFT_BLACK);
         draw_offline_button();
-        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::TapBackToCancel), M5.Display.width() / 2,
-                                 1060, TFT_DARKGRAY);
+        const auto cancel = login_cancel_rect();
+        M5.Display.drawRoundRect(cancel.x, cancel.y, cancel.w, cancel.h, 10, TFT_BLACK);
+        system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Cancel),
+                                 cancel.x + cancel.w / 2,
+                                 cancel.y + (cancel.h - system_font::line_height()) / 2, TFT_BLACK);
         end_frame();
     }
 
@@ -1054,7 +1058,7 @@ private:
     void draw_reviews()
     {
         begin_frame();
-        draw_header(_selected_book.title);
+        draw_header(_selected_book.title.c_str());
         const int width = M5.Display.width();
         const int half = width / 2;
         system_font::draw_center(M5.Display, ui_locale::text(ui_locale::TextId::Recommended), half / 2, REVIEW_TABS_TOP + 15, TFT_BLACK);
@@ -1124,7 +1128,7 @@ private:
     void draw_catalog()
     {
         begin_frame();
-        draw_header(_selected_book.title);
+        draw_header(_selected_book.title.c_str());
         const int total_pages = std::max(1, static_cast<int>((_chapters.size() + LIST_ROWS - 1) / LIST_ROWS));
         _page = std::clamp(_page, 0, total_pages - 1);
         for (int row = 0; row < LIST_ROWS; ++row) {
@@ -1173,7 +1177,7 @@ private:
         if (event.type == TouchEventType::SwipeUp) { ++_page; draw_shelf(); return true; }
         if (event.type == TouchEventType::SwipeDown) { --_page; draw_shelf(); return true; }
         if ((event.type != TouchEventType::Tap && event.type != TouchEventType::LongPress) ||
-            event.y < LIST_TOP || event.y >= LIST_BOTTOM) return false;
+            event.y < LIST_TOP || event.y >= LIST_ROWS_END) return false;
         const int row = (event.y - LIST_TOP) / LIST_ROW_H;
         const int index = _page * LIST_ROWS + row;
         if (index >= static_cast<int>(_books.size())) return true;
@@ -1223,7 +1227,7 @@ private:
     {
         if (event.type == TouchEventType::SwipeLeft) { ++_page; draw_catalog(); return true; }
         if (event.type == TouchEventType::SwipeRight) { --_page; draw_catalog(); return true; }
-        if (event.type == TouchEventType::Tap && event.y >= LIST_TOP && event.y < LIST_BOTTOM) {
+        if (event.type == TouchEventType::Tap && event.y >= LIST_TOP && event.y < LIST_ROWS_END) {
             const int row = (event.y - LIST_TOP) / LIST_ROW_H;
             const int index = _page * LIST_ROWS + row;
             if (index >= 0 && index < static_cast<int>(_chapters.size())) {

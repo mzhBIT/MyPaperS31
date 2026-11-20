@@ -17,7 +17,7 @@ def ui_characters():
     # Include every main C/C++ literal: localized strings, keyboard candidates,
     # diagnostics and dynamic-format punctuation. Never scan the old LV bitmap.
     chars = set(chr(cp) for cp in range(32, 127))
-    chars.update('□…°×÷−√π²³∞≤≥≠≈←→↑↓♥简体中文繁體中文')
+    chars.update('□…©°×÷−√π²³∞≤≥≠≈←→↑↓♥简体中文繁體中文')
     for path in sorted((ROOT / 'main').rglob('*')):
         if path.suffix.lower() not in ('.c', '.cpp', '.h', '.hpp'):
             continue
