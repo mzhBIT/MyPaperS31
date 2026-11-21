@@ -8,12 +8,6 @@
 #include "time/network_time.h"
 #include <esp_random.h>
 #include <freertos/FreeRTOS.h>
-#include <esp_idf_version.h>
-#if ESP_IDF_VERSION_MAJOR >= 6
-#include <psa/crypto.h>
-#else
-#include <mbedtls/sha256.h>
-#endif
 
 #include <algorithm>
 #include <cctype>
@@ -255,28 +249,6 @@ std::string chapter_uid_json(const std::string &uid)
         std::all_of(uid.begin(), uid.end(), [](unsigned char c) { return std::isdigit(c) != 0; }) &&
         (uid.size() == 1 || uid.front() != '0');
     return decimal ? uid : "\"" + json_escape(uid) + "\"";
-}
-
-std::string sha256_hex(const std::string &value)
-{
-    uint8_t digest[32];
-#if ESP_IDF_VERSION_MAJOR >= 6
-    size_t length = 0;
-    if (psa_crypto_init() != PSA_SUCCESS ||
-        psa_hash_compute(PSA_ALG_SHA_256, reinterpret_cast<const uint8_t *>(value.data()),
-                         value.size(), digest, sizeof(digest), &length) != PSA_SUCCESS ||
-        length != sizeof(digest)) return {};
-#else
-    if (mbedtls_sha256(reinterpret_cast<const uint8_t *>(value.data()), value.size(), digest, 0) != 0)
-        return {};
-#endif
-    static const char hex[] = "0123456789abcdef";
-    std::string output(64, '0');
-    for (size_t i = 0; i < sizeof(digest); ++i) {
-        output[i * 2] = hex[digest[i] >> 4];
-        output[i * 2 + 1] = hex[digest[i] & 15];
-    }
-    return output;
 }
 
 std::string web_app_id()

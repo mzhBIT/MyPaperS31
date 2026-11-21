@@ -1,6 +1,7 @@
 #include "deepseek/DeepSeekClient.h"
 
 #include "wifi/wifi_setting.h"
+#include "wifi/WifiRequestPowerGuard.h"
 
 #include <esp_crt_bundle.h>
 #include <esp_err.h>
@@ -32,33 +33,6 @@ constexpr size_t MAX_RESPONSE_BYTES = 256 * 1024;
 class WifiShutdownGuard {
 public:
     ~WifiShutdownGuard() { wifi_setting_release(); }
-};
-
-class WifiRequestPowerGuard {
-public:
-    WifiRequestPowerGuard() {
-#if CONFIG_IDF_TARGET_ESP32S31
-        // MAC power save is separate from the user's Always On / On Demand
-        // radio lifetime. Keep it awake only while this request is in flight.
-        if (esp_wifi_get_ps(&_previous) == ESP_OK && _previous != WIFI_PS_NONE) {
-            _restore = esp_wifi_set_ps(WIFI_PS_NONE) == ESP_OK;
-            ESP_LOGI(TAG, "request Wi-Fi wake: previous_ps=%d applied=%d", _previous, _restore);
-        }
-#endif
-    }
-    ~WifiRequestPowerGuard() {
-#if CONFIG_IDF_TARGET_ESP32S31
-        if (_restore) {
-            const auto err = esp_wifi_set_ps(_previous);
-            ESP_LOGI(TAG, "request Wi-Fi restore: ps=%d result=%s", _previous, esp_err_to_name(err));
-        }
-#endif
-    }
-private:
-#if CONFIG_IDF_TARGET_ESP32S31
-    wifi_ps_type_t _previous = WIFI_PS_NONE;
-    bool _restore = false;
-#endif
 };
 
 struct ConnectionTrace {
@@ -441,7 +415,7 @@ DeepSeekClientResult DeepSeekClient::validate(const DeepSeekConfig &config)
         return result;
     }
 
-    WifiRequestPowerGuard power_guard;
+    wifi::RequestPowerGuard power_guard(TAG);
     ConnectionTrace trace;
     trace.operation = "models";
     auto client = open_connection(config, MODELS_URL, HTTP_METHOD_GET, 0, nullptr, &trace, &result);
@@ -522,7 +496,7 @@ DeepSeekClientResult DeepSeekClient::chat(const DeepSeekConfig &config,
         return result;
     }
 
-    WifiRequestPowerGuard power_guard;
+    wifi::RequestPowerGuard power_guard(TAG);
     std::string request;
     if (!build_request(model, thinking, messages, &request, &result.error)) return result;
     ConnectionTrace trace;

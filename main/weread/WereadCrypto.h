@@ -33,6 +33,7 @@ private:
     size_t _size = 0;
 };
 
+std::string sha256_hex(const std::string &value);
 std::string md5_hex(const uint8_t *data, size_t size);
 std::string url_encode(const std::string &value);
 std::string encode_id(const std::string &value);

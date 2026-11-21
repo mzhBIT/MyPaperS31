@@ -2,6 +2,7 @@
 
 #include "weread/WereadSession.h"
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <map>
@@ -22,6 +23,7 @@ public:
     HttpResponse &operator=(const HttpResponse &) = delete;
 
     int status = 0;
+    bool timed_out = false;
     std::string error;
     const uint8_t *data() const { return _data; }
     size_t size() const { return _size; }
@@ -29,6 +31,7 @@ public:
 
 private:
     friend class HttpClient;
+    bool _dns_failed = false;
     uint8_t *_data = nullptr;
     size_t _size = 0;
 };
@@ -54,6 +57,11 @@ public:
     HttpResponse post_json_bearer(const std::string &url, const std::string &body,
                                   const std::string &bearer,
                                   const std::string &referer = {});
+    // Native requests use independent authentication and never follow redirects.
+    static HttpResponse request_native(const std::string &url, const char *stage, size_t limit,
+                                       int timeout_ms, const std::atomic_bool &cancelled,
+                                       const std::string *body = nullptr, const std::string &vid = {},
+                                       const std::string &access_token = {}, bool retry_read = false);
     bool refresh_session() { return renew_session(); }
     void close();
     void request_cancel() { _cancelled = true; }
@@ -64,6 +72,13 @@ public:
     void clear_session();
 
 private:
+    enum class NativeFailure { None, Dns, Retryable };
+    static HttpResponse perform_native(const std::string &url, const char *stage, size_t limit,
+                                       int connect_timeout_ms, int response_timeout_ms,
+                                       const std::atomic_bool &cancelled,
+                                       const std::string *body, const std::string &vid,
+                                       const std::string &access_token, bool force_ipv4,
+                                       const std::string &resolved_ip, NativeFailure &failure);
     HttpResponse request(const char *method, const std::string &url,
                          const std::string *body, const std::string &referer,
                          bool allow_renewal, bool html_response = false,
@@ -75,8 +90,9 @@ private:
                               const std::string *body, const std::string &referer,
                               bool html_response, bool persist_response_cookies,
                               bool account_headers, const std::string *bearer,
-                              bool send_cookies);
-    bool ensure_client();
+                              bool send_cookies, const std::string &resolved_ip = {},
+                              int connect_timeout_ms = 0);
+    bool ensure_client(const char *tls_host = nullptr);
     bool renew_session();
     void absorb_cookie_headers(const std::string &headers);
     std::string cookie_header() const;
@@ -85,7 +101,7 @@ private:
     Collector *_collector = nullptr;
     Session _session;
     std::map<std::string, std::string> _cookies;
-    volatile bool _cancelled = false;
+    std::atomic_bool _cancelled{false};
     bool _renewing = false;
 };
 

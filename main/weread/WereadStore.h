@@ -25,12 +25,12 @@ struct PendingProgress {
 };
 
 bool ensure_directories();
-bool load_shelf(std::vector<Book> *books);
-bool save_shelf(const std::vector<Book> &books);
+bool load_shelf(std::vector<Book> *books, const std::string &native_vid = {});
+bool save_shelf(const std::vector<Book> &books, const std::string &native_vid = {});
 bool load_chapters(const std::string &book_id, std::vector<Chapter> *chapters,
-                   std::string *format);
+                   std::string *format, const std::string &native_vid = {});
 bool save_chapters(const std::string &book_id, const std::vector<Chapter> &chapters,
-                   const std::string &format);
+                   const std::string &format, const std::string &native_vid = {});
 std::string manifest_path(const std::string &book_id);
 bool save_manifest(const Book &book, const std::vector<Chapter> &chapters,
                    const std::string &format);

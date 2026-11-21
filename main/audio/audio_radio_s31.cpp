@@ -40,6 +40,7 @@
 #include <driver/gpio.h>
 #include <driver/i2s_std.h>
 #include <driver/uart.h>
+#include <esp_http_client.h>
 #include <esp_log.h>
 #include <esp_heap_caps.h>
 #include <esp_rom_sys.h>
@@ -93,6 +94,8 @@ constexpr UBaseType_t NETWORK_AUDIO_PRIORITY = 12;
 constexpr size_t NETWORK_HTTP_BUFFER_BYTES = 128 * 1024;
 constexpr uint32_t LIVE_HTTP_PREROLL_BYTES = 32 * 1024;
 constexpr uint32_t LIVE_HTTP_REBUFFER_BYTES = 16 * 1024;
+constexpr int LIVE_HTTP_OPEN_TIMEOUT_MS = 12000;
+constexpr int LIVE_HTTP_READ_TIMEOUT_MS = 8000;
 // The BT/PA rail is switched on when the backend initializes, so the module
 // still has to boot before it accepts AT commands.  200 ms was demonstrably
 // too short (AT+RX=2 went unanswered); the reference board leaves the rail on
@@ -1149,15 +1152,36 @@ esp_gmf_err_t network_input_read_filter(esp_gmf_io_handle_t handle, void *payloa
     return result;
 }
 
+bool network_http_is_finite(const esp_gmf_io_t &io)
+{
+    return io.attr.size > 0 && io.attr.size != UINT64_MAX;
+}
+
+int network_http_event(http_stream_event_msg_t *event)
+{
+    auto *io = static_cast<esp_gmf_io_t *>(event->user_data);
+    if (!io || io != s_network_live_http.load() || network_http_is_finite(*io)) return ESP_GMF_ERR_OK;
+    auto client = static_cast<esp_http_client_handle_t>(event->http_client);
+    if (event->event_id == HTTP_STREAM_PRE_REQUEST) {
+        if (s_stop.load() || !s_network_active.load()) return ESP_GMF_ERR_FAIL;
+        // The SDK adds Range from the bytes already consumed. A live stream
+        // reconnects at the current broadcast position.
+        esp_http_client_delete_header(client, "Range");
+        esp_http_client_set_timeout_ms(client, LIVE_HTTP_OPEN_TIMEOUT_MS);
+    } else if (event->event_id == HTTP_STREAM_ON_RESPONSE) {
+        esp_http_client_set_timeout_ms(client, LIVE_HTTP_READ_TIMEOUT_MS);
+    }
+    return ESP_GMF_ERR_OK;
+}
+
 esp_gmf_err_t network_live_http_read_filter(esp_gmf_io_handle_t handle, void *payload, uint32_t wanted, int ticks)
 {
     auto *io = static_cast<esp_gmf_io_t *>(handle);
     // Only direct, unknown-length radio streams use this filter. Never wait
     // for a live-stream threshold on a small finite file or HLS playlist.
-    const bool finite = io->attr.size > 0 && io->attr.size != UINT64_MAX;
     uint32_t filled = 0;
     esp_gmf_io_get_db_filled_size(handle, &filled);
-    if (!finite && (!s_network_live_primed || filled == 0)) {
+    if (!network_http_is_finite(*io) && (!s_network_live_primed || filled == 0)) {
         const bool startup = !s_network_live_primed;
         const uint32_t requested = startup ? LIVE_HTTP_PREROLL_BYTES : LIVE_HTTP_REBUFFER_BYTES;
         const uint32_t capacity = uint32_t(io->io_cfg.buffer_cfg.buffer_size);
@@ -1184,6 +1208,9 @@ esp_gmf_err_t network_live_http_read_filter(esp_gmf_io_handle_t handle, void *pa
 
 esp_gmf_err_io_t network_http_source_read(esp_gmf_io_handle_t handle, void *payload, uint32_t wanted, int ticks)
 {
+    if (handle == s_network_live_http.load() && (s_stop.load() || !s_network_active.load())) {
+        return ESP_GMF_IO_ABORT;
+    }
     const auto read = s_http_source_read.load();
     if (!read) return ESP_GMF_IO_FAIL;
     const int64_t begin = esp_timer_get_time();
@@ -1215,6 +1242,9 @@ esp_gmf_err_t network_http_io_init(void *config, esp_gmf_obj_handle_t *object)
     const auto result=esp_gmf_io_http_init(static_cast<http_io_cfg_t *>(config),&handle);
     if (result!=ESP_GMF_ERR_OK) return result;
     auto *io=static_cast<esp_gmf_io_t *>(handle);
+    auto *http_cfg = static_cast<http_io_cfg_t *>(OBJ_GET_CFG(io));
+    http_cfg->event_handle = network_http_event;
+    http_cfg->user_data = io;
     // This SDK's HTTP initializer does not copy buffer_cfg.read_filter.
     // Install after init, and preserve it in pool clones (including HLS HTTP).
     io->io_cfg.buffer_cfg.read_filter=network_http_read_filter;
@@ -1462,6 +1492,9 @@ bool stop_network_locked()
     esp_asp_state_t state = ESP_ASP_STATE_NONE;
     esp_audio_simple_player_get_state(s_network_player, &state);
     if (state == ESP_ASP_STATE_RUNNING || state == ESP_ASP_STATE_PAUSED) {
+        // The decoder may be blocked on an empty ring while HTTP is still
+        // waiting for data. Wake it so GMF can reach its socket shutdown.
+        if (auto input = s_network_live_http.load()) esp_gmf_io_abort(input);
         const auto ret = esp_audio_simple_player_stop(s_network_player);
         if (ret != ESP_GMF_ERR_OK) {
             ESP_LOGE(TAG, "radio stop incomplete: %d; retaining player for retry", (int)ret);

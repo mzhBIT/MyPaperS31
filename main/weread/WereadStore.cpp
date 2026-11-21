@@ -45,6 +45,13 @@ std::string safe_id(const std::string &id)
     return md5_hex(reinterpret_cast<const uint8_t *>(id.data()), id.size());
 }
 
+std::string shelf_path(const std::string &native_vid)
+{
+    const std::string directory = app_paths::weread_dir();
+    if (native_vid.empty()) return directory + "/shelf.bin";
+    return directory + "/shelf_eink_" + safe_id(native_vid) + ".bin";
+}
+
 bool write_u32(FILE *file, uint32_t value) { return std::fwrite(&value, 1, sizeof(value), file) == sizeof(value); }
 bool read_u32(FILE *file, uint32_t *value) { return std::fread(value, 1, sizeof(*value), file) == sizeof(*value); }
 bool write_u64(FILE *file, uint64_t value) { return std::fwrite(&value, 1, sizeof(value), file) == sizeof(value); }
@@ -64,18 +71,30 @@ bool read_string(FILE *file, std::string *value)
     return !size || std::fread(value->data(), 1, size, file) == size;
 }
 
-bool commit(FILE *file, const std::string &temporary, const std::string &path, bool valid)
+bool commit(FILE *file, const std::string &temporary, const std::string &path, bool valid,
+            bool keep_backup = false)
 {
     if (file) {
         valid = std::fflush(file) == 0 && valid;
         valid = std::fclose(file) == 0 && valid;
     }
     if (!valid) { std::remove(temporary.c_str()); return false; }
-    std::remove(path.c_str());
+    const std::string backup = keep_backup ? path + ".bak" : std::string();
+    if (!keep_backup) {
+        std::remove(path.c_str());
+    } else if (exists(path)) {
+        std::remove(backup.c_str());
+        if (std::rename(path.c_str(), backup.c_str()) != 0) {
+            std::remove(temporary.c_str());
+            return false;
+        }
+    }
     if (std::rename(temporary.c_str(), path.c_str()) != 0) {
+        if (keep_backup && !exists(path)) std::rename(backup.c_str(), path.c_str());
         std::remove(temporary.c_str());
         return false;
     }
+    if (keep_backup) std::remove(backup.c_str());
     return true;
 }
 
@@ -114,10 +133,11 @@ std::string book_directory(const std::string &book_id)
     return path;
 }
 
-bool save_shelf(const std::vector<Book> &books)
+bool save_shelf(const std::vector<Book> &books, const std::string &native_vid)
 {
+    if (books.size() > MAX_ITEMS) return false;
     ensure_directories();
-    const std::string path = std::string(app_paths::weread_dir()) + "/shelf.bin";
+    const std::string path = shelf_path(native_vid);
     const std::string temporary = path + ".tmp";
     FILE *file = std::fopen(temporary.c_str(), "wb");
     if (!file) return false;
@@ -129,13 +149,11 @@ bool save_shelf(const std::vector<Book> &books)
              write_u32(file, static_cast<uint32_t>(book.progress)) && write_u32(file, book.update_time);
         if (!ok) break;
     }
-    return commit(file, temporary, path, ok);
+    return commit(file, temporary, path, ok, !native_vid.empty());
 }
 
-bool load_shelf(std::vector<Book> *books)
+static bool load_shelf_file(const std::string &path, std::vector<Book> *books)
 {
-    if (!books) return false;
-    const std::string path = std::string(app_paths::weread_dir()) + "/shelf.bin";
     FILE *file = std::fopen(path.c_str(), "rb");
     if (!file) return false;
     uint32_t magic = 0, count = 0;
@@ -158,10 +176,28 @@ bool load_shelf(std::vector<Book> *books)
     return true;
 }
 
-bool save_chapters(const std::string &book_id, const std::vector<Chapter> &chapters,
-                   const std::string &format)
+bool load_shelf(std::vector<Book> *books, const std::string &native_vid)
 {
-    const std::string path = book_directory(book_id) + "/toc.bin";
+    if (!books) return false;
+    const std::string path = shelf_path(native_vid);
+    return load_shelf_file(path, books) ||
+           (!native_vid.empty() && load_shelf_file(path + ".bak", books));
+}
+
+static std::string chapter_catalog_path(const std::string &book_id, const std::string &native_vid)
+{
+    if (native_vid.empty()) return book_directory(book_id) + "/toc.bin";
+    ensure_directories();
+    const std::string directory = std::string(app_paths::weread_dir()) + "/eink_toc_" + safe_id(native_vid);
+    mkdir(directory.c_str(), 0775);
+    return directory + "/" + safe_id(book_id) + ".bin";
+}
+
+bool save_chapters(const std::string &book_id, const std::vector<Chapter> &chapters,
+                   const std::string &format, const std::string &native_vid)
+{
+    if (chapters.size() > MAX_ITEMS) return false;
+    const std::string path = chapter_catalog_path(book_id, native_vid);
     const std::string temporary = path + ".tmp";
     FILE *file = std::fopen(temporary.c_str(), "wb");
     if (!file) return false;
@@ -173,14 +209,12 @@ bool save_chapters(const std::string &book_id, const std::vector<Chapter> &chapt
              write_u32(file, chapter.word_count) && write_u32(file, chapter.paid ? 1U : 0U);
         if (!ok) break;
     }
-    return commit(file, temporary, path, ok);
+    return commit(file, temporary, path, ok, !native_vid.empty());
 }
 
-bool load_chapters(const std::string &book_id, std::vector<Chapter> *chapters,
-                   std::string *format)
+static bool load_catalog_file(const std::string &path, std::vector<Chapter> *chapters,
+                              std::string *format)
 {
-    if (!chapters) return false;
-    const std::string path = book_directory(book_id) + "/toc.bin";
     FILE *file = std::fopen(path.c_str(), "rb");
     if (!file) return false;
     uint32_t magic = 0, count = 0;
@@ -205,6 +239,15 @@ bool load_chapters(const std::string &book_id, std::vector<Chapter> *chapters,
     *chapters = std::move(loaded);
     if (format) *format = std::move(stored_format);
     return true;
+}
+
+bool load_chapters(const std::string &book_id, std::vector<Chapter> *chapters,
+                   std::string *format, const std::string &native_vid)
+{
+    if (!chapters) return false;
+    const auto path = chapter_catalog_path(book_id, native_vid);
+    return load_catalog_file(path, chapters, format) ||
+           (!native_vid.empty() && load_catalog_file(path + ".bak", chapters, format));
 }
 
 std::string manifest_path(const std::string &book_id)

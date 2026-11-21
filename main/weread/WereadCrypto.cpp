@@ -8,6 +8,7 @@
 #include <psa/crypto.h>
 #else
 #include <mbedtls/md5.h>
+#include <mbedtls/sha256.h>
 #endif
 
 #include <algorithm>
@@ -124,6 +125,28 @@ bool OwnedBuffer::copy_from(const uint8_t *data, size_t size)
     _data = copy;
     _size = size;
     return true;
+}
+
+std::string sha256_hex(const std::string &value)
+{
+    uint8_t digest[32];
+#if ESP_IDF_VERSION_MAJOR >= 6
+    size_t length = 0;
+    if (psa_crypto_init() != PSA_SUCCESS ||
+        psa_hash_compute(PSA_ALG_SHA_256, reinterpret_cast<const uint8_t *>(value.data()),
+                         value.size(), digest, sizeof(digest), &length) != PSA_SUCCESS ||
+        length != sizeof(digest)) return {};
+#else
+    if (mbedtls_sha256(reinterpret_cast<const uint8_t *>(value.data()), value.size(), digest, 0) != 0)
+        return {};
+#endif
+    static const char hex[] = "0123456789abcdef";
+    std::string output(64, '0');
+    for (size_t i = 0; i < sizeof(digest); ++i) {
+        output[i * 2] = hex[digest[i] >> 4];
+        output[i * 2 + 1] = hex[digest[i] & 15];
+    }
+    return output;
 }
 
 std::string md5_hex(const uint8_t *data, size_t size)

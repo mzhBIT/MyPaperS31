@@ -814,6 +814,11 @@ enum class TextId : uint16_t {
     EmulatorReady,
     EmulatorMissing,
     EmulatorSwitchFailed,
+    WeReadEinkMode,
+    WeReadWebMode,
+    WeReadEinkShelf,
+    WeReadWaitingForScan,
+    WeReadNativeCatalogOnly,
     Count,
 };
 

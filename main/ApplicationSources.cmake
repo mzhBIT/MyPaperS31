@@ -31,6 +31,7 @@ set(srcs
     "calculator/Calculator.cpp"
     "weread/WereadCrypto.cpp"
     "weread/WereadSession.cpp"
+    "weread/WereadNative.cpp"
     "weread/WereadHttpClient.cpp"
     "weread/WereadJson.cpp"
     "weread/WereadApi.cpp"

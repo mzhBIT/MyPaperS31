@@ -58,13 +58,12 @@ esp_err_t verify_credentials_erased()
 
 esp_err_t settings_restore_defaults()
 {
-    // Never erase the whole NVS partition. Stock watchlists and WeRead login
-    // are user data, rather than system preferences.
+    // Preserve legacy WeRead web login and other user data across settings resets.
     static constexpr const char *names[] = {
         "wifi_cfg", "cellular_s31", "frontlight", "frontlight_s31", "home_ui", "time_basis", "ds_chat", "amap",
         "reader_style", "rss_reader", "reader_bg", "rss_reader_bg", "standby_bg",
         "reader_cover", "rss_reader_cover", "script_mode", "writing_mode",
-        "audio_out", "text_input", "weread_pref", "system_ui", "system_font", "bookshelf_ui"
+        "audio_out", "text_input", "weread_pref", "weread_native", "system_ui", "system_font", "bookshelf_ui"
     };
     const char *files[] = {app_paths::reader_style_file(), app_paths::reader_font_file()};
     // Remove old SD fallbacks too, so they cannot resurrect prior preferences.

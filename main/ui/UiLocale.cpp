@@ -819,6 +819,11 @@ constexpr Translation kText[] = {
     {"Independent firmware ready", "独立固件已安装", "獨立韌體已安裝"},
     {"Install emulator firmware first", "请先安装模拟器固件", "請先安裝模擬器韌體"},
     {"Could not switch firmware", "固件切换失败", "韌體切換失敗"},
+    {"E-ink login", "墨水屏登录", "墨水屏登入"},
+    {"Web login", "网页登录", "網頁登入"},
+    {"E-ink shelf", "墨水屏书架", "墨水屏書架"},
+    {"Waiting for scan", "等待扫码", "等待掃碼"},
+    {"Contents only", "仅目录", "僅目錄"},
 };
 static_assert(sizeof(kText) / sizeof(kText[0]) == static_cast<size_t>(TextId::Count));
 
