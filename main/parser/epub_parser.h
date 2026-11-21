@@ -8,13 +8,6 @@
 #include <unordered_map>
 #include <vector>
 
-struct EpubManifestItem {
-    metadata_memory::String id;
-    metadata_memory::String href;
-    metadata_memory::String media_type;
-    metadata_memory::String properties;
-};
-
 struct EpubSpineItem {
     metadata_memory::String id;
     metadata_memory::String href;
@@ -66,7 +59,6 @@ private:
     std::string _nav_path;
     std::string _cover_image_href;
     EpubZip _zip;
-    metadata_memory::Map<EpubManifestItem> _manifest_by_id;
     metadata_memory::Map<int> _spine_index_by_href;
     metadata_memory::Vector<EpubSpineItem> _spine;
     metadata_memory::Vector<EpubTocItem> _toc;

@@ -26,7 +26,7 @@ static void log_book_heap(const char *stage)
 #endif
 }
 static const uint32_t EPUB_META_MAGIC = 0x4154454D; // META
-static const uint32_t EPUB_META_VERSION = 1;
+static const uint32_t EPUB_META_VERSION = 2; // Rebuild titles decoded without &middot;.
 static const uint32_t EPUB_META_MAX_BYTES = 8 * 1024 * 1024;
 
 static uint32_t meta_rd32(const uint8_t *p)
@@ -231,6 +231,7 @@ static std::string decode_entities(std::string s)
         {"&quot;", "\""},
         {"&apos;", "'"},
         {"&nbsp;", " "},
+        {"&middot;", "\xC2\xB7"},
     };
     for (const auto &n : named) {
         size_t pos = 0;
@@ -320,15 +321,17 @@ bool EpubBook::open(const char *path)
     }
     _opf_base = dirname_of(_opf_path);
     if (!parse_opf(opf) || _spine.empty()) {
-        if (_metadata_budget.exceeded) _last_error="Book navigation exceeds metadata memory limit";
+        if (_metadata_budget.exceeded) _last_error="EPUB package navigation exceeds metadata memory limit";
         ESP_LOGE(TAG, "opf parse failed: %s", _opf_path.c_str());
         close();
         return false;
     }
+    std::string().swap(opf);
     log_book_heap("before-toc");
+    _metadata_budget = {};
     load_toc();
     if (_metadata_budget.exceeded) {
-        _last_error="Book navigation exceeds metadata memory limit"; close(); return false;
+        _last_error="EPUB table of contents exceeds metadata memory limit"; close(); return false;
     }
     log_book_heap("after-toc");
 
@@ -349,7 +352,6 @@ void EpubBook::close()
     _ncx_path.clear();
     _nav_path.clear();
     _cover_image_href.clear();
-    metadata_memory::release(_manifest_by_id);
     metadata_memory::release(_spine_index_by_href);
     metadata_memory::release(_spine);
     metadata_memory::release(_toc);
@@ -377,7 +379,10 @@ bool EpubBook::parse_container(const std::string &xml)
 
 bool EpubBook::parse_opf(const std::string &xml)
 {
-    std::vector<std::string> spine_idrefs;
+    // Keep a temporary offset per manifest ID. The ZIP index already owns the
+    // resource paths, and only the spine and cover need complete OPF entries.
+    metadata_memory::Map<size_t> manifest_offsets;
+    metadata_memory::Vector<metadata_memory::String> spine_idrefs;
     std::string cover_item_id;
     std::string guide_cover_page_href;
     size_t pos = 0;
@@ -411,23 +416,26 @@ bool EpubBook::parse_opf(const std::string &xml)
                 cover_item_id = attr_value(attrs, "content");
             }
         } else if (name == "item") {
-            EpubManifestItem item;
-            item.id = attr_value(attrs, "id");
-            item.href = resolve_from_opf(attr_value(attrs, "href"));
-            item.media_type = attr_value(attrs, "media-type");
-            item.properties = attr_value(attrs, "properties");
-            if (!item.id.empty() && !item.href.empty()) {
-                if (!_metadata_budget.add(_manifest_by_id.size(),sizeof(item),{item.id.size(),item.href.size(),item.media_type.size(),item.properties.size()})) return false;
-                _manifest_by_id[item.id] = item;
-                if (contains_word(item.properties, "nav")) _nav_path = item.href;
-                if (item.id == cover_item_id || contains_word(item.properties, "cover-image")) {
-                    _cover_image_href = item.href;
+            const std::string id = attr_value(attrs, "id");
+            const std::string href = resolve_from_opf(attr_value(attrs, "href"));
+            if (!id.empty() && !href.empty()) {
+                if (!_metadata_budget.add(manifest_offsets.size(), sizeof(decltype(manifest_offsets)::value_type),
+                                          {id.size()})) return false;
+                manifest_offsets[id] = pos + 1;
+                const std::string properties = attr_value(attrs, "properties");
+                if (contains_word(properties, "nav")) _nav_path = href;
+                if (id == cover_item_id || contains_word(properties, "cover-image")) {
+                    _cover_image_href = href;
                 }
-                if (item.media_type == "application/x-dtbncx+xml") _ncx_path = item.href;
+                if (attr_value(attrs, "media-type") == "application/x-dtbncx+xml") _ncx_path = href;
             }
         } else if (name == "itemref") {
             std::string idref = attr_value(attrs, "idref");
-            if (!idref.empty()) spine_idrefs.push_back(idref);
+            if (!idref.empty()) {
+                if (!_metadata_budget.add(spine_idrefs.size(), sizeof(metadata_memory::String),
+                                          {idref.size()})) return false;
+                spine_idrefs.emplace_back(idref);
+            }
         } else if (name == "reference") {
             std::string type = attr_value(attrs, "type");
             if ((type == "cover" || type == "cover-page") && guide_cover_page_href.empty()) {
@@ -438,9 +446,21 @@ bool EpubBook::parse_opf(const std::string &xml)
         pos = end + 1;
     }
 
+    auto read_manifest_attrs = [&](const metadata_memory::String &id,
+                                   std::unordered_map<std::string, std::string> *attrs) {
+        const auto it = manifest_offsets.find(id);
+        if (it == manifest_offsets.end()) return false;
+        const size_t start = it->second;
+        const size_t end = xml.find('>', start);
+        std::string name;
+        return end != std::string::npos && parse_tag_attrs(xml.substr(start, end - start), &name, attrs);
+    };
+
     if (_cover_image_href.empty() && !cover_item_id.empty()) {
-        auto it = _manifest_by_id.find(cover_item_id);
-        if (it != _manifest_by_id.end()) _cover_image_href = it->second.href;
+        std::unordered_map<std::string, std::string> attrs;
+        if (read_manifest_attrs(cover_item_id, &attrs)) {
+            _cover_image_href = resolve_from_opf(attr_value(attrs, "href"));
+        }
     }
 
     if (_cover_image_href.empty() && !guide_cover_page_href.empty()) {
@@ -467,20 +487,22 @@ bool EpubBook::parse_opf(const std::string &xml)
         }
     }
 
+    _metadata_budget = {};
+    std::unordered_map<std::string, std::string> attrs;
     for (const auto &idref : spine_idrefs) {
-        auto it = _manifest_by_id.find(idref);
-        if (it == _manifest_by_id.end()) continue;
-        const auto &mi = it->second;
+        if (!read_manifest_attrs(idref, &attrs)) continue;
         EpubSpineItem sp;
-        sp.id = mi.id;
-        sp.href = mi.href;
-        sp.media_type = mi.media_type;
+        sp.id = idref;
+        sp.href = resolve_from_opf(attr_value(attrs, "href"));
+        sp.media_type = attr_value(attrs, "media-type");
         EpubZip::Entry entry;
         if (_zip.entry_info(sp.href, &entry)) sp.uncompressed_size = entry.uncompressed_size;
         if (!_metadata_budget.add(_spine.size(),sizeof(sp),{sp.id.size(),sp.href.size(),sp.media_type.size()})) return false;
-        _spine.push_back(sp);
+        _spine.push_back(std::move(sp));
     }
 
+    metadata_memory::release(manifest_offsets);
+    metadata_memory::release(spine_idrefs);
     rebuild_spine_index();
 
     return !_spine.empty();
@@ -786,6 +808,7 @@ bool EpubBook::load_metadata_cache(const char *source_path)
         cached_spine.push_back(std::move(item));
     }
 
+    budget = {};
     if (!reader.u32(&toc_count_value) || toc_count_value > 100000) return false;
     if (!metadata_memory::Budget::reserve_allowed(toc_count_value,sizeof(EpubTocItem))) return false;
     metadata_memory::Vector<EpubTocItem> cached_toc;
@@ -923,6 +946,5 @@ void EpubBook::take_navigation(metadata_memory::Vector<EpubSpineItem>& spine,
                                metadata_memory::Vector<EpubTocItem>& toc)
 {
     spine=std::move(_spine); toc=std::move(_toc);
-    metadata_memory::release(_manifest_by_id);
     metadata_memory::release(_spine_index_by_href);
 }

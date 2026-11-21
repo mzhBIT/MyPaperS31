@@ -122,6 +122,7 @@ static std::string decode_entities(const std::string &s)
         else if (ent == "quot") out.push_back('"');
         else if (ent == "apos") out.push_back('\'');
         else if (ent == "nbsp") out.push_back(' ');
+        else if (ent == "middot") append_utf8(0x00B7, &out);
         else if (!ent.empty() && ent[0] == '#') {
             char *endp = nullptr;
             uint32_t cp = 0;

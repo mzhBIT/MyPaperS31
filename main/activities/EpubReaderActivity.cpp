@@ -1531,9 +1531,13 @@ private:
                              std::vector<EpubContentBlock> *blocks,
                              bool vertical) const
     {
+        const auto format = g_epub.format();
+        const bool preserve_inline_styles = format == ReflowBook::Format::Epub ||
+                                            format == ReflowBook::Format::Mobi ||
+                                            format == ReflowBook::Format::Docx;
         return _is_markdown
             ? markdown_parse_blocks(source, g_epub.path(), blocks)
-            : epub_parse_xhtml_blocks(source, href, blocks, vertical, g_epub.is_docx());
+            : epub_parse_xhtml_blocks(source, href, blocks, vertical, preserve_inline_styles);
     }
 
     bool is_ignored_layout_image(const std::string &href) const

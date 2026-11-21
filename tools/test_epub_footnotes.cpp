@@ -23,6 +23,26 @@ static std::vector<EpubFootnoteRef> references(const std::vector<EpubContentBloc
 
 int main()
 {
+    const auto headings = parse("<h1>Chapter 1&middot;Title</h1>");
+    assert(headings.size() == 1 && headings[0].heading);
+    assert(headings[0].text == "Chapter 1\xC2\xB7" "Title");
+
+    std::vector<EpubContentBlock> styled;
+    assert(epub_parse_xhtml_blocks("<h2>A<strong>B<em>C</em></strong><i>D</i></h2><p>E<b>F</b>G</p>",
+                                   "chapter.xhtml", &styled, false, true));
+    assert(styled.size() == 2 && styled[0].heading && styled[0].text == "ABCD");
+    const auto &title_styles = styled[0].styles;
+    assert(title_styles.size() == 3);
+    assert(title_styles[0].byte_start == 1 && title_styles[0].byte_end == 2 &&
+           title_styles[0].flags == inline_style::Bold);
+    assert(title_styles[1].byte_start == 2 && title_styles[1].byte_end == 3 &&
+           title_styles[1].flags == (inline_style::Bold | inline_style::Italic));
+    assert(title_styles[2].byte_start == 3 && title_styles[2].byte_end == 4 &&
+           title_styles[2].flags == inline_style::Italic);
+    assert(styled[1].text == "EFG" && styled[1].styles.size() == 1);
+    assert(styled[1].styles[0].byte_start == 1 && styled[1].styles[0].byte_end == 2 &&
+           styled[1].styles[0].flags == inline_style::Bold);
+
     // Duokan: the image alt describes the marker, while the linked li is the
     // actual footnote. The previous parser returned the literal word "note".
     auto blocks = parse(
