@@ -233,6 +233,16 @@ bool Fb2Book::open(const char *path)
     }
 
     _path = path;
+    const size_t stylesheet = find_ascii_ci(xml, "<stylesheet");
+    if (stylesheet != std::string::npos) {
+        const size_t open = xml.find('>', stylesheet + 11);
+        const size_t close = open == std::string::npos ? std::string::npos
+            : find_ascii_ci(xml, "</stylesheet", open + 1);
+        if (close != std::string::npos && close - open - 1 <= 64 * 1024) {
+            _stylesheet_start = open + 1;
+            _stylesheet_end = close;
+        }
+    }
     title = tag_content(xml, "book-title");
     const std::string first = tag_content(xml, "first-name");
     const std::string last = tag_content(xml, "last-name");
@@ -400,6 +410,7 @@ void Fb2Book::close()
     _path.clear();
     _cover_href.clear();
     _last_error.clear();
+    _stylesheet_start = _stylesheet_end = 0;
     title.clear();
     author.clear();
     metadata_memory::release(_sections);
@@ -427,8 +438,12 @@ bool Fb2Book::read_range(uint64_t start, uint64_t end, std::string *out) const
 std::string Fb2Book::transform_section(const Fb2SectionItem &section,
                                        const std::string &xml) const
 {
-    std::string out = "<html><body>";
-    out.reserve(xml.size() + 128);
+    std::string out = "<html>";
+    std::string css;
+    if (_stylesheet_end > _stylesheet_start && read_range(_stylesheet_start, _stylesheet_end, &css))
+        out += "<head><style>" + css + "</style></head>";
+    out += "<body>";
+    out.reserve(out.size() + xml.size() + 128);
     size_t pos = 0;
     while (pos < xml.size()) {
         const size_t start = xml.find('<', pos);
@@ -448,6 +463,7 @@ std::string Fb2Book::transform_section(const Fb2SectionItem &section,
         auto simple = [&](const char *mapped) {
             out += closing ? "</" : "<";
             out += mapped;
+            if (!closing && name != mapped) out += " data-reader-element=\"" + name + "\"";
             out += self_closing && !closing ? "/>" : ">";
         };
 
@@ -473,12 +489,22 @@ std::string Fb2Book::transform_section(const Fb2SectionItem &section,
                 if (!type.empty()) out += " type=\"" + type + "\"";
                 out += ">";
             }
+        } else if (name == "style") {
+            if (closing) out += "</span>";
+            else {
+                out += "<span data-reader-element=\"style\"";
+                const std::string style = xml_attr(raw, "name");
+                if (!style.empty() && std::all_of(style.begin(), style.end(), [](unsigned char ch) {
+                    return std::isalnum(ch) || ch == '-' || ch == '_' || ch >= 128;
+                })) out += " class=\"" + style + "\"";
+                out += self_closing ? "/>" : ">";
+            }
         } else if (name == "title") simple("h2");
         else if (name == "subtitle") simple("h3");
         else if (name == "section") {
             if (closing) out += "</div>";
             else {
-                out += "<div";
+                out += "<div data-reader-element=\"section\"";
                 const std::string id = xml_attr(raw, "id");
                 if (!id.empty()) out += " id=\"" + id + "\"";
                 out += ">";

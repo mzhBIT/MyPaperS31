@@ -54,9 +54,13 @@ struct EpubContentBlock {
 };
 
 bool epub_parse_xhtml_text_blocks(const std::string &xhtml, std::vector<EpubTextBlock> *blocks);
+using EpubStylesheetReader = bool (*)(const std::string &href, size_t max_size, std::string *css);
 bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_href,
                              std::vector<EpubContentBlock> *blocks,
                              bool inline_sup_annotations = false,
-                             bool preserve_inline_styles = false);
+                             bool preserve_inline_styles = false,
+                             bool preserve_font_sizes = false,
+                             EpubStylesheetReader read_stylesheet = nullptr,
+                             const char *fallback_stylesheet = nullptr);
 bool epub_resolve_footnote(const std::string &xhtml, const std::string &item_href,
                            const std::string &target, std::string *content);

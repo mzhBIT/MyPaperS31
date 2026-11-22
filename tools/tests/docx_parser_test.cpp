@@ -97,6 +97,22 @@ int main() {
     package["word/document.xml"] = doc("<w:p><w:pPr><w:pStyle w:val='H'/></w:pPr><w:r><w:rPr><w:b w:val='0'/></w:rPr><w:t>not bold</w:t></w:r></w:p>");
     assert(book.open("off.docx"));
     assert(book.sections()[0].html.find("<strong>") == std::string::npos);
+    package["word/styles.xml"] = "<w:styles>"
+        "<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val='22'/></w:rPr></w:rPrDefault></w:docDefaults>"
+        "<w:style w:styleId='Body' w:type='paragraph' w:default='1'><w:rPr><w:sz w:val='24'/></w:rPr></w:style>"
+        "<w:style w:styleId='Heading1'><w:rPr><w:sz w:val='36'/></w:rPr></w:style>"
+        "<w:style w:styleId='Caption'><w:rPr><w:sz w:val='18'/></w:rPr></w:style></w:styles>";
+    package["word/document.xml"] = doc(
+        "<w:p><w:pPr><w:pStyle w:val='Heading1'/></w:pPr>"
+        "<w:r><w:t>A</w:t></w:r>"
+        "<w:r><w:rPr><w:rStyle w:val='Caption'/></w:rPr><w:t>B</w:t></w:r>"
+        "<w:r><w:rPr><w:rStyle w:val='Caption'/><w:sz w:val='24'/></w:rPr><w:t>C</w:t></w:r></w:p>");
+    assert(book.open("sizes.docx"));
+    assert(epub_parse_xhtml_blocks(book.sections()[0].html, book.sections()[0].href,
+                                   &blocks, false, true, true));
+    assert(blocks.size() == 1 && blocks[0].text == "ABC");
+    assert(blocks[0].styles.size() == 2 && blocks[0].styles[0].font_scale == 150 &&
+           blocks[0].styles[1].font_scale == 75);
     // Bounded sections retain every paragraph; no generated pages are stored.
     std::string long_body;
     for (int i = 0; i < 1000; ++i) long_body += para(std::string(100, 'x'));

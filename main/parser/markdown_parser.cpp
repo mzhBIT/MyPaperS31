@@ -36,15 +36,15 @@ static bool underscore_delimiter(const std::string &source, size_t at, size_t co
 static InlineResult parse_inline(const std::string &source, uint8_t initial_flags = inline_style::None)
 {
     InlineResult result;
-    uint8_t flags = initial_flags;
+    uint8_t flags = inline_style::None;
     size_t run_start = 0;
-    uint8_t run_flags = flags;
+    uint8_t run_flags = initial_flags;
     auto change_flags = [&](uint8_t next) {
         if (run_flags != inline_style::None && result.text.size() > run_start) {
             result.styles.push_back({run_start, result.text.size(), run_flags});
         }
         run_start = result.text.size();
-        run_flags = next;
+        run_flags = next | initial_flags;
         flags = next;
     };
 
@@ -184,6 +184,9 @@ static void append_text_block(std::vector<EpubContentBlock> *blocks,
     block.type = EpubContentBlockType::Text;
     block.text = std::move(parsed.text);
     block.styles = std::move(parsed.styles);
+    const auto font_scale = inline_style::heading_scale(heading_level);
+    if (heading && font_scale != 100)
+        block.styles.insert(block.styles.begin(), {0, block.text.size(), inline_style::None, font_scale});
     block.heading = heading;
     block.heading_level = heading_level;
     block.blank_before = heading ? 1 : 0;

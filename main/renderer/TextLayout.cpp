@@ -11,6 +11,7 @@ struct Token {
     size_t start = 0;
     size_t end = 0;
     int width = 0;
+    int hyphen_width = -1;
 };
 
 static size_t next_utf8(const std::string &text, size_t pos, uint32_t *codepoint)
@@ -410,7 +411,8 @@ static int range_width(const std::vector<Token> &tokens, size_t start, size_t en
             width += options.letter_spacing;
             if (measure_kerning) width += measure_kerning(context, previous, '-');
         }
-        width += measure ? std::max(0, measure(context, '-')) : 0;
+        const int styled_width = end > start ? tokens[end - 1].hyphen_width : -1;
+        width += styled_width >= 0 ? styled_width : (measure ? std::max(0, measure(context, '-')) : 0);
     }
     return width;
 }
@@ -577,6 +579,8 @@ std::vector<Line> break_utf8(const std::string &text,
                         ? 0
                         : (measure_at ? std::max(0, measure_at(measure_context, token.codepoint, pos))
                            : (measure ? std::max(0, measure(measure_context, token.codepoint)) : 0));
+            if (measure_at && ascii_letter(token.codepoint))
+                token.hyphen_width = std::max(0, measure_at(measure_context, '-', pos));
             tokens.push_back(token);
             pos = token.end;
         }

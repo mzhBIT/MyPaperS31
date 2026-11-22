@@ -1535,9 +1535,24 @@ private:
         const bool preserve_inline_styles = format == ReflowBook::Format::Epub ||
                                             format == ReflowBook::Format::Mobi ||
                                             format == ReflowBook::Format::Docx;
+        const auto read_stylesheet = [](const std::string &resource, size_t limit, std::string *css) {
+            constexpr char flow_prefix[] = "kindle:flow:";
+            if (resource.rfind(flow_prefix, 0) == 0) {
+                const char *digit = resource.c_str() + sizeof(flow_prefix) - 1;
+                char *end = nullptr;
+                const auto index = std::strtoul(digit, &end, 32);
+                return end != digit && (*end == '?' || *end == '\0') &&
+                    index < UINT32_MAX && g_epub.read_kf8_flow(index, css) && css->size() <= limit;
+            }
+            std::vector<uint8_t> bytes;
+            if (!g_epub.read_resource_to_memory(resource, &bytes, limit) || bytes.empty()) return false;
+            css->assign(reinterpret_cast<const char *>(bytes.data()), bytes.size());
+            return true;
+        };
         return _is_markdown
             ? markdown_parse_blocks(source, g_epub.path(), blocks)
-            : epub_parse_xhtml_blocks(source, href, blocks, vertical, preserve_inline_styles);
+            : epub_parse_xhtml_blocks(source, href, blocks, vertical, preserve_inline_styles, true,
+                                     read_stylesheet, _is_mobi ? "kindle:flow:0001" : nullptr);
     }
 
     bool is_ignored_layout_image(const std::string &href) const
@@ -2153,14 +2168,17 @@ private:
             : +[](void *context, const std::string &text, int width, int indent) {
                   return static_cast<TextRenderer *>(context)->layoutUtf8Paragraph(text, width, indent);
               };
-        if (vertical) {
-            options.layout_styled_paragraph =
-                +[](void *context, const std::string &text,
+        options.layout_styled_paragraph = vertical
+            ? +[](void *context, const std::string &text,
                     const std::vector<inline_style::Span> &styles, int height, int indent) {
                     return static_cast<TextRenderer *>(context)->layoutUtf8VerticalParagraphStyled(
                         text, styles, height, indent);
+                }
+            : +[](void *context, const std::string &text,
+                   const std::vector<inline_style::Span> &styles, int width, int indent) {
+                    return static_cast<TextRenderer *>(context)->layoutUtf8ParagraphStyled(
+                        text, styles, width, indent);
                 };
-        }
         options.text_context = &renderer;
         options.resolve_image = [](void *context,
                                    const std::string &resource,
@@ -3011,28 +3029,28 @@ private:
             return false;
         }
         int y = content_y();
-        const int line_h = std::max(1, renderer.lineHeight());
         for (const auto &item : _pages[static_cast<size_t>(_page_index)]) {
             if (item.type == PageItemType::Text && !item.footnotes.empty()) {
                 int text_x = content_x() + item.x_offset;
                 if (item.centered) {
-                    text_x = content_x() + std::max(0, (content_width() - renderer.measureUtf8(item.text)) / 2);
+                    text_x = content_x() + std::max(0, (content_width() -
+                        renderer.measureUtf8Styled(item.text, item.styles)) / 2);
                 }
                 for (const auto &ref : item.footnotes) {
                     if (is_annotation_ref(ref) &&
                         !weread::store::public_comments_enabled()) continue;
                     if (ref.byte_start >= ref.byte_end || ref.byte_end > item.text.size()) continue;
-                    const int ref_x = text_x + renderer.measureUtf8(item.text.substr(0, ref.byte_start));
-                    const int ref_w = std::max(12, renderer.measureUtf8(
-                        item.text.substr(ref.byte_start, ref.byte_end - ref.byte_start)));
+                    const int ref_x = text_x + renderer.measureUtf8Styled(item.text, item.styles, 0, ref.byte_start);
+                    const int ref_w = std::max(12, renderer.measureUtf8Styled(
+                        item.text, item.styles, ref.byte_start, ref.byte_end));
                     if (touch_x >= ref_x - 12 && touch_x <= ref_x + ref_w + 12 &&
-                        touch_y >= y - 10 && touch_y <= y + line_h + 10) {
+                        touch_y >= y - 10 && touch_y <= y + item.height + 10) {
                         *result = ref;
                         return true;
                     }
                 }
             }
-            y += item.type == PageItemType::Text ? line_h : item.height;
+            y += item.height;
         }
         return false;
     }
@@ -3273,7 +3291,10 @@ private:
             if (item.type == PageItemType::Text) {
                 const int column_width = std::max(1, item.height);
                 const int x = right - column_width;
-                const int base_width = item.vertical_ruby_lane ? cell : column_width;
+                const int base_width = item.vertical_ruby_lane
+                    ? std::max(1, inline_style::scaled(cell,
+                        inline_style::max_font_scale(item.styles, 0, item.text.size())))
+                    : column_width;
                 int y = content_y() + item.x_offset;
                 if (item.centered) {
                     y = content_y() + std::max(0,
@@ -3361,7 +3382,8 @@ private:
         (void)w;
         int x = content_x();
         int y = resume_y ? *resume_y : content_y();
-        int line_h = reader_text_renderer().lineHeight();
+        auto &renderer = reader_text_renderer();
+        int line_h = renderer.lineHeight();
         if (line_h <= 0) line_h = 48;
         const int underline_type = reader_style_get().underline_type;
         const bool public_comments = !g_epub.is_weread() ||
@@ -3402,7 +3424,7 @@ private:
                 if (!item.text.empty()) {
                     int text_x = x + item.x_offset;
                     if (item.centered) {
-                        int text_width = reader_text_renderer().measureUtf8(item.text);
+                        int text_width = renderer.measureUtf8Styled(item.text, item.styles);
                         text_x = x + std::max(0, (content_width() - text_width) / 2);
                     }
                     reader_text_renderer().drawStyledUtf8Line(
@@ -3424,30 +3446,25 @@ private:
                         size_t cursor = 0;
                         for (const auto &[start, end] : excluded) {
                             if (start > cursor) {
-                                const int gap_x = text_x + reader_text_renderer().measureUtf8(
-                                    item.text.substr(0, cursor));
-                                const int gap_w = reader_text_renderer().measureUtf8(
-                                    item.text.substr(cursor, start - cursor));
-                                draw_underline(gap_x, y, gap_w);
+                                const int gap_x = text_x + renderer.measureUtf8Styled(item.text, item.styles, 0, cursor);
+                                const int gap_w = renderer.measureUtf8Styled(item.text, item.styles, cursor, start);
+                                draw_underline(gap_x, y + item.height - line_h, gap_w);
                             }
                             cursor = std::max(cursor, end);
                         }
                         if (cursor < item.text.size()) {
-                            const int gap_x = text_x + reader_text_renderer().measureUtf8(
-                                item.text.substr(0, cursor));
-                            draw_underline(gap_x, y, reader_text_renderer().measureUtf8(
-                                item.text.substr(cursor)));
+                            const int gap_x = text_x + renderer.measureUtf8Styled(item.text, item.styles, 0, cursor);
+                            draw_underline(gap_x, y + item.height - line_h,
+                                           renderer.measureUtf8Styled(item.text, item.styles, cursor));
                         }
                     }
                     for (const auto &ref : item.footnotes) {
                         if (is_annotation_ref(ref) && !public_comments) continue;
                         if (ref.byte_start >= ref.byte_end || ref.byte_end > item.text.size()) continue;
-                        const int ref_x = text_x + reader_text_renderer().measureUtf8(
-                            item.text.substr(0, ref.byte_start));
-                        const int ref_w = reader_text_renderer().measureUtf8(
-                            item.text.substr(ref.byte_start, ref.byte_end - ref.byte_start));
+                        const int ref_x = text_x + renderer.measureUtf8Styled(item.text, item.styles, 0, ref.byte_start);
+                        const int ref_w = renderer.measureUtf8Styled(item.text, item.styles, ref.byte_start, ref.byte_end);
                         if (ref_w > 0) {
-                            const int marker_y = y + std::max(1, line_h - 3);
+                            const int marker_y = y + std::max(1, item.height - 3);
                             if (is_annotation_ref(ref)) {
                                 constexpr int dash = 7;
                                 constexpr int gap = 5;
@@ -3461,7 +3478,7 @@ private:
                         }
                     }
                 }
-                y += line_h;
+                y += item.height;
                 text_us += esp_timer_get_time() - item_begin;
                 ++text_items;
             } else if (item.type == PageItemType::Space) {

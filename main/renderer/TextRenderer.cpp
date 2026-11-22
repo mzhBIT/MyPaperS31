@@ -1680,15 +1680,25 @@ int TextRenderer::measureFullwidthCellForLayout()
 
 int TextRenderer::measureUtf8(const std::string &text)
 {
+    return measureUtf8Styled(text, {});
+}
+
+int TextRenderer::measureUtf8Styled(const std::string &text,
+                                    const std::vector<inline_style::Span> &styles,
+                                    size_t begin, size_t end)
+{
     int w = 0;
     int glyph_count = 0;
     uint32_t previous = 0;
-    for (size_t pos = 0; pos < text.size();) {
+    size_t first_style = 0;
+    for (size_t pos = begin; pos < std::min(end, text.size());) {
+        const size_t byte = pos;
         uint32_t cp = 0;
         pos = nextUtf8(text, pos, cp);
         if (cp == '\r' || cp == '\n') continue;
         if (previous != 0) w += measureKerningForLayout(previous, cp);
-        w += measureCodepoint(cp);
+        w += inline_style::scaled(measureCodepoint(cp),
+                                 inline_style::scale_of(inline_style::at(styles, byte, first_style)));
         previous = cp;
         glyph_count++;
     }
@@ -1998,15 +2008,24 @@ std::vector<text_layout::Line> TextRenderer::layoutUtf8Paragraph(const std::stri
                                                                  int max_width,
                                                                  int first_line_indent)
 {
+    return layoutUtf8ParagraphStyled(text, {}, max_width, first_line_indent);
+}
+
+std::vector<text_layout::Line> TextRenderer::layoutUtf8ParagraphStyled(
+    const std::string &text, const std::vector<inline_style::Span> &styles,
+    int max_width, int first_line_indent)
+{
     text_layout::Options options;
     options.max_width = max_width;
     options.letter_spacing = _style.letter_spacing;
     int explicit_indent = 0;
+    size_t indent_style = 0;
     for (size_t pos = 0; pos < text.size();) {
         uint32_t cp = 0;
         size_t next = nextUtf8(text, pos, cp);
         if (cp != 0x3000) break;
-        explicit_indent += measureCodepointForLayout(cp);
+        explicit_indent += inline_style::scaled(measureCodepointForLayout(cp),
+            inline_style::scale_of(inline_style::at(styles, pos, indent_style)));
         pos = next;
     }
     // Preserve indentation already present in the document and only add the
@@ -2014,13 +2033,24 @@ std::vector<text_layout::Line> TextRenderer::layoutUtf8Paragraph(const std::stri
     options.first_line_indent = std::max(0, first_line_indent - explicit_indent);
     options.prefer_word_break = true;
     options.apply_cjk_kinsoku = true;
-    auto measure = [](void *context, uint32_t codepoint) -> int {
-        return static_cast<TextRenderer *>(context)->measureCodepointForLayout(codepoint);
+    struct Context {
+        TextRenderer *renderer;
+        const std::vector<inline_style::Span> &styles;
+        size_t first = 0;
+    } context{this, styles};
+    auto measure = [](void *ctx, uint32_t codepoint) -> int {
+        return static_cast<Context *>(ctx)->renderer->measureCodepointForLayout(codepoint);
     };
-    auto measure_kerning = [](void *context, uint32_t left, uint32_t right) -> int {
-        return static_cast<TextRenderer *>(context)->measureKerningForLayout(left, right);
+    auto measure_kerning = [](void *ctx, uint32_t left, uint32_t right) -> int {
+        return static_cast<Context *>(ctx)->renderer->measureKerningForLayout(left, right);
     };
-    return text_layout::break_utf8(text, options, measure, this, measure_kerning);
+    auto measure_at = [](void *ctx, uint32_t cp, size_t byte) -> int {
+        auto &state = *static_cast<Context *>(ctx);
+        const int scale = inline_style::scale_of(inline_style::at(state.styles, byte, state.first));
+        return inline_style::scaled(state.renderer->measureCodepointForLayout(cp), scale);
+    };
+    return text_layout::break_utf8(text, options, measure, &context, measure_kerning,
+                                   styles.empty() ? nullptr : +measure_at);
 }
 
 int TextRenderer::verticalCellAdvance() const
@@ -2050,7 +2080,6 @@ int TextRenderer::measureUtf8VerticalStyled(
     size_t byte_end) const
 {
     const int cell = verticalCellAdvance();
-    const int small_cell = std::max(1, (cell * 65 + 50) / 100);
     int height = 0;
     const size_t limit = std::min(byte_end, text.size());
     size_t style_index = 0;
@@ -2059,15 +2088,8 @@ int TextRenderer::measureUtf8VerticalStyled(
         uint32_t cp = 0;
         pos = nextUtf8(text, pos, cp);
         if (cp == '\r' || cp == '\n') continue;
-        while (style_index < styles.size() && styles[style_index].byte_end <= byte_pos)
-            ++style_index;
-        bool small = false;
-        for (size_t si = style_index; si < styles.size(); ++si) {
-            if (styles[si].byte_start > byte_pos) break;
-            if (byte_pos < styles[si].byte_end &&
-                inline_style::has(styles[si].flags, inline_style::Small)) small = true;
-        }
-        height += small ? small_cell : cell;
+        const int scale = inline_style::scale_of(inline_style::at(styles, byte_pos, style_index));
+        height += std::max(1, inline_style::scaled(cell, scale));
     }
     return height;
 }
@@ -2102,21 +2124,15 @@ std::vector<text_layout::Line> TextRenderer::layoutUtf8VerticalParagraphStyled(
     struct Context {
         TextRenderer *renderer;
         const std::vector<inline_style::Span> *styles;
+        size_t first = 0;
     } context{this, &styles};
     auto measure = [](void *ctx, uint32_t) -> int {
         return static_cast<Context *>(ctx)->renderer->verticalCellAdvance();
     };
     auto measure_at = [](void *ctx, uint32_t, size_t byte_pos) -> int {
         auto *state = static_cast<Context *>(ctx);
-        const auto &spans = *state->styles;
-        const int cell = state->renderer->verticalCellAdvance();
-        for (const auto &span : spans) {
-            if (span.byte_start > byte_pos) break;
-            if (byte_pos < span.byte_end &&
-                inline_style::has(span.flags, inline_style::Small))
-                return std::max(1, (cell * 65 + 50) / 100);
-        }
-        return cell;
+        const int scale = inline_style::scale_of(inline_style::at(*state->styles, byte_pos, state->first));
+        return std::max(1, inline_style::scaled(state->renderer->verticalCellAdvance(), scale));
     };
     return text_layout::break_utf8(text, options, measure, &context, nullptr, measure_at);
 }
@@ -2133,15 +2149,9 @@ void TextRenderer::drawStyledUtf8VerticalColumn(
         uint32_t cp = 0;
         pos = nextUtf8(text, pos, cp);
         if (cp == '\r' || cp == '\n') continue;
-        while (style_index < styles.size() && styles[style_index].byte_end <= byte_pos)
-            ++style_index;
-        uint8_t flags = inline_style::None;
-        for (size_t si = style_index; si < styles.size(); ++si) {
-            if (styles[si].byte_start > byte_pos) break;
-            if (byte_pos < styles[si].byte_end) flags |= styles[si].flags;
-        }
-        const bool small = inline_style::has(flags, inline_style::Small);
-        const int scale = small ? 65 : 100;
+        const auto style = inline_style::at(styles, byte_pos, style_index);
+        const int scale = inline_style::scale_of(style);
+        const int extent = std::max(1, inline_style::scaled(cell, scale));
         {
             // Unicode vertical presentation forms keep punctuation in the
             // correct corner without rotating the entire framebuffer. If a
@@ -2169,19 +2179,18 @@ void TextRenderer::drawStyledUtf8VerticalColumn(
             if (glyph) {
                 const int advance = std::max(1, (glyph->advance * scale + 50) / 100);
                 const int glyph_x = x + std::max(0, (column_width - advance) / 2);
-                if (small) {
+                if (scale != 100) {
                     drawGlyphScaled(gfx, *glyph, glyph_x,
-                                    y + (baseline() * scale + 50) / 100,
-                                    scale, color);
+                                    y + inline_style::scaled(baseline(), scale),
+                                    scale, color, style.flags);
                 } else {
-                    drawGlyphStyled(gfx, *glyph, glyph_x, y + baseline(), color, flags);
+                    drawGlyphStyled(gfx, *glyph, glyph_x, y + baseline(), color, style.flags);
                 }
             } else {
-                gfx.drawRect(x, y, std::min(column_width, cell),
-                             small ? std::max(1, (cell * 65 + 50) / 100) : cell, color);
+                gfx.drawRect(x, y, std::min(column_width, extent), extent, color);
             }
         }
-        y += small ? std::max(1, (cell * 65 + 50) / 100) : cell;
+        y += extent;
     }
 }
 
@@ -2255,16 +2264,21 @@ void TextRenderer::drawGlyph(lgfx::LGFXBase &gfx, const Glyph &glyph,
 }
 
 void TextRenderer::drawGlyphScaled(lgfx::LGFXBase &gfx, const Glyph &glyph,
-                                   int x, int baseline_y, int scale_percent, uint16_t color)
+                                    int x, int baseline_y, int scale_percent, uint16_t color,
+                                    uint8_t flags)
 {
     if (glyph.data_size == 0 || glyph.width <= 0 || glyph.height <= 0 ||
         glyph.data_offset + glyph.data_size > _glyph_pool_used) return;
     const int dst_w = std::max(1, (glyph.width * scale_percent + 50) / 100);
     const int dst_h = std::max(1, (glyph.height * scale_percent + 50) / 100);
-    const int gx = x + (glyph.bitmap_left * scale_percent + 50) / 100;
-    const int gy = baseline_y - (glyph.bitmap_top * scale_percent + 50) / 100;
+    const int gx = x + inline_style::scaled(glyph.bitmap_left, scale_percent);
+    const int gy = baseline_y - inline_style::scaled(glyph.bitmap_top, scale_percent);
+    const int bold = inline_style::has(flags, inline_style::Bold) ? 1 : 0;
+    const int italic = inline_style::has(flags, inline_style::Italic)
+        ? inline_style::scaled(std::clamp(_style.font_size / 10, 2, 5), scale_percent) : 0;
     const uint8_t *bitmap = _glyph_pool + glyph.data_offset;
     for (int row = 0; row < dst_h; ++row) {
+        const int shear = italic * (dst_h - 1 - row) / std::max(1, dst_h - 1);
         const int sy0 = row * glyph.height / dst_h;
         const int sy1 = std::max(sy0 + 1, (row + 1) * glyph.height / dst_h);
         int run_start = -1;
@@ -2275,7 +2289,7 @@ void TextRenderer::drawGlyphScaled(lgfx::LGFXBase &gfx, const Glyph &glyph,
                 : static_cast<uint8_t>(255 - run_level * 17);
             const uint16_t draw_color = (color == TFT_BLACK || color == TFT_WHITE)
                 ? gray565(gray) : color;
-            gfx.writeFastHLine(gx + run_start, gy + row, end - run_start, draw_color);
+            gfx.writeFastHLine(gx + run_start + shear, gy + row, end - run_start + bold, draw_color);
             run_start = -1;
         };
         for (int col = 0; col < dst_w; ++col) {
@@ -2426,7 +2440,8 @@ void TextRenderer::drawStyledUtf8Line(lgfx::LGFXBase &gfx, const std::string &te
     }
 
     int cursor = x;
-    int baseline_y = y + baseline();
+    const int line_scale = inline_style::max_font_scale(styles, 0, text.size());
+    const int baseline_y = y + inline_style::scaled(baseline(), line_scale);
     std::vector<uint32_t> codepoints;
     codepoints.reserve(text.size() / 2 + 1);
     int cjk_count = 0;
@@ -2441,7 +2456,7 @@ void TextRenderer::drawStyledUtf8Line(lgfx::LGFXBase &gfx, const std::string &te
     const int glyph_count = (int)codepoints.size();
     std::vector<int> gap_extra(glyph_count > 1 ? (size_t)glyph_count - 1 : 0, 0);
     if (justify_width > 0 && glyph_count > 1) {
-        int natural_width = measureUtf8(text);
+        int natural_width = measureUtf8Styled(text, styles);
         int requested_extra = std::max(0, justify_width - natural_width);
         std::vector<int> word_gaps;
         std::vector<int> cjk_gaps;
@@ -2496,10 +2511,13 @@ void TextRenderer::drawStyledUtf8Line(lgfx::LGFXBase &gfx, const std::string &te
 
         if (previous_cp != 0) cursor += measureKerningForLayout(previous_cp, cp);
 
+        const auto style = inline_style::at(styles, byte_pos, style_index);
+        const int scale = inline_style::scale_of(style);
         const Glyph *glyph = getGlyph(cp);
         if (!glyph) {
-            int w = measureCodepoint(cp);
-            gfx.drawRect(cursor, y, std::max(4, w), std::max(4, lineHeight() - _style.line_spacing), color);
+            int w = inline_style::scaled(measureCodepoint(cp), scale);
+            gfx.drawRect(cursor, baseline_y - inline_style::scaled(baseline(), scale), std::max(4, w),
+                         std::max(4, inline_style::scaled(lineHeight() - _style.line_spacing, scale)), color);
             cursor += w;
             if (glyph_index + 1 < glyph_count) {
                 cursor += _style.letter_spacing + gap_extra[(size_t)glyph_index];
@@ -2509,16 +2527,9 @@ void TextRenderer::drawStyledUtf8Line(lgfx::LGFXBase &gfx, const std::string &te
             continue;
         }
 
-        while (style_index < styles.size() && styles[style_index].byte_end <= byte_pos) {
-            ++style_index;
-        }
-        uint8_t style_flags = inline_style::None;
-        for (size_t si = style_index; si < styles.size(); ++si) {
-            if (styles[si].byte_start > byte_pos) break;
-            if (byte_pos < styles[si].byte_end) style_flags |= styles[si].flags;
-        }
-        drawGlyphStyled(gfx, *glyph, cursor, baseline_y, color, style_flags);
-        cursor += glyph->advance;
+        if (scale == 100) drawGlyphStyled(gfx, *glyph, cursor, baseline_y, color, style.flags);
+        else drawGlyphScaled(gfx, *glyph, cursor, baseline_y, scale, color, style.flags);
+        cursor += inline_style::scaled(glyph->advance, scale);
         if (glyph_index + 1 < glyph_count) {
             cursor += _style.letter_spacing + gap_extra[(size_t)glyph_index];
         }

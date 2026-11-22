@@ -1,9 +1,16 @@
 #include "renderer/DocumentLayout.h"
 
 #include <algorithm>
+#include <string_view>
 #include <utility>
 
 namespace document_layout {
+
+static int line_extent(const text_layout::Line &line, const Block &block, int base)
+{
+    return std::max(1, inline_style::scaled(base,
+        inline_style::max_font_scale(block.styles, line.byte_start, line.byte_end)));
+}
 namespace {
 
 struct Builder {
@@ -62,7 +69,7 @@ struct Builder {
         PageItem item;
         item.type = PageItemType::Text;
         item.text = line.text;
-        item.height = options.line_height;
+        item.height = line_extent(line, block, options.line_height);
         if (!block.source_points.empty()) {
             auto point = std::upper_bound(block.source_points.begin(), block.source_points.end(),
                 line.byte_start, [](size_t value, const script_conversion::Point &p) {
@@ -90,13 +97,29 @@ struct Builder {
         item.x_offset = line.x_offset;
         item.width = std::max(1, options.content_width - line.x_offset);
         item.centered = centered;
+        // TextLayout removes soft hyphens and can append a visible hyphen at
+        // a break. Translate source offsets to the resulting display bytes.
+        std::vector<size_t> soft_hyphens;
+        const auto source_line = std::string_view(block.text).substr(
+            line.byte_start, line.byte_end - line.byte_start);
+        for (size_t pos = source_line.find("\xC2\xAD"); pos != std::string_view::npos;
+             pos = source_line.find("\xC2\xAD", pos + 2)) {
+            soft_hyphens.push_back(line.byte_start + pos);
+        }
+        auto display_byte = [&](size_t source) {
+            const size_t removed = std::lower_bound(soft_hyphens.begin(), soft_hyphens.end(), source) -
+                                   soft_hyphens.begin();
+            return source - line.byte_start - 2 * removed;
+        };
+        const bool added_hyphen = item.text.size() > display_byte(line.byte_end);
         for (const auto &ref : block.footnotes) {
             const size_t start = std::max(ref.byte_start, line.byte_start);
             const size_t end = std::min(ref.byte_end, line.byte_end);
             if (start >= end) continue;
             PageItem::FootnoteRef line_ref;
-            line_ref.byte_start = start - line.byte_start;
-            line_ref.byte_end = end - line.byte_start;
+            line_ref.byte_start = display_byte(start);
+            line_ref.byte_end = display_byte(end);
+            if (line_ref.byte_start >= line_ref.byte_end) continue;
             line_ref.target = ref.target;
             line_ref.content = ref.content;
             line_ref.kind = ref.kind;
@@ -105,11 +128,12 @@ struct Builder {
         for (const auto &span : block.styles) {
             const size_t start = std::max(span.byte_start, line.byte_start);
             const size_t end = std::min(span.byte_end, line.byte_end);
-            if (start >= end || span.flags == inline_style::None) continue;
-            inline_style::Span line_span;
-            line_span.byte_start = start - line.byte_start;
-            line_span.byte_end = end - line.byte_start;
-            line_span.flags = span.flags;
+            if (start >= end || (span.flags == inline_style::None && !span.font_scale)) continue;
+            inline_style::Span line_span = span;
+            line_span.byte_start = display_byte(start);
+            line_span.byte_end = display_byte(end);
+            if (added_hyphen && end == line.byte_end) ++line_span.byte_end;
+            if (line_span.byte_start >= line_span.byte_end) continue;
             item.styles.push_back(line_span);
         }
         // Exact touch geometry for a justified substring would require the
@@ -117,8 +141,8 @@ struct Builder {
         // their natural spacing so the visible marker and hit box agree.
         if (!item.footnotes.empty()) item.justify = false;
         ensure_space(item.height);
+        used_height += item.height;
         page.push_back(std::move(item));
-        used_height += options.line_height;
     }
 
     void add_fallback_text(uint64_t position)
@@ -373,22 +397,27 @@ Pages paginate(const std::vector<Block> &blocks, const Options &options)
                 }
             }
 
-            int protected_height = std::min(options.content_height,
-                                             gap_height + protected_lines * options.line_height);
+            const size_t count = std::min(wrapped.size(), static_cast<size_t>(protected_lines));
+            int protected_height = gap_height + (protected_lines - static_cast<int>(count)) * options.line_height;
+            for (size_t i = 0; i < count && protected_height < options.content_height; ++i)
+                protected_height += line_extent(wrapped[i], block, options.line_height);
+            protected_height = std::min(options.content_height, protected_height);
             builder.ensure_space(protected_height);
             builder.add_space(block.content_position, gap_height);
 
             size_t line_index = 0;
             while (line_index < wrapped.size()) {
-                int capacity = (options.content_height - builder.used_height) /
-                               options.line_height;
-                if (capacity <= 0 && !builder.page.empty()) {
-                    builder.finish_page();
-                    capacity = options.content_height / options.line_height;
+                builder.ensure_space(line_extent(wrapped[line_index], block, options.line_height));
+                const size_t remaining = wrapped.size() - line_index;
+                int take = 0;
+                int available = options.content_height - builder.used_height;
+                while (static_cast<size_t>(take) < remaining) {
+                    const int extent = line_extent(wrapped[line_index + take], block, options.line_height);
+                    if (extent > available) break;
+                    available -= extent;
+                    ++take;
                 }
-
-                size_t remaining = wrapped.size() - line_index;
-                int take = std::min<int>((int)remaining, std::max(1, capacity));
+                take = std::max(1, take);
                 int leftover = (int)remaining - take;
                 int min_widow = std::max(1, options.widow_lines);
                 if (leftover > 0 && leftover < min_widow && take > 1) {

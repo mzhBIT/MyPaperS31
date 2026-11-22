@@ -49,6 +49,8 @@ private:
     std::string _path;
     std::string _cover_href;
     std::string _last_error;
+    uint64_t _stylesheet_start = 0;
+    uint64_t _stylesheet_end = 0;
     metadata_memory::Vector<Fb2SectionItem> _sections;
     metadata_memory::Vector<size_t> _spine_indices;
     metadata_memory::Vector<BinaryItem> _binaries;

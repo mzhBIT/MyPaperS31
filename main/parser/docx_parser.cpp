@@ -167,15 +167,36 @@ bool enabled(const Tag &tag)
     const std::string value = attr(tag, "val");
     return value != "0" && value != "false" && value != "off";
 }
-struct Style { int heading = 0; int bold = -1, italic = -1; std::string parent; };
+struct Style { int heading = 0; int bold = -1, italic = -1; int size = 0; std::string parent; };
 using Styles = std::unordered_map<std::string, Style>;
+constexpr char DEFAULT_RUN_STYLE[] = "<docDefaults>";
+constexpr char DEFAULT_PARAGRAPH_STYLE[] = "<defaultParagraph>";
+
+int font_size(const Tag &tag)
+{
+    const std::string value = attr(tag, "val");
+    char *end = nullptr;
+    const long size = std::strtol(value.c_str(), &end, 10);
+    return end != value.c_str() && *end == '\0' && size > 0 && size <= 3276 ? size : 0;
+}
+
 Styles read_styles(EpubZip &zip, const std::string &part)
 {
     Styles styles; std::string xml;
     if (part.empty() || !read_xml(zip, part, &xml, 1024 * 1024)) return styles;
     size_t pos = 0; Tag tag; std::string id;
+    bool in_default_run = false;
     while (next_tag(xml, &pos, &tag)) {
-        if (tag.name == "style") { id = tag.end ? "" : attr(tag, "styleId"); continue; }
+        if (tag.name == "style") {
+            id = tag.end ? "" : attr(tag, "styleId");
+            const auto is_default = attr(tag, "default");
+            if (!id.empty() && attr(tag, "type") == "paragraph" &&
+                (is_default == "1" || is_default == "true"))
+                styles[DEFAULT_PARAGRAPH_STYLE].parent = id;
+            continue;
+        }
+        if (tag.name == "rPrDefault") in_default_run = !tag.end && !tag.empty;
+        if (tag.name == "sz" && !tag.end && in_default_run) styles[DEFAULT_RUN_STYLE].size = font_size(tag);
         if (id.empty() || tag.end) continue;
         auto &style = styles[id];
         if (tag.name == "outlineLvl") {
@@ -185,6 +206,7 @@ Styles read_styles(EpubZip &zip, const std::string &part)
         if (tag.name == "basedOn") style.parent = attr(tag, "val");
         if (tag.name == "b") style.bold = enabled(tag);
         if (tag.name == "i") style.italic = enabled(tag);
+        if (tag.name == "sz") style.size = font_size(tag);
         if (tag.name == "name") {
             const std::string name = attr(tag, "val");
             if (name.size() == 9 && name.compare(0, 8, "heading ") == 0 && name[8] >= '1' && name[8] <= '6')
@@ -209,6 +231,7 @@ Style style_for(const Styles &styles, const std::string &id, int depth = 0)
     if (it->second.heading) result.heading = it->second.heading;
     if (it->second.bold >= 0) result.bold = it->second.bold;
     if (it->second.italic >= 0) result.italic = it->second.italic;
+    if (it->second.size > 0) result.size = it->second.size;
     return result;
 }
 struct Paragraph { std::string html, title; int heading = 0; };
@@ -218,7 +241,12 @@ bool paragraphs(const std::string &xml, const Relationships &rels, const Styles 
 {
     size_t pos = 0; Tag tag;
     bool in_p = false, in_text = false, in_run = false, numbered = false;
-    int skip = 0, heading = 0, bold = -1, italic = -1;
+    int skip = 0, heading = 0, bold = -1, italic = -1, size = 0;
+    const Style normal = style_for(styles, "Normal");
+    const int default_size = style_for(styles, DEFAULT_RUN_STYLE).size;
+    const int default_paragraph_size = style_for(styles, DEFAULT_PARAGRAPH_STYLE).size;
+    const int base_size = default_paragraph_size > 0 ? default_paragraph_size :
+                          normal.size > 0 ? normal.size : (default_size > 0 ? default_size : 22);
     Style paragraph_style, run_style;
     std::string body;
     int64_t last_yield = esp_timer_get_time();
@@ -236,11 +264,17 @@ bool paragraphs(const std::string &xml, const Relationships &rels, const Styles 
     auto styled_text = [&](const std::string &text) {
         const bool b = bold < 0 ? (run_style.bold < 0 ? paragraph_style.bold == 1 : run_style.bold == 1) : bold != 0;
         const bool i = italic < 0 ? (run_style.italic < 0 ? paragraph_style.italic == 1 : run_style.italic == 1) : italic != 0;
+        const int half_points = size > 0 ? size : (run_style.size > 0 ? run_style.size : paragraph_style.size);
+        const int font_scale = half_points > 0
+            ? std::clamp((100 * half_points + base_size / 2) / base_size, 25, 300) : 0;
+        const bool explicit_scale = font_scale > 0 && (font_scale != 100 || heading);
+        if (explicit_scale) body += "<span data-reader-font-scale=\"" + std::to_string(font_scale) + "\">";
         if (b) body += "<strong>";
         if (i) body += "<em>";
         body += text;
         if (i) body += "</em>";
         if (b) body += "</strong>";
+        if (explicit_scale) body += "</span>";
     };
     size_t previous = 0;
     while (next_tag(xml, &pos, &tag)) {
@@ -268,7 +302,7 @@ bool paragraphs(const std::string &xml, const Relationships &rels, const Styles 
         } else if (in_p) {
             if (tag.name == "t") in_text = !tag.end && !tag.empty;
             else if (tag.name == "r") {
-                in_run = !tag.end && !tag.empty; bold = italic = -1; run_style = {};
+                in_run = !tag.end && !tag.empty; bold = italic = -1; size = 0; run_style = {};
             } else if (!tag.end) {
                 if (tag.name == "pStyle") {
                     paragraph_style = style_for(styles, attr(tag, "val")); heading = paragraph_style.heading;
@@ -278,6 +312,7 @@ bool paragraphs(const std::string &xml, const Relationships &rels, const Styles 
                     heading = level >= 0 && level < 6 ? level + 1 : 0;
                 } else if (tag.name == "b") { if (in_run) bold = enabled(tag); else paragraph_style.bold = enabled(tag); }
                 else if (tag.name == "i") { if (in_run) italic = enabled(tag); else paragraph_style.italic = enabled(tag); }
+                else if (tag.name == "sz") { if (in_run) size = font_size(tag); else paragraph_style.size = font_size(tag); }
                 else if (tag.name == "numPr") numbered = true;
                 else if (tag.name == "tab") body += " ";
                 else if (tag.name == "br" || tag.name == "cr") body += "<br/>";

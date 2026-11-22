@@ -1,4 +1,5 @@
 #include "parser/epub_html.h"
+#include "parser/BookFontSize.h"
 #ifdef ESP_PLATFORM
 #include "utils/CooperativeYield.h"
 #else
@@ -10,6 +11,7 @@ struct CooperativeYield { void ifDue() {} };
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -632,9 +634,74 @@ static void flush_content_block(std::string *current, std::vector<EpubContentBlo
     blocks->push_back(block);
 }
 
+static std::vector<book_font_size::Rule> collect_font_sizes(
+    const std::string &xhtml, const std::string &base, EpubStylesheetReader read_stylesheet,
+    const char *fallback_stylesheet)
+{
+    std::vector<book_font_size::Rule> rules;
+    constexpr size_t max_css_bytes = 128 * 1024;
+    size_t used = 0;
+    size_t pos = 0;
+    const auto body = xhtml.find("<body");
+    const size_t head_end = std::min({body, xhtml.size(), max_css_bytes});
+    unsigned links = 0;
+    bool loaded_link = false;
+    while (used < max_css_bytes && links < 16) {
+        const size_t tag = xhtml.find('<', pos);
+        if (tag >= head_end) break;
+        const size_t end = xhtml.find('>', tag + 1);
+        if (end >= head_end) break;
+        pos = end + 1;
+        if (xhtml.compare(tag, 4, "<!--") == 0) {
+            const auto close = xhtml.find("-->", tag + 4);
+            if (close >= head_end) break;
+            pos = close + 3;
+            continue;
+        }
+        std::string css;
+        const std::string raw = xhtml.substr(tag + 1, end - tag - 1);
+        const std::string name = tag_name_from(raw);
+        if (name == "style" && raw.front() != '/') {
+            const size_t close = xhtml.find("</style", pos);
+            if (close >= head_end) break;
+            if (close - pos <= max_css_bytes - used) css = xhtml.substr(pos, close - pos);
+            pos = close;
+        } else if (read_stylesheet && name == "link" && raw.front() != '/') {
+            std::unordered_map<std::string, std::string> attrs;
+            std::string parsed;
+            if (!parse_tag_attrs(raw, &parsed, &attrs) ||
+                !book_font_size::class_matches(attr_value(attrs, "rel"), "stylesheet")) continue;
+            const auto href = attr_value(attrs, "href");
+            if (href.empty() || href.rfind("//", 0) == 0) continue;
+            const bool kindle_flow = href.rfind("kindle:flow:", 0) == 0;
+            if (!kindle_flow && href.find(':') != std::string::npos) continue;
+            ++links;
+            if (!read_stylesheet(kindle_flow ? href : normalize_join(base, href),
+                                 max_css_bytes - used, &css)) continue;
+            loaded_link = true;
+        }
+        if (!css.empty() && css.size() <= max_css_bytes - used) {
+            used += css.size();
+            book_font_size::add_stylesheet(std::move(css), &rules);
+        }
+    }
+    if (!loaded_link && read_stylesheet && fallback_stylesheet && used < max_css_bytes) {
+        std::string css;
+        if (read_stylesheet(fallback_stylesheet, max_css_bytes - used, &css)) {
+            std::vector<book_font_size::Rule> defaults;
+            book_font_size::add_stylesheet(std::move(css), &defaults);
+            rules.insert(rules.begin(), std::make_move_iterator(defaults.begin()),
+                         std::make_move_iterator(defaults.end()));
+        }
+    }
+    return rules;
+}
+
 bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_href,
                              std::vector<EpubContentBlock> *blocks,
-                             bool inline_sup_annotations, bool preserve_inline_styles)
+                             bool inline_sup_annotations, bool preserve_inline_styles,
+                             bool preserve_font_sizes, EpubStylesheetReader read_stylesheet,
+                             const char *fallback_stylesheet)
 {
     if (!blocks) return false;
     blocks->clear();
@@ -643,6 +710,20 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
 
     std::string current;
     std::string base = dirname_of(item_href);
+    const auto font_rules = preserve_font_sizes ? collect_font_sizes(xhtml, base, read_stylesheet,
+                                                                    fallback_stylesheet)
+                                                : std::vector<book_font_size::Rule>{};
+    std::vector<book_font_size::Element> elements;
+    float root_size = 16;
+    float body_size = 16;
+    auto close_element = [&](const std::string &name) {
+        for (size_t i = elements.size(); i > 0; --i) {
+            if (elements[i - 1].name == name) {
+                elements.resize(i - 1);
+                break;
+            }
+        }
+    };
     const auto footnote_definitions = collect_footnote_definitions(xhtml, item_href);
     cooperative.ifDue();
     const auto footnote_targets = collect_footnote_reference_targets(xhtml, item_href);
@@ -652,15 +733,18 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
     std::vector<EpubSourcePoint> pending_source_points;
     std::vector<inline_style::Span> pending_styles;
     int bold_depth = 0, italic_depth = 0;
-    auto append_text = [&](const std::string &raw) {
+    auto append_text = [&](const std::string &raw, bool explicit_scale = false) {
         const size_t start = current.size();
         append_normalized_text(raw, &current);
         const uint8_t flags = (bold_depth ? inline_style::Bold : 0) |
                               (italic_depth ? inline_style::Italic : 0);
-        if (preserve_inline_styles && flags && current.size() > start) {
+        const uint16_t scale = elements.empty() ? 100 : book_font_size::ratio(elements.back().size, body_size);
+        const uint16_t font_scale = scale == 100 && !explicit_scale ? 0 : scale;
+        if ((flags || font_scale) && current.size() > start) {
             if (!pending_styles.empty() && pending_styles.back().flags == flags &&
+                pending_styles.back().font_scale == font_scale &&
                 pending_styles.back().byte_end == start) pending_styles.back().byte_end = current.size();
-            else pending_styles.push_back({start, current.size(), flags});
+            else pending_styles.push_back({start, current.size(), flags, font_scale});
         }
     };
     struct ActiveLink {
@@ -718,6 +802,29 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
             pos = tag_end + 1;
             continue;
         }
+        if (preserve_font_sizes) {
+            if (closing) close_element(name);
+            else if (parsed_attrs && !self_closing && elements.size() < 128 &&
+                     name != "br" && name != "hr" && name != "img" && name != "input" &&
+                     name != "meta" && name != "link" && name != "wbr" && name != "col" &&
+                     name != "source" && name != "area" && name != "base" &&
+                     !name.empty() && std::isalpha(static_cast<unsigned char>(name[0]))) {
+                if (name == "p") close_element(name);
+                book_font_size::Element element{name, attr_value(attrs, "id"), attr_value(attrs, "class"),
+                                                attr_value(attrs, "data-reader-element")};
+                const float parent = elements.empty() ? body_size : elements.back().size;
+                element.size = book_font_size::element_size(element, elements, font_rules,
+                    attr_value(attrs, "style"), attr_value(attrs, "size"), parent, root_size);
+                if (name == "html") root_size = body_size = element.size;
+                if (name == "body") body_size = element.size;
+                const auto reader_scale = attr_value(attrs, "data-reader-font-scale");
+                if (!reader_scale.empty()) {
+                    const int scale = std::atoi(reader_scale.c_str());
+                    if (scale >= 25 && scale <= 300) element.size = body_size * scale / 100.f;
+                }
+                elements.push_back(std::move(element));
+            }
+        }
         if (preserve_inline_styles && !self_closing) {
             if (name == "strong" || name == "b") bold_depth = std::max(0, bold_depth + (closing ? -1 : 1));
             if (name == "em" || name == "i") italic_depth = std::max(0, italic_depth + (closing ? -1 : 1));
@@ -742,7 +849,7 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
                     const std::string reading = plain_text_from_html(
                         xhtml.substr(rt_tag_end + 1, rt_close - rt_tag_end - 1));
                     const size_t anchor = current.size();
-                    append_normalized_text(base_text, &current);
+                    append_text(base_text);
                     source_delta += static_cast<int64_t>(reading.size());
                     pending_source_points.push_back({current.size(), static_cast<size_t>(
                         std::max<int64_t>(0, static_cast<int64_t>(current.size()) + source_delta))});
@@ -754,6 +861,7 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
                         ref.kind = EpubFootnoteRef::Kind::RubyText;
                         pending_footnotes.push_back(std::move(ref));
                     }
+                    close_element(name);
                     pos = ruby_end + 1;
                     continue;
                 }
@@ -773,11 +881,12 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
                     if (!note.empty()) {
                         EpubFootnoteRef ref;
                         ref.byte_start = current.size();
-                        append_normalized_text(note, &current);
+                        append_text(note, preserve_font_sizes);
                         ref.byte_end = current.size();
                         ref.kind = EpubFootnoteRef::Kind::InlineSup;
                         if (ref.byte_start < ref.byte_end) pending_footnotes.push_back(std::move(ref));
                     }
+                    close_element(name);
                     pos = sup_end + 1;
                     continue;
                 }

@@ -10,7 +10,7 @@
 
 namespace document_layout {
 
-static constexpr uint32_t ALGORITHM_VERSION = 9;
+static constexpr uint32_t ALGORITHM_VERSION = 10;
 
 enum class BlockType {
     Paragraph,

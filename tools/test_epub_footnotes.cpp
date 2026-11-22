@@ -23,6 +23,31 @@ static std::vector<EpubFootnoteRef> references(const std::vector<EpubContentBloc
 
 int main()
 {
+    auto read_css = [](const std::string &href, size_t limit, std::string *out) {
+        assert(href == "OEBPS/Styles/book.css");
+        *out = ":root {font-size:20px} body {font-size:90%} "
+               "body > h2.title {font-size:1.5em} .large {font-size:1.8rem}";
+        return out->size() <= limit;
+    };
+    std::vector<EpubContentBlock> sizes;
+    assert(epub_parse_xhtml_blocks(
+        "<html><head><link rel='stylesheet' href='../Styles/book.css'/>"
+        "<style>span.small {font-size:50% !important}</style></head><body>"
+        "<h2 class='title'>A<strong><span class='small' style='font-size:30px'>B</span></strong>C</h2>"
+        "<p>regular <span class='large'>large</span></p><h1>D</h1>"
+        "<p><font size='5'>old</font> regular</p>"
+        "<p><sup style='font-size:100%'>Note</sup></p></body></html>",
+        "OEBPS/Text/chapter.xhtml", &sizes, true, true, true, read_css));
+    assert(sizes.size() == 5 && sizes[0].text == "ABC");
+    assert(sizes[0].styles.size() == 3);
+    assert(sizes[0].styles[0].font_scale == 150);
+    assert(sizes[0].styles[1].font_scale == 75 && sizes[0].styles[1].flags == inline_style::Bold);
+    assert(sizes[0].styles[2].font_scale == 150);
+    assert(sizes[1].styles.size() == 1 && sizes[1].styles[0].font_scale == 200);
+    assert(sizes[2].styles[0].font_scale == 200);
+    assert(sizes[3].styles[0].font_scale == 133);
+    assert(sizes[4].styles[0].font_scale == 100 && sizes[4].footnotes.size() == 1);
+
     const auto headings = parse("<h1>Chapter 1&middot;Title</h1>");
     assert(headings.size() == 1 && headings[0].heading);
     assert(headings[0].text == "Chapter 1\xC2\xB7" "Title");
