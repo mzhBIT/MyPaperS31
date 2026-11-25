@@ -1,6 +1,7 @@
 #pragma once
 
 #include "renderer/InlineStyle.h"
+#include "renderer/ParagraphAlignment.h"
 
 #include <cctype>
 #include <cmath>
@@ -9,7 +10,7 @@
 #include <string_view>
 #include <vector>
 
-namespace book_font_size {
+namespace book_styles {
 
 using View = std::string_view;
 using namespace std::literals::string_view_literals;
@@ -51,9 +52,23 @@ struct Declaration {
     bool important = false;
 };
 
-inline Declaration declaration(View css)
+struct Declarations {
+    Declaration font_size;
+    Declaration alignment;
+};
+
+inline ParagraphAlignment alignment_value(View value)
 {
-    Declaration result;
+    if (value == "left" || value == "start" || value == "initial") return ParagraphAlignment::Start;
+    if (value == "center") return ParagraphAlignment::Center;
+    if (value == "right" || value == "end") return ParagraphAlignment::End;
+    if (value == "justify") return ParagraphAlignment::Justify;
+    return ParagraphAlignment::Automatic;
+}
+
+inline Declarations declarations(View css)
+{
+    Declarations result;
     while (!css.empty()) {
         const auto end = css.find(';');
         const View entry = trim(css.substr(0, end));
@@ -62,14 +77,23 @@ inline Declaration declaration(View css)
         if (colon == View::npos) continue;
         std::string property(trim(entry.substr(0, colon)));
         for (char &ch : property) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
-        if (property != "font-size") continue;
+        if (property != "font-size" && property != "text-align") continue;
         std::string value(trim(entry.substr(colon + 1)));
         for (char &ch : value) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
         const auto bang = value.find('!');
         const bool important = bang != std::string::npos && trim(View(value).substr(bang + 1)) == "important";
-        if (bang != std::string::npos) value = std::string(trim(View(value).substr(0, bang)));
-        if ((!result.important || important) && compute(value, 16, 16) > 0)
-            result = {std::move(value), important};
+        if (bang != std::string::npos) {
+            if (!important) continue;
+            value = std::string(trim(View(value).substr(0, bang)));
+        }
+        if (property == "font-size") {
+            if ((!result.font_size.important || important) && compute(value, 16, 16) > 0)
+                result.font_size = {std::move(value), important};
+        } else if ((!result.alignment.important || important) &&
+                   (alignment_value(value) != ParagraphAlignment::Automatic ||
+                    value == "inherit" || value == "unset" || value == "match-parent")) {
+            result.alignment = {std::move(value), important};
+        }
     }
     return result;
 }
@@ -77,6 +101,8 @@ inline Declaration declaration(View css)
 struct Element {
     std::string name, id, classes, original_name;
     float size = 16;
+    ParagraphAlignment alignment = ParagraphAlignment::Automatic;
+    bool block = false;
 };
 
 struct SelectorPart {
@@ -86,7 +112,7 @@ struct SelectorPart {
 
 struct Rule {
     std::vector<SelectorPart> selector;
-    Declaration font;
+    Declarations style;
     unsigned specificity = 0;
 };
 
@@ -142,7 +168,7 @@ inline bool matches(const Rule &rule, const std::vector<Element> &parents,
     return true;
 }
 
-inline void add_rule(View selector, const Declaration &font, std::vector<Rule> *rules)
+inline void add_rule(View selector, const Declarations &style, std::vector<Rule> *rules)
 {
     Rule rule;
     bool direct = false;
@@ -194,7 +220,7 @@ inline void add_rule(View selector, const Declaration &font, std::vector<Rule> *
         selector.remove_prefix(end);
     }
     if (rule.selector.empty() || direct) return;
-    rule.font = font;
+    rule.style = style;
     rules->push_back(std::move(rule));
 }
 
@@ -230,12 +256,12 @@ inline void add_stylesheet(std::string css, std::vector<Rule> *rules)
         }
         if (close == rest.size()) break;
         if (rest.front() != '@') {
-            const auto font = declaration(rest.substr(open + 1, close - open - 1));
-            if (!font.value.empty()) {
+            const auto style = declarations(rest.substr(open + 1, close - open - 1));
+            if (!style.font_size.value.empty() || !style.alignment.value.empty()) {
                 View selectors = rest.substr(0, open);
                 while (!selectors.empty() && rules->size() < 512) {
                     const auto comma = selectors.find(',');
-                    add_rule(selectors.substr(0, comma), font, rules);
+                    add_rule(selectors.substr(0, comma), style, rules);
                     if (comma == View::npos) break;
                     selectors.remove_prefix(comma + 1);
                 }
@@ -245,21 +271,41 @@ inline void add_stylesheet(std::string css, std::vector<Rule> *rules)
     }
 }
 
-inline float element_size(const Element &element, const std::vector<Element> &parents,
-                          const std::vector<Rule> &rules, View inline_css, View legacy_size,
+inline Declarations element_style(const Element &element, const std::vector<Element> &parents,
+                                   const std::vector<Rule> &rules, View inline_css)
+{
+    const Rule *best_font = nullptr;
+    const Rule *best_alignment = nullptr;
+    auto wins = [](const Rule &rule, const Rule *best, Declaration Declarations::*member) {
+        const auto &candidate = rule.style.*member;
+        if (candidate.value.empty()) return false;
+        if (!best) return true;
+        const auto &previous = best->style.*member;
+        return candidate.important != previous.important
+            ? candidate.important : rule.specificity >= best->specificity;
+    };
+    for (const auto &rule : rules) {
+        const bool font_wins = wins(rule, best_font, &Declarations::font_size);
+        const bool alignment_wins = wins(rule, best_alignment, &Declarations::alignment);
+        if ((!font_wins && !alignment_wins) || !matches(rule, parents, element)) continue;
+        if (font_wins) best_font = &rule;
+        if (alignment_wins) best_alignment = &rule;
+    }
+    auto style = declarations(inline_css);
+    auto apply_rule = [](const Rule *best, Declaration Declarations::*member, Declaration &local) {
+        if (!best) return;
+        const auto &rule_value = best->style.*member;
+        if (local.value.empty() || (rule_value.important && !local.important)) local = rule_value;
+    };
+    apply_rule(best_font, &Declarations::font_size, style.font_size);
+    apply_rule(best_alignment, &Declarations::alignment, style.alignment);
+    return style;
+}
+
+inline float element_size(const Element &element, const Declaration &font, View legacy_size,
                           float parent, float root)
 {
-    const Rule *best = nullptr;
-    for (const auto &rule : rules) {
-        if (best && (rule.font.important < best->font.important ||
-            (rule.font.important == best->font.important && rule.specificity < best->specificity))) continue;
-        if (matches(rule, parents, element)) best = &rule;
-    }
-    const auto style = declaration(inline_css);
-    float specified = 0;
-    if (!style.value.empty() && (!best || style.important >= best->font.important))
-        specified = compute(style.value, parent, root);
-    else if (best) specified = compute(best->font.value, parent, root);
+    const float specified = compute(font.value, parent, root);
     if (specified > 0) return std::clamp(specified, 1.f, 1024.f);
     const View name(element.name);
     if (name.size() == 2 && name[0] == 'h' && name[1] >= '1' && name[1] <= '6')
@@ -285,4 +331,4 @@ inline uint16_t ratio(float size, float base)
     return static_cast<uint16_t>(std::lround(std::clamp(size / base * 100.f, 25.f, 300.f)));
 }
 
-}  // namespace book_font_size
+}  // namespace book_styles

@@ -23,6 +23,26 @@ static std::vector<EpubFootnoteRef> references(const std::vector<EpubContentBloc
 
 int main()
 {
+    std::vector<EpubContentBlock> aligned;
+    assert(epub_parse_xhtml_blocks(
+        "<html><head><style>.signature{text-align:right} .chapter{text-align:left}"
+        ".center{text-align:center} .forced{text-align:justify!important}"
+        "</style></head><body><h2 class='chapter'>Chapter</h2>"
+        "<div class='center'><p><span style='text-align:left'>Title</span></p>"
+        "<p class='signature'>Byline</p></div>"
+        "<p class='forced' style='text-align:center'>Body</p>"
+        "<p align='RIGHT' style='text-align:center'>Caption</p>"
+        "<center>Legacy MOBI</center><p>Default</p></body></html>",
+        "chapter.xhtml", &aligned, false, true, true));
+    assert(aligned.size() == 7);
+    assert(aligned[0].heading && aligned[0].alignment == ParagraphAlignment::Start);
+    assert(aligned[1].alignment == ParagraphAlignment::Center);
+    assert(aligned[2].alignment == ParagraphAlignment::End);
+    assert(aligned[3].alignment == ParagraphAlignment::Justify);
+    assert(aligned[4].alignment == ParagraphAlignment::Center);
+    assert(aligned[5].alignment == ParagraphAlignment::Center);
+    assert(aligned[6].alignment == ParagraphAlignment::Automatic);
+
     auto read_css = [](const std::string &href, size_t limit, std::string *out) {
         assert(href == "OEBPS/Styles/book.css");
         *out = ":root {font-size:20px} body {font-size:90%} "

@@ -2,15 +2,17 @@
 
 #include "renderer/TextLayout.h"
 #include "renderer/InlineStyle.h"
+#include "renderer/ParagraphAlignment.h"
 #include "ui/script_conversion.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <string>
 #include <vector>
 
 namespace document_layout {
 
-static constexpr uint32_t ALGORITHM_VERSION = 10;
+static constexpr uint32_t ALGORITHM_VERSION = 11;
 
 enum class BlockType {
     Paragraph,
@@ -35,6 +37,7 @@ struct Block {
     bool page_break_before = false;
     bool allow_first_line_indent = false;
     bool paragraph_spacing_after = false;
+    ParagraphAlignment alignment = ParagraphAlignment::Automatic;
     struct FootnoteRef {
         enum class Kind : uint8_t { LinkedFootnote, RubyText, InlineSup, WereadComment };
         size_t byte_start = 0;
@@ -70,9 +73,22 @@ struct PageItem {
     uint64_t content_position = 0;
     bool justify = false;
     int x_offset = 0;
-    bool centered = false;
+    ParagraphAlignment alignment = ParagraphAlignment::Automatic;
     bool vertical = false;
     bool vertical_ruby_lane = false;
+
+    bool position_aligned() const
+    {
+        return alignment == ParagraphAlignment::Center || alignment == ParagraphAlignment::End;
+    }
+
+    int aligned_offset(int text_extent) const
+    {
+        if (!position_aligned()) return x_offset;
+        const int spare = std::max(0, width - text_extent);
+        return x_offset + (alignment == ParagraphAlignment::Center ? spare / 2 : spare);
+    }
+
     struct FootnoteRef {
         using Kind = Block::FootnoteRef::Kind;
         size_t byte_start = 0;

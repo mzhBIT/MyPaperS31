@@ -2947,14 +2947,10 @@ private:
                 const auto &layout_item = (*page)[i];
                 if (layout_item.type == document_layout::PageItemType::Text) {
                     if (!layout_item.text.empty()) {
-                        int text_x = rs.margin_left + layout_item.x_offset;
-                        if (layout_item.centered) {
-                            int text_width = reader_text_renderer().measureUtf8(layout_item.text);
-                            text_x = rs.margin_left + std::max(0, (content_width - text_width) / 2);
-                        }
-                        int underline_w = layout_item.justify
+                        const int underline_w = layout_item.justify
                                         ? layout_item.width
                                         : reader_text_renderer().measureUtf8(layout_item.text);
+                        const int text_x = rs.margin_left + layout_item.aligned_offset(underline_w);
                         reader_text_renderer().drawUtf8Line(
                             gfx, layout_item.text, text_x, y, TFT_BLACK,
                             layout_item.justify ? layout_item.width : 0);

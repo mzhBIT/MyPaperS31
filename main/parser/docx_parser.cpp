@@ -167,7 +167,13 @@ bool enabled(const Tag &tag)
     const std::string value = attr(tag, "val");
     return value != "0" && value != "false" && value != "off";
 }
-struct Style { int heading = 0; int bold = -1, italic = -1; int size = 0; std::string parent; };
+struct Style {
+    int heading = 0;
+    int bold = -1, italic = -1;
+    int size = 0;
+    std::string parent;
+    const char *alignment = nullptr;
+};
 using Styles = std::unordered_map<std::string, Style>;
 constexpr char DEFAULT_RUN_STYLE[] = "<docDefaults>";
 constexpr char DEFAULT_PARAGRAPH_STYLE[] = "<defaultParagraph>";
@@ -180,12 +186,23 @@ int font_size(const Tag &tag)
     return end != value.c_str() && *end == '\0' && size > 0 && size <= 3276 ? size : 0;
 }
 
+const char *paragraph_alignment(const Tag &tag)
+{
+    const auto value = attr(tag, "val");
+    if (value == "left" || value == "start") return "left";
+    if (value == "center") return "center";
+    if (value == "right" || value == "end") return "right";
+    if (value == "both" || value == "distribute") return "justify";
+    return nullptr;
+}
+
 Styles read_styles(EpubZip &zip, const std::string &part)
 {
     Styles styles; std::string xml;
     if (part.empty() || !read_xml(zip, part, &xml, 1024 * 1024)) return styles;
     size_t pos = 0; Tag tag; std::string id;
     bool in_default_run = false;
+    bool in_default_paragraph = false;
     while (next_tag(xml, &pos, &tag)) {
         if (tag.name == "style") {
             id = tag.end ? "" : attr(tag, "styleId");
@@ -196,7 +213,10 @@ Styles read_styles(EpubZip &zip, const std::string &part)
             continue;
         }
         if (tag.name == "rPrDefault") in_default_run = !tag.end && !tag.empty;
+        if (tag.name == "pPrDefault") in_default_paragraph = !tag.end && !tag.empty;
         if (tag.name == "sz" && !tag.end && in_default_run) styles[DEFAULT_RUN_STYLE].size = font_size(tag);
+        if (tag.name == "jc" && !tag.end && in_default_paragraph)
+            styles[DEFAULT_RUN_STYLE].alignment = paragraph_alignment(tag);
         if (id.empty() || tag.end) continue;
         auto &style = styles[id];
         if (tag.name == "outlineLvl") {
@@ -207,6 +227,7 @@ Styles read_styles(EpubZip &zip, const std::string &part)
         if (tag.name == "b") style.bold = enabled(tag);
         if (tag.name == "i") style.italic = enabled(tag);
         if (tag.name == "sz") style.size = font_size(tag);
+        if (tag.name == "jc") style.alignment = paragraph_alignment(tag);
         if (tag.name == "name") {
             const std::string name = attr(tag, "val");
             if (name.size() == 9 && name.compare(0, 8, "heading ") == 0 && name[8] >= '1' && name[8] <= '6')
@@ -232,6 +253,7 @@ Style style_for(const Styles &styles, const std::string &id, int depth = 0)
     if (it->second.bold >= 0) result.bold = it->second.bold;
     if (it->second.italic >= 0) result.italic = it->second.italic;
     if (it->second.size > 0) result.size = it->second.size;
+    if (it->second.alignment) result.alignment = it->second.alignment;
     return result;
 }
 struct Paragraph { std::string html, title; int heading = 0; };
@@ -240,13 +262,17 @@ bool paragraphs(const std::string &xml, const Relationships &rels, const Styles 
                 const std::string &notes_href, std::vector<Paragraph> *out)
 {
     size_t pos = 0; Tag tag;
-    bool in_p = false, in_text = false, in_run = false, numbered = false;
+    bool in_p = false, in_text = false, in_run = false, numbered = false, in_properties = false;
     int skip = 0, heading = 0, bold = -1, italic = -1, size = 0;
     const Style normal = style_for(styles, "Normal");
-    const int default_size = style_for(styles, DEFAULT_RUN_STYLE).size;
-    const int default_paragraph_size = style_for(styles, DEFAULT_PARAGRAPH_STYLE).size;
-    const int base_size = default_paragraph_size > 0 ? default_paragraph_size :
-                          normal.size > 0 ? normal.size : (default_size > 0 ? default_size : 22);
+    const Style defaults = style_for(styles, DEFAULT_RUN_STYLE);
+    const Style default_paragraph = style_for(styles, DEFAULT_PARAGRAPH_STYLE);
+    const int base_size = default_paragraph.size > 0 ? default_paragraph.size :
+                          normal.size > 0 ? normal.size : (defaults.size > 0 ? defaults.size : 22);
+    const char *default_alignment = styles.count(DEFAULT_PARAGRAPH_STYLE)
+        ? default_paragraph.alignment : normal.alignment;
+    if (!default_alignment) default_alignment = defaults.alignment;
+    const char *direct_alignment = nullptr;
     Style paragraph_style, run_style;
     std::string body;
     int64_t last_yield = esp_timer_get_time();
@@ -256,7 +282,11 @@ bool paragraphs(const std::string &xml, const Relationships &rels, const Styles 
         if (body.empty()) return;
         if (numbered) body.insert(0, "&#8226; ");
         const std::string name = heading ? "h" + std::to_string(heading) : "p";
-        std::string html = "<" + name + ">" + body + "</" + name + ">";
+        const char *alignment = direct_alignment ? direct_alignment :
+            paragraph_style.alignment ? paragraph_style.alignment : default_alignment;
+        std::string html = "<" + name;
+        if (alignment) html += std::string(" align=\"") + alignment + "\"";
+        html += ">" + body + "</" + name + ">";
         out->push_back({std::move(html), heading ? text_of(body) : "", heading});
         total += out->back().html.size();
         body.clear();
@@ -298,15 +328,19 @@ bool paragraphs(const std::string &xml, const Relationships &rels, const Styles 
             else {
                 flush(); in_p = !tag.empty; in_text = false; in_run = false;
                 numbered = false; heading = 0; paragraph_style = {}; body.clear();
+                direct_alignment = nullptr;
+                in_properties = false;
             }
         } else if (in_p) {
             if (tag.name == "t") in_text = !tag.end && !tag.empty;
+            else if (tag.name == "pPr") in_properties = !tag.end && !tag.empty;
             else if (tag.name == "r") {
                 in_run = !tag.end && !tag.empty; bold = italic = -1; size = 0; run_style = {};
             } else if (!tag.end) {
                 if (tag.name == "pStyle") {
                     paragraph_style = style_for(styles, attr(tag, "val")); heading = paragraph_style.heading;
-                } else if (tag.name == "rStyle") run_style = style_for(styles, attr(tag, "val"));
+                } else if (tag.name == "jc" && in_properties) direct_alignment = paragraph_alignment(tag);
+                else if (tag.name == "rStyle") run_style = style_for(styles, attr(tag, "val"));
                 else if (tag.name == "outlineLvl") {
                     int level = std::atoi(attr(tag, "val").c_str());
                     heading = level >= 0 && level < 6 ? level + 1 : 0;

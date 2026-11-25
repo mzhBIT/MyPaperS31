@@ -23,6 +23,7 @@
 #include FT_FREETYPE_H
 #include FT_ADVANCES_H
 #include FT_OUTLINE_H
+#include FT_SIZES_H
 #include FT_SYSTEM_H
 #include FT_MODULE_H
 
@@ -2137,12 +2138,103 @@ std::vector<text_layout::Line> TextRenderer::layoutUtf8VerticalParagraphStyled(
     return text_layout::break_utf8(text, options, measure, &context, nullptr, measure_at);
 }
 
+struct TextRenderer::TemporaryOutlineSize {
+    explicit TemporaryOutlineSize(void *font_face) : face(static_cast<FT_Face>(font_face)) {}
+    ~TemporaryOutlineSize()
+    {
+        if (size) FT_Done_Size(size);
+    }
+
+    bool draw(lgfx::LGFXBase &gfx, uint32_t codepoint, int pixels, int x,
+              int baseline_y, uint16_t color, uint8_t flags)
+    {
+        if (!face || !FT_IS_SCALABLE(face)) return false;
+        if (!size && FT_New_Size(face, &size) != 0) {
+            face = nullptr;
+            return false;
+        }
+
+        // Keep measurement and the cached body glyphs at the original size.
+        FT_Size body_size = face->size;
+        if (FT_Activate_Size(size) != 0) return false;
+        FT_Error error = 0;
+        if (pixel_size != pixels) {
+            error = FT_Set_Pixel_Sizes(face, 0, pixels);
+            if (error == 0) pixel_size = pixels;
+        }
+        if (error == 0) {
+            error = FT_Load_Char(face, codepoint,
+                                 FT_LOAD_NO_BITMAP | FT_LOAD_NO_HINTING | FT_LOAD_NO_AUTOHINT);
+        }
+        FT_Activate_Size(body_size);
+        if (error != 0 || face->glyph->format != FT_GLYPH_FORMAT_OUTLINE) return false;
+
+        auto &outline = face->glyph->outline;
+        if (outline.n_points == 0) return true;
+        if (inline_style::has(flags, inline_style::Bold)) {
+            if (FT_Outline_EmboldenXY(&outline, 64, 0) != 0) return false;
+        }
+        if (inline_style::has(flags, inline_style::Italic)) {
+            const FT_Matrix slant{0x10000L, 0x1a00L, 0, 0x10000L};
+            FT_Outline_Transform(&outline, &slant);
+        }
+
+        struct SpanTarget {
+            lgfx::LGFXBase &gfx;
+            int x;
+            int baseline_y;
+            uint16_t color;
+        } target{gfx, x, baseline_y, color};
+
+        // FreeType emits scanlines directly. No large-size bitmap enters the glyph pool.
+        FT_Raster_Params params{};
+        params.flags = FT_RASTER_FLAG_AA | FT_RASTER_FLAG_DIRECT | FT_RASTER_FLAG_CLIP;
+        params.clip_box = {-x, baseline_y - gfx.height(), gfx.width() - x, baseline_y};
+        params.user = &target;
+        params.gray_spans = [](int y, int count, const FT_Span *spans, void *user) {
+            auto &dst = *static_cast<SpanTarget *>(user);
+            for (int i = 0; i < count; ++i) {
+                const FT_Span &span = spans[i];
+                const int level = (span.coverage + 8) / 17;
+                if (level == 0) continue;
+                const int gray = dst.color == TFT_WHITE ? level * 17 : 255 - level * 17;
+                const uint16_t ink = (dst.color == TFT_BLACK || dst.color == TFT_WHITE)
+                    ? gray565(gray) : dst.color;
+                dst.gfx.writeFastHLine(dst.x + span.x, dst.baseline_y - 1 - y, span.len, ink);
+            }
+        };
+        return FT_Outline_Render(face->glyph->library, &outline, &params) == 0;
+    }
+
+    FT_Face face = nullptr;
+    FT_Size size = nullptr;
+    int pixel_size = 0;
+};
+
 void TextRenderer::drawStyledUtf8VerticalColumn(
     lgfx::LGFXBase &gfx, const std::string &text,
     const std::vector<inline_style::Span> &styles,
-    int x, int y, int column_width, uint16_t color)
+    int x, int y, int column_width, uint16_t color, int justify_height)
 {
     const int cell = verticalCellAdvance();
+    int gap_extra = 0;
+    int gap_remainder = 0;
+    int gaps_left = 0;
+    if (justify_height > 0) {
+        int glyph_count = 0;
+        for (size_t pos = 0; pos < text.size();) {
+            uint32_t cp = 0;
+            pos = nextUtf8(text, pos, cp);
+            if (cp != '\r' && cp != '\n') ++glyph_count;
+        }
+        if (glyph_count > 1) {
+            gaps_left = glyph_count - 1;
+            const int spare = std::max(0, justify_height - measureUtf8VerticalStyled(text, styles));
+            gap_extra = spare / gaps_left;
+            gap_remainder = spare % gaps_left;
+        }
+    }
+    TemporaryOutlineSize outline_size(_face);
     size_t style_index = 0;
     for (size_t pos = 0; pos < text.size();) {
         const size_t byte_pos = pos;
@@ -2174,7 +2266,9 @@ void TextRenderer::drawStyledUtf8VerticalColumn(
             case 0x2026: vertical_cp = 0xfe19; break; // …
             default: break;
             }
-            const Glyph *glyph = vertical_cp ? getGlyph(vertical_cp) : nullptr;
+            const bool use_vertical_form = vertical_cp &&
+                (scale <= 100 || !_ft_ready || hasGlyph(vertical_cp));
+            const Glyph *glyph = use_vertical_form ? getGlyph(vertical_cp) : nullptr;
             if (!glyph) glyph = getGlyph(cp);
             if (glyph) {
                 const int advance = std::max(1, (glyph->advance * scale + 50) / 100);
@@ -2182,7 +2276,7 @@ void TextRenderer::drawStyledUtf8VerticalColumn(
                 if (scale != 100) {
                     drawGlyphScaled(gfx, *glyph, glyph_x,
                                     y + inline_style::scaled(baseline(), scale),
-                                    scale, color, style.flags);
+                                    scale, color, style.flags, &outline_size);
                 } else {
                     drawGlyphStyled(gfx, *glyph, glyph_x, y + baseline(), color, style.flags);
                 }
@@ -2191,6 +2285,11 @@ void TextRenderer::drawStyledUtf8VerticalColumn(
             }
         }
         y += extent;
+        if (gaps_left > 0) {
+            y += gap_extra + (gap_remainder > 0 ? 1 : 0);
+            if (gap_remainder > 0) --gap_remainder;
+            --gaps_left;
+        }
     }
 }
 
@@ -2265,10 +2364,13 @@ void TextRenderer::drawGlyph(lgfx::LGFXBase &gfx, const Glyph &glyph,
 
 void TextRenderer::drawGlyphScaled(lgfx::LGFXBase &gfx, const Glyph &glyph,
                                     int x, int baseline_y, int scale_percent, uint16_t color,
-                                    uint8_t flags)
+                                    uint8_t flags, TemporaryOutlineSize *outline_size)
 {
     if (glyph.data_size == 0 || glyph.width <= 0 || glyph.height <= 0 ||
         glyph.data_offset + glyph.data_size > _glyph_pool_used) return;
+    if (scale_percent > 100 && outline_size &&
+        outline_size->draw(gfx, glyph.codepoint, inline_style::scaled(_style.font_size, scale_percent),
+                           x, baseline_y, color, flags)) return;
     const int dst_w = std::max(1, (glyph.width * scale_percent + 50) / 100);
     const int dst_h = std::max(1, (glyph.height * scale_percent + 50) / 100);
     const int gx = x + inline_style::scaled(glyph.bitmap_left, scale_percent);
@@ -2503,6 +2605,7 @@ void TextRenderer::drawStyledUtf8Line(lgfx::LGFXBase &gfx, const std::string &te
     int glyph_index = 0;
     uint32_t previous_cp = 0;
     size_t style_index = 0;
+    TemporaryOutlineSize outline_size(_face);
     for (size_t pos = 0; pos < text.size();) {
         const size_t byte_pos = pos;
         uint32_t cp = 0;
@@ -2528,7 +2631,7 @@ void TextRenderer::drawStyledUtf8Line(lgfx::LGFXBase &gfx, const std::string &te
         }
 
         if (scale == 100) drawGlyphStyled(gfx, *glyph, cursor, baseline_y, color, style.flags);
-        else drawGlyphScaled(gfx, *glyph, cursor, baseline_y, scale, color, style.flags);
+        else drawGlyphScaled(gfx, *glyph, cursor, baseline_y, scale, color, style.flags, &outline_size);
         cursor += inline_style::scaled(glyph->advance, scale);
         if (glyph_index + 1 < glyph_count) {
             cursor += _style.letter_spacing + gap_extra[(size_t)glyph_index];

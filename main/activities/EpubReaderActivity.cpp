@@ -2098,6 +2098,7 @@ private:
             output.blank_after = block.blank_after;
             output.heading = block.heading;
             output.heading_level = block.heading_level;
+            output.alignment = block.alignment;
             output.page_break_before = block.page_break_before;
             output.allow_first_line_indent = !block.heading &&
                                              block.type == EpubContentBlockType::Text;
@@ -2988,6 +2989,15 @@ private:
         }
     }
 
+    static int text_axis_offset(TextRenderer &renderer, const PageItem &item)
+    {
+        if (!item.position_aligned()) return item.x_offset;
+        const int extent = item.vertical
+            ? renderer.measureUtf8VerticalStyled(item.text, item.styles)
+            : renderer.measureUtf8Styled(item.text, item.styles);
+        return item.aligned_offset(extent);
+    }
+
     bool footnote_at(int touch_x, int touch_y,
                      document_layout::PageItem::FootnoteRef *result)
     {
@@ -2999,12 +3009,7 @@ private:
             for (const auto &item : page) {
                 if (item.type == PageItemType::Text) {
                     const int column_width = std::max(1, item.height);
-                    int top = content_y() + item.x_offset;
-                    if (item.centered) {
-                        top = content_y() + std::max(0,
-                            (content_height() - renderer.measureUtf8VerticalStyled(
-                                item.text, item.styles)) / 2);
-                    }
+                    const int top = content_y() + text_axis_offset(renderer, item);
                     for (const auto &ref : item.footnotes) {
                         if (is_annotation_ref(ref) &&
                             !weread::store::public_comments_enabled()) continue;
@@ -3031,11 +3036,7 @@ private:
         int y = content_y();
         for (const auto &item : _pages[static_cast<size_t>(_page_index)]) {
             if (item.type == PageItemType::Text && !item.footnotes.empty()) {
-                int text_x = content_x() + item.x_offset;
-                if (item.centered) {
-                    text_x = content_x() + std::max(0, (content_width() -
-                        renderer.measureUtf8Styled(item.text, item.styles)) / 2);
-                }
+                const int text_x = content_x() + text_axis_offset(renderer, item);
                 for (const auto &ref : item.footnotes) {
                     if (is_annotation_ref(ref) &&
                         !weread::store::public_comments_enabled()) continue;
@@ -3295,14 +3296,11 @@ private:
                     ? std::max(1, inline_style::scaled(cell,
                         inline_style::max_font_scale(item.styles, 0, item.text.size())))
                     : column_width;
-                int y = content_y() + item.x_offset;
-                if (item.centered) {
-                    y = content_y() + std::max(0,
-                        (content_height() - renderer.measureUtf8VerticalStyled(
-                            item.text, item.styles)) / 2);
-                }
+                const int y = content_y() + text_axis_offset(renderer, item);
+                const int justify_height = item.justify && item.alignment == ParagraphAlignment::Justify
+                    ? item.width : 0;
                 renderer.drawStyledUtf8VerticalColumn(gfx, item.text, item.styles,
-                                                      x, y, base_width, TFT_BLACK);
+                                                      x, y, base_width, TFT_BLACK, justify_height);
                 for (const auto &ref : item.footnotes) {
                     if (is_annotation_ref(ref) &&
                         !weread::store::public_comments_enabled()) continue;
@@ -3422,11 +3420,7 @@ private:
             if (item.type == PageItemType::Text) {
                 const int64_t item_begin = esp_timer_get_time();
                 if (!item.text.empty()) {
-                    int text_x = x + item.x_offset;
-                    if (item.centered) {
-                        int text_width = renderer.measureUtf8Styled(item.text, item.styles);
-                        text_x = x + std::max(0, (content_width() - text_width) / 2);
-                    }
+                    const int text_x = x + text_axis_offset(renderer, item);
                     reader_text_renderer().drawStyledUtf8Line(
                         gfx, item.text, item.styles, text_x, y, TFT_BLACK,
                         item.justify ? item.width : 0);

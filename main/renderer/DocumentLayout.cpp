@@ -59,7 +59,7 @@ struct Builder {
         }
     }
 
-    void add_text(const text_layout::Line &line, const Block &block, bool centered)
+    void add_text(const text_layout::Line &line, const Block &block, ParagraphAlignment alignment)
     {
         if (line.text.empty()) {
             if (line.hard_break) add_space(block.content_position + line.byte_start,
@@ -93,10 +93,11 @@ struct Builder {
         } else {
             item.content_position = block.content_position + line.byte_start;
         }
-        item.justify = line.justify && !centered;
+        item.justify = line.justify &&
+            (alignment == ParagraphAlignment::Automatic || alignment == ParagraphAlignment::Justify);
         item.x_offset = line.x_offset;
         item.width = std::max(1, options.content_width - line.x_offset);
-        item.centered = centered;
+        item.alignment = alignment;
         // TextLayout removes soft hyphens and can append a visible hyphen at
         // a break. Translate source offsets to the resulting display bytes.
         std::vector<size_t> soft_hyphens;
@@ -152,7 +153,7 @@ struct Builder {
         line.text = options.image_fallback_text;
         Block fallback;
         fallback.content_position = position;
-        add_text(line, fallback, false);
+        add_text(line, fallback, ParagraphAlignment::Automatic);
     }
 
     void add_rule(uint64_t position)
@@ -370,7 +371,12 @@ Pages paginate(const std::vector<Block> &blocks, const Options &options)
             builder.add_space(block.content_position, gap_height);
             builder.add_image(block);
         } else {
-            int indent = block.allow_first_line_indent
+            auto alignment = block.alignment;
+            if (alignment == ParagraphAlignment::Automatic && (block.heading || block.heading_level > 0))
+                alignment = ParagraphAlignment::Center;
+            const bool positioned = alignment == ParagraphAlignment::Center ||
+                                    alignment == ParagraphAlignment::End;
+            int indent = block.allow_first_line_indent && !positioned
                        ? std::max(0, options.first_line_indent)
                        : 0;
             std::vector<text_layout::Line> wrapped =
@@ -427,8 +433,7 @@ Pages paginate(const std::vector<Block> &blocks, const Options &options)
 
                 for (int n = 0; n < take && line_index < wrapped.size();
                      ++n, ++line_index) {
-                    builder.add_text(wrapped[line_index], block,
-                                     block.heading || block.heading_level > 0);
+                    builder.add_text(wrapped[line_index], block, alignment);
                 }
                 if (line_index < wrapped.size()) builder.finish_page();
             }

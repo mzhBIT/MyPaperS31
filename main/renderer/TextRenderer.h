@@ -79,7 +79,8 @@ public:
                                   size_t byte_end = std::string::npos) const;
     void drawStyledUtf8VerticalColumn(lgfx::LGFXBase &gfx, const std::string &text,
                                       const std::vector<inline_style::Span> &styles,
-                                      int x, int y, int column_width, uint16_t color);
+                                      int x, int y, int column_width, uint16_t color,
+                                      int justify_height = 0);
     bool drawUtf8VerticalRuby(lgfx::LGFXBase &gfx, const std::string &text,
                               int x, int y, int base_height, int lane_width,
                               uint16_t color);
@@ -107,6 +108,7 @@ private:
         size_t data_size = 0;
         uint32_t last_used = 0;
     };
+    struct TemporaryOutlineSize;
     struct Advance {
         uint32_t codepoint = 0;
         int advance = 0;
@@ -167,7 +169,8 @@ private:
                    uint16_t color);
     void drawGlyphScaled(lgfx::LGFXBase &gfx, const Glyph &glyph,
                          int x, int baseline_y, int scale_percent, uint16_t color,
-                         uint8_t flags = inline_style::None);
+                         uint8_t flags = inline_style::None,
+                         TemporaryOutlineSize *outline_size = nullptr);
     void drawGlyphRuns(lgfx::LGFXBase &gfx, const Glyph &glyph, int x, int baseline_y, uint16_t color);
     void drawGlyphStyled(lgfx::LGFXBase &gfx, const Glyph &glyph, int x, int baseline_y,
                          uint16_t color, uint8_t style_flags);

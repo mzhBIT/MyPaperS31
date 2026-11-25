@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include "renderer/InlineStyle.h"
+#include "renderer/ParagraphAlignment.h"
 
 struct EpubFootnoteRef {
     enum class Kind : uint8_t { LinkedFootnote, RubyText, InlineSup, WereadComment };
@@ -51,6 +52,7 @@ struct EpubContentBlock {
     size_t source_text_bytes = 0;
     std::vector<EpubSourcePoint> source_points;
     std::vector<inline_style::Span> styles;
+    ParagraphAlignment alignment = ParagraphAlignment::Automatic;
 };
 
 bool epub_parse_xhtml_text_blocks(const std::string &xhtml, std::vector<EpubTextBlock> *blocks);
@@ -59,7 +61,7 @@ bool epub_parse_xhtml_blocks(const std::string &xhtml, const std::string &item_h
                              std::vector<EpubContentBlock> *blocks,
                              bool inline_sup_annotations = false,
                              bool preserve_inline_styles = false,
-                             bool preserve_font_sizes = false,
+                             bool preserve_book_styles = false,
                              EpubStylesheetReader read_stylesheet = nullptr,
                              const char *fallback_stylesheet = nullptr);
 bool epub_resolve_footnote(const std::string &xhtml, const std::string &item_href,
