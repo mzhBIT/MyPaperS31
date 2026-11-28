@@ -1,0 +1,29 @@
+services:
+  reader:
+    build:
+      context: .
+      pull: false
+      args:
+        READER_BASE_IMAGE: ${XHS_READER_BASE_IMAGE:-joeanamier/xhs-downloader:2.8}
+    init: true
+    restart: unless-stopped
+    shm_size: "256mb"
+    environment:
+      XHS_MODE: live
+      XHS_BIND: 0.0.0.0
+      XHS_PORT: "8091"
+      XHS_DATA_DIR: /data
+      XHS_DOWNLOADER_URL: ${XHS_DOWNLOADER_URL:-http://host.docker.internal:15557}
+      XHS_DOWNLOADER_TOKEN: ${XHS_DOWNLOADER_TOKEN:-}
+      XHS_API_TOKEN: ${XHS_API_TOKEN:?Set XHS_API_TOKEN in .env}
+      XHS_VNC_PASSWORD: ${XHS_VNC_PASSWORD:?Set XHS_VNC_PASSWORD in .env}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    ports:
+      - "${XHS_API_BIND_ADDRESS:-127.0.0.1}:8091:8091"
+      - "${XHS_VNC_BIND_ADDRESS:-127.0.0.1}:6080:6080"
+    volumes:
+      - reader-data:/data
+
+volumes:
+  reader-data:

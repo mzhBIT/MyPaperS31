@@ -25,6 +25,7 @@ enum class HomeIconId {
     Calculator,
     Emulator,
     Camera,
+    Xiaohongshu,
     Count,
 };
 

@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>小红书阅读服务</title>
+  <link rel="stylesheet" href="/ui/style.css">
+  <script src="/ui/app.js" defer></script>
+</head>
+<body>
+  <header class="masthead">
+    <div>
+      <h1>小红书阅读服务</h1>
+      <p id="mode">正在连接服务</p>
+    </div>
+    <form id="access" hidden>
+      <label for="token">设备令牌</label>
+      <div class="access-controls">
+        <input id="token" type="password" autocomplete="off" spellcheck="false">
+        <button class="secondary" type="submit">保存</button>
+      </div>
+    </form>
+  </header>
+  <main>
+    <div class="toolbar">
+      <button id="open" disabled>打开推荐</button>
+      <button class="secondary" id="more" disabled>加载更多</button>
+      <button class="secondary" id="refresh" disabled>刷新</button>
+      <p id="status" role="status" aria-live="polite"></p>
+    </div>
+    <div class="columns">
+      <section aria-labelledby="feed-heading">
+        <h2 id="feed-heading">推荐列表</h2>
+        <ul id="feed" class="feed"></ul>
+      </section>
+      <article aria-labelledby="title" id="article">
+        <h2 id="title">笔记详情</h2>
+        <p id="author" class="byline"></p>
+        <ul id="counts" class="counts" hidden>
+          <li>评论 <span data-count="comments"></span></li>
+          <li>收藏 <span data-count="favorites"></span></li>
+          <li>点赞 <span data-count="likes"></span></li>
+          <li>分享 <span data-count="shares"></span></li>
+        </ul>
+        <p id="body" class="body">从列表选择一篇笔记，查看正文和图片。</p>
+        <div id="gallery" class="gallery"></div>
+        <p id="meta" class="byline" hidden></p>
+      </article>
+    </div>
+  </main>
+</body>
+</html>

@@ -18,6 +18,9 @@
 #include "activities/TransferActivity.h"
 #include "activities/WifiTransferActivity.h"
 #include "activities/WereadActivity.h"
+#if CONFIG_IDF_TARGET_ESP32S31
+#include "activities/XhsReaderActivity.h"
+#endif
 #include "recent_books.h"
 #include "renderer/CoverThumbnail.h"
 #include "renderer/P4JpegDecoder.h"
@@ -113,6 +116,7 @@ static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
         {ui_locale::TextId::Calculator, go_calculator},
 #if CONFIG_IDF_TARGET_ESP32S31
         {ui_locale::TextId::Emulator, go_emulator},
+        {ui_locale::TextId::Xiaohongshu, launch_xhs_reader},
 #if CONFIG_MYPAPER_S31_CAMERA
         {ui_locale::TextId::Camera, go_camera},
 #else
@@ -126,7 +130,7 @@ static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
         {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
         {ui_locale::TextId::Count, nullptr},
 #if CONFIG_IDF_TARGET_ESP32S31
-        {ui_locale::TextId::Count, nullptr}, {ui_locale::TextId::Count, nullptr},
+        {ui_locale::TextId::Count, nullptr},
 #endif
     },
 };
@@ -163,6 +167,7 @@ static HomeIconId g_icons[HOME_PAGE_CNT][MENU_CNT] = {
         HomeIconId::Calculator,
 #if CONFIG_IDF_TARGET_ESP32S31
         HomeIconId::Emulator,
+        HomeIconId::Xiaohongshu,
 #if CONFIG_MYPAPER_S31_CAMERA
         HomeIconId::Camera,
 #else
@@ -175,7 +180,7 @@ static HomeIconId g_icons[HOME_PAGE_CNT][MENU_CNT] = {
         HomeIconId::Count, HomeIconId::Count, HomeIconId::Count, HomeIconId::Count,
         HomeIconId::Count,
 #if CONFIG_IDF_TARGET_ESP32S31
-        HomeIconId::Count, HomeIconId::Count,
+        HomeIconId::Count,
 #endif
     },
 };

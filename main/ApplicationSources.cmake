@@ -119,3 +119,9 @@ set(srcs
     "parser/docx_parser.cpp"
     "parser/comic_zip.cpp"
     "parser/reflow_book.cpp")
+
+if(CONFIG_IDF_TARGET_ESP32S31)
+    list(APPEND srcs
+        "activities/XhsReaderActivity.cpp"
+        "xhs/XhsReader.cpp")
+endif()

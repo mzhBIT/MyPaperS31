@@ -8,6 +8,9 @@
 #include "activities/ActivityManager.h"
 #include "activities/EpdDiagnosticActivity.h"
 #include "activities/RssReaderActivity.h"
+#if CONFIG_IDF_TARGET_ESP32S31
+#include "activities/XhsReaderActivity.h"
+#endif
 #include "activities/TextInputActivity.h"
 #include "deepseek/DeepSeekConfig.h"
 #include "deepseek/DeepSeekClient.h"
@@ -1713,7 +1716,7 @@ public:
             return true;
         }
         if (event.type != TouchEventType::Tap || event.y < ROW_Y ||
-            event.y >= ROW_Y + ROW_H * 2) return false;
+            event.y >= ROW_Y + ROW_H * ROW_COUNT) return false;
         _focus = (event.y - ROW_Y) / ROW_H;
         open_focused();
         return true;
@@ -1725,7 +1728,7 @@ public:
             return true;
         }
         if (key == APP_KEY_UP || key == APP_KEY_DOWN) {
-            _focus = (_focus + 1) % 2;
+            _focus = (_focus + ROW_COUNT + (key == APP_KEY_DOWN ? 1 : -1)) % ROW_COUNT;
             draw(false);
             return true;
         }
@@ -1738,13 +1741,21 @@ public:
 private:
     static constexpr int ROW_Y = HEADER_H;
     static constexpr int ROW_H = 210;
+#if CONFIG_IDF_TARGET_ESP32S31
+    static constexpr int ROW_COUNT = 3;
+#else
+    static constexpr int ROW_COUNT = 2;
+#endif
     int _focus = 0;
     bool _shown = false;
 
     void open_focused()
     {
         if (_focus == 0) ActivityManager::instance().push(new DeepSeekSettingsActivity());
-        else ActivityManager::instance().push(new MapSettingsActivity());
+        else if (_focus == 1) ActivityManager::instance().push(new MapSettingsActivity());
+#if CONFIG_IDF_TARGET_ESP32S31
+        else launch_xhs_settings();
+#endif
     }
 
     void draw(bool quality)
@@ -1756,19 +1767,27 @@ private:
         const bool deepseek_configured = deepseek_config_load(&deepseek);
         AmapConfig amap;
         const bool map_configured = amap_config_load(&amap);
-        const char *titles[] = {text(TextId::DeepSeek), text(TextId::Map)};
+        const char *titles[] = {
+            text(TextId::DeepSeek), text(TextId::Map),
+#if CONFIG_IDF_TARGET_ESP32S31
+            text(TextId::Xiaohongshu),
+#endif
+        };
         const std::string details[] = {
             deepseek_configured
                 ? std::string(text(TextId::ApiKeyConfigured)) + ", " +
                       deepseek_model_label(deepseek.default_model)
                 : text(TextId::ApiKeyNotConfigured),
             text(map_configured ? TextId::ApiKeyConfigured : TextId::ApiKeyNotConfigured),
+#if CONFIG_IDF_TARGET_ESP32S31
+            text(xhs_reader_configured() ? TextId::ApiKeyConfigured : TextId::ApiKeyNotConfigured),
+#endif
         };
         M5.Display.startWrite();
         M5.Display.setEpdMode(quality ? epd_mode_t::epd_quality : epd_mode_t::epd_fast);
         M5.Display.fillScreen(TFT_WHITE);
         draw_header(text(TextId::AppSettings));
-        for (int i = 0; i < 2; ++i) {
+        for (int i = 0; i < ROW_COUNT; ++i) {
             const int top = ROW_Y + i * ROW_H;
             M5.Display.drawFastHLine(PAD, top + ROW_H - 1, width - 2 * PAD, TFT_BLACK);
             list_focus::draw(M5.Display, PAD, top, ROW_H, i == _focus);
@@ -2090,8 +2109,11 @@ private:
                   auto_standby_label(standby::auto_standby_minutes()));
 #endif
         draw_item(SETTINGS_FRONTLIGHT, text(TextId::Frontlight), std::to_string(frontlight_get_percent()) + "%");
-        draw_item(SETTINGS_APPS, text(TextId::AppSettings),
-                  std::string(text(TextId::DeepSeek)) + " / " + text(TextId::Map));
+        std::string apps = std::string(text(TextId::DeepSeek)) + " / " + text(TextId::Map);
+#if CONFIG_IDF_TARGET_ESP32S31
+        apps += std::string(" / ") + text(TextId::Xiaohongshu);
+#endif
+        draw_item(SETTINGS_APPS, text(TextId::AppSettings), apps);
         draw_item(SETTINGS_EPD_DIAGNOSTICS, text(TextId::EpdDiagnostics), text(TextId::EpdDiagnosticsDetail));
         RssCacheInfo rss_cache = rss_cache_info();
         char rss_detail[64] = {};

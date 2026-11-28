@@ -45,13 +45,13 @@ esp_err_t verify_credentials_erased()
 {
     static constexpr const char *keys[][2] = {
         {"wifi_cfg", "ssid"}, {"wifi_cfg", "password"},
-        {"ds_chat", "api_key"}, {"amap", "api_key"},
+        {"ds_chat", "api_key"}, {"amap", "api_key"}, {"xhs_reader", "token"},
     };
     for (const auto &entry : keys) {
         const esp_err_t result = verify_key_erased(entry[0], entry[1]);
         if (result != ESP_OK) return result;
     }
-    ESP_LOGI(TAG, "reset verified: saved Wi-Fi credentials and DeepSeek/AMap API keys absent");
+    ESP_LOGI(TAG, "reset verified: saved Wi-Fi credentials and app tokens absent");
     return ESP_OK;
 }
 }
@@ -63,7 +63,7 @@ esp_err_t settings_restore_defaults()
         "wifi_cfg", "cellular_s31", "frontlight", "frontlight_s31", "home_ui", "time_basis", "ds_chat", "amap",
         "reader_style", "rss_reader", "reader_bg", "rss_reader_bg", "standby_bg",
         "reader_cover", "rss_reader_cover", "script_mode", "writing_mode",
-        "audio_out", "text_input", "weread_pref", "weread_native", "system_ui", "system_font", "bookshelf_ui"
+        "audio_out", "text_input", "weread_pref", "weread_native", "system_ui", "system_font", "bookshelf_ui", "xhs_reader"
     };
     const char *files[] = {app_paths::reader_style_file(), app_paths::reader_font_file()};
     // Remove old SD fallbacks too, so they cannot resurrect prior preferences.
