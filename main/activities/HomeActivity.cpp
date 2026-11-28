@@ -11,7 +11,7 @@
 #include "activities/CalculatorActivity.h"
 #include "activities/EmulatorActivity.h"
 #include "activities/CameraActivity.h"
-#include "activities/PlaceholderActivity.h"
+#include "activities/ClockActivity.h"
 #include "activities/RadioActivity.h"
 #include "activities/RssReaderActivity.h"
 #include "activities/SettingActivity.h"
@@ -76,7 +76,6 @@ static void go_radio()   { launch_radio(); }
 static void go_rss()     { launch_rss_reader(); }
 static void go_transfer(){ launch_transfer(); }
 static void go_settings(){ launch_settings(); }
-static void go_clock()   { ActivityManager::instance().push(new PlaceholderActivity(ui_locale::text(ui_locale::TextId::Clock))); }
 static void go_music()   { launch_music(); }
 static void go_deepseek(){ launch_deepseek(); }
 static void go_weread()  { launch_weread(); }
@@ -95,7 +94,7 @@ static void go_camera() { launch_camera(); }
 
 static MenuItem g_menu[HOME_PAGE_CNT][MENU_CNT] = {
     {
-        {ui_locale::TextId::Clock, go_clock},
+        {ui_locale::TextId::Clock, launch_clock},
         {ui_locale::TextId::Transfer, go_transfer},
         {ui_locale::TextId::BingWallpaper, launch_bing_wallpaper},
         {ui_locale::TextId::Files, go_browse},

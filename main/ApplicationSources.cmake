@@ -95,6 +95,7 @@ set(srcs
     "activities/MapRouteActivity.cpp"
     "activities/MapSearchActivity.cpp"
     "activities/CalculatorActivity.cpp"
+    "activities/ClockActivity.cpp"
     "activities/SmsActivity.cpp"
     "activities/PhoneActivity.cpp"
     "activities/PhoneRingtonePickerActivity.cpp"

@@ -850,6 +850,17 @@ constexpr Translation kText[] = {
     {"Service busy. Try again shortly", "服务繁忙，请稍后重试", "服務忙碌，請稍後重試"},
     {"This note is unavailable", "该笔记暂不可用", "此筆記暫無法使用"},
     {"Tap to retry image", "图片加载失败，点按重试", "圖片載入失敗，點按重試"},
+    {"Pomodoro Timer", "番茄时钟", "番茄時鐘"},
+    {"Focus", "专注", "專注"},
+    {"Short Break", "短休息", "短休息"},
+    {"Long Break", "长休息", "長休息"},
+    {"Focus Rounds", "本组专注", "本組專注"},
+    {"Start", "开始", "開始"},
+    {"Pause", "暂停", "暫停"},
+    {"Resume", "继续", "繼續"},
+    {"Reset", "重置", "重設"},
+    {"Focus Complete", "专注结束", "專注結束"},
+    {"Break Complete", "休息结束", "休息結束"},
 };
 static_assert(sizeof(kText) / sizeof(kText[0]) == static_cast<size_t>(TextId::Count));
 

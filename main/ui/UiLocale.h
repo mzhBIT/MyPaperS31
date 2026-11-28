@@ -845,6 +845,17 @@ enum class TextId : uint16_t {
     XhsBusy,
     XhsNoteUnavailable,
     XhsImageFailed,
+    PomodoroClock,
+    PomodoroFocus,
+    PomodoroShortBreak,
+    PomodoroLongBreak,
+    PomodoroRounds,
+    PomodoroStart,
+    PomodoroPause,
+    PomodoroResume,
+    PomodoroReset,
+    PomodoroFocusDone,
+    PomodoroBreakDone,
     Count,
 };
 
